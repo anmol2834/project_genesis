@@ -5,6 +5,7 @@ import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import { motion } from 'framer-motion';
+import NextLink from 'next/link';
 import { FadeUp, StaggerContainer, fadeUp } from './motion';
 import { lightGradients, darkGradients } from '@/theme/palette';
 
@@ -195,6 +196,8 @@ export default function PricingSection() {
 
                   {/* CTA */}
                   <Button
+                    component={NextLink}
+                    href="/sign-in"
                     variant={plan.ctaVariant}
                     fullWidth
                     startIcon={plan.highlight ? <BoltRoundedIcon sx={{ fontSize: '14px !important' }} /> : undefined}
@@ -259,12 +262,7 @@ export default function PricingSection() {
           </Box>
         </StaggerContainer>
 
-        {/* Bottom note */}
-        <FadeUp delay={0.3}>
-          <Typography sx={{ textAlign: 'center', color: 'text.disabled', fontSize: '0.75rem', mt: { xs: 2.5, sm: 3 } }}>
-            All plans include AES-256 encryption, 99.9% uptime SLA, and GDPR compliance.
-          </Typography>
-        </FadeUp>
+
       </Box>
     </Box>
   );

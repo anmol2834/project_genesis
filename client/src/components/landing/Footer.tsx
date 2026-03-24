@@ -2,6 +2,7 @@
 
 import { Box, Typography, useTheme } from '@mui/material';
 import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
+import NextLink from 'next/link';
 import { lightGradients, darkGradients } from '@/theme/palette';
 
 export default function Footer() {
@@ -32,7 +33,11 @@ export default function Footer() {
         }}
       >
         {/* Brand */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, justifyContent: { xs: 'center', sm: 'flex-start' } }}>
+        <Box
+          component={NextLink}
+          href="/"
+          sx={{ display: 'flex', alignItems: 'center', gap: 0.75, justifyContent: { xs: 'center', sm: 'flex-start' }, textDecoration: 'none' }}
+        >
           <Box sx={{ width: 22, height: 22, borderRadius: '6px', background: grad.primary, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
             <BoltRoundedIcon sx={{ color: '#fff', fontSize: 12 }} />
           </Box>

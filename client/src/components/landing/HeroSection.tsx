@@ -7,6 +7,7 @@ import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import AutoAwesomeRoundedIcon from '@mui/icons-material/AutoAwesomeRounded';
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
 import { motion, AnimatePresence } from 'framer-motion';
+import NextLink from 'next/link';
 import { lightGradients, darkGradients } from '@/theme/palette';
 
 const EMAILS = [
@@ -283,13 +284,13 @@ export default function HeroSection() {
               }}
             >
               <Button
+                component={NextLink}
+                href="/sign-in"
                 variant="contained"
                 size="large"
                 endIcon={<ArrowForwardRoundedIcon />}
-                fullWidth={false}
                 sx={{
                   background: grad.primary,
-                  // Full width on xs so it's easy to tap
                   width: { xs: '100%', sm: 'auto' },
                   minHeight: 48,
                   fontSize: { xs: '0.9rem', sm: '1rem' },

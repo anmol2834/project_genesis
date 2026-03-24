@@ -4,6 +4,7 @@ import { Box, Button, Typography, useTheme, alpha } from '@mui/material';
 import ArrowForwardRoundedIcon from '@mui/icons-material/ArrowForwardRounded';
 import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import { motion } from 'framer-motion';
+import NextLink from 'next/link';
 import { FadeUp } from './motion';
 import { lightGradients, darkGradients } from '@/theme/palette';
 
@@ -103,6 +104,8 @@ export default function CTASection() {
               }}
             >
               <Button
+                component={NextLink}
+                href="/sign-in"
                 variant="contained"
                 size="large"
                 endIcon={<ArrowForwardRoundedIcon />}

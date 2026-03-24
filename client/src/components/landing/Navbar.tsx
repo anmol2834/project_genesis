@@ -12,6 +12,7 @@ import MenuRoundedIcon from '@mui/icons-material/MenuRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import ArrowForwardRoundedIcon from '@mui/icons-material/ArrowForwardRounded';
 import { motion, AnimatePresence } from 'framer-motion';
+import NextLink from 'next/link';
 import { useThemeMode } from '@/providers/AppThemeProvider';
 import { lightGradients, darkGradients } from '@/theme/palette';
 
@@ -168,6 +169,8 @@ export default function Navbar() {
               </IconButton>
 
               <Button
+                component={NextLink}
+                href="/sign-in"
                 variant="outlined"
                 size="small"
                 sx={{ display: { xs: 'none', sm: 'flex' }, minHeight: 36 }}
@@ -176,6 +179,8 @@ export default function Navbar() {
               </Button>
 
               <Button
+                component={NextLink}
+                href="/sign-in"
                 variant="contained"
                 size="small"
                 sx={{
@@ -279,10 +284,12 @@ export default function Navbar() {
 
         {/* Mobile CTA buttons */}
         <Box sx={{ px: 2.5, pt: 2.5, pb: 3, display: 'flex', flexDirection: 'column', gap: 1.25 }}>
-          <Button variant="outlined" fullWidth sx={{ minHeight: 48, fontWeight: 500 }}>
+          <Button component={NextLink} href="/sign-in" variant="outlined" fullWidth sx={{ minHeight: 48, fontWeight: 500 }}>
             Sign in
           </Button>
           <Button
+            component={NextLink}
+            href="/sign-in"
             variant="contained"
             fullWidth
             endIcon={<ArrowForwardRoundedIcon />}
