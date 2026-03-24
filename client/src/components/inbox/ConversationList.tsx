@@ -12,10 +12,10 @@ const FILTERS: { id: FilterTab; label: string }[] = [
   { id: 'hot',    label: 'Hot Leads' },
 ];
 
-const STATUS_COLORS: Record<string, string> = {
-  waiting: '#fbbf24',
-  active:  '#34d399',
-  replied: '#818cf8',
+const LEAD_DOT_COLORS: Record<LeadTag, string> = {
+  hot:  '#ef4444',
+  warm: '#f97316',
+  cold: '#60a5fa',
 };
 
 const LEAD_TAG_CONFIG: Record<LeadTag, { label: string; color: string; bg: string }> = {
@@ -145,12 +145,13 @@ export default function ConversationList({ activeId, onSelect }: Props) {
                     {conv.avatar}
                   </Typography>
                 </Box>
-                {/* Status dot */}
+                {/* Lead tag dot */}
                 <Box sx={{
                   position: 'absolute', bottom: 1, right: 1,
                   width: 8, height: 8, borderRadius: '50%',
-                  background: STATUS_COLORS[conv.status] ?? '#64748b',
+                  background: LEAD_DOT_COLORS[conv.leadTag],
                   border: `1.5px solid ${isDark ? '#0f172a' : '#fff'}`,
+                  boxShadow: conv.leadTag === 'hot' ? `0 0 5px ${LEAD_DOT_COLORS.hot}` : 'none',
                 }} />
               </Box>
 
