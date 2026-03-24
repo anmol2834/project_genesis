@@ -105,7 +105,7 @@ export default function CTASection() {
             >
               <Button
                 component={NextLink}
-                href="/sign-in"
+                href="/sign-up"
                 variant="contained"
                 size="large"
                 endIcon={<ArrowForwardRoundedIcon />}

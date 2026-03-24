@@ -180,7 +180,7 @@ export default function Navbar() {
 
               <Button
                 component={NextLink}
-                href="/sign-in"
+                href="/sign-up"
                 variant="contained"
                 size="small"
                 sx={{
@@ -289,7 +289,7 @@ export default function Navbar() {
           </Button>
           <Button
             component={NextLink}
-            href="/sign-in"
+            href="/sign-up"
             variant="contained"
             fullWidth
             endIcon={<ArrowForwardRoundedIcon />}

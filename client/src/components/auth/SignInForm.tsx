@@ -315,7 +315,7 @@ export default function SignInForm() {
           Don't have an account?{' '}
           <Box
             component={NextLink}
-            href="#"
+            href="/sign-up"
             sx={{ color: 'primary.main', fontWeight: 600, textDecoration: 'none', '&:hover': { textDecoration: 'underline' } }}
           >
             Start for free

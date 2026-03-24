@@ -197,7 +197,7 @@ export default function PricingSection() {
                   {/* CTA */}
                   <Button
                     component={NextLink}
-                    href="/sign-in"
+                    href="/sign-up"
                     variant={plan.ctaVariant}
                     fullWidth
                     startIcon={plan.highlight ? <BoltRoundedIcon sx={{ fontSize: '14px !important' }} /> : undefined}

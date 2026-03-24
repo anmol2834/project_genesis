@@ -285,7 +285,7 @@ export default function HeroSection() {
             >
               <Button
                 component={NextLink}
-                href="/sign-in"
+                href="/sign-up"
                 variant="contained"
                 size="large"
                 endIcon={<ArrowForwardRoundedIcon />}
