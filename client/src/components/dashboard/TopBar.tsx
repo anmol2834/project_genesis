@@ -110,10 +110,23 @@ export default function TopBar() {
           </Typography>
         </Box>
 
-        <IconButton onClick={toggleTheme} size="small"
-          sx={{ width: 34, height: 34, color: 'text.secondary', borderRadius: '8px', border: `1px solid ${theme.palette.divider}` }}>
-          {mode === 'dark' ? <LightModeRoundedIcon sx={{ fontSize: 15 }} /> : <DarkModeRoundedIcon sx={{ fontSize: 15 }} />}
-        </IconButton>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+          {/* Notification Icon */}
+          <IconButton size="small" sx={{ width: 34, height: 34, color: 'text.secondary', borderRadius: '8px', border: `1px solid ${theme.palette.divider}`, position: 'relative' }}>
+            <NotificationsRoundedIcon sx={{ fontSize: 16 }} />
+            <Box sx={{ position: 'absolute', top: 6, right: 6, width: 7, height: 7, borderRadius: '50%', bgcolor: '#f87171', border: '1.5px solid', borderColor: isDark ? 'rgba(15,10,40,0.9)' : 'background.paper' }} />
+          </IconButton>
+
+          {/* Profile Picture */}
+          <Box onClick={() => navigate('/dashboard/settings')} sx={{ width: 34, height: 34, borderRadius: '8px', background: grad.primary, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem', color: '#fff', border: `1px solid ${theme.palette.divider}` }}>
+            JD
+          </Box>
+
+          {/* Theme Toggle */}
+          <IconButton onClick={toggleTheme} size="small" sx={{ width: 34, height: 34, color: 'text.secondary', borderRadius: '8px', border: `1px solid ${theme.palette.divider}` }}>
+            {mode === 'dark' ? <LightModeRoundedIcon sx={{ fontSize: 15 }} /> : <DarkModeRoundedIcon sx={{ fontSize: 15 }} />}
+          </IconButton>
+        </Box>
       </Box>
 
       {/* ── Drawer ── */}
