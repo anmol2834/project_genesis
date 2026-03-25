@@ -16,6 +16,8 @@ import StorageRoundedIcon from '@mui/icons-material/StorageRounded';
 import ManageSearchRoundedIcon from '@mui/icons-material/ManageSearchRounded';
 import GroupsRoundedIcon from '@mui/icons-material/GroupsRounded';
 import ExtensionRoundedIcon from '@mui/icons-material/ExtensionRounded';
+import CreditCardRoundedIcon from '@mui/icons-material/CreditCardRounded';
+import HelpOutlineRoundedIcon from '@mui/icons-material/HelpOutlineRounded';
 import { lightGradients, darkGradients } from '@/theme/palette';
 
 const NAV_SECTIONS = [
@@ -156,25 +158,34 @@ export default function Sidebar() {
         ))}
       </Box>
 
-      {/* Settings */}
-      <Box sx={{ px: 1.5, pb: 2.5, borderTop: `1px solid ${theme.palette.divider}`, pt: 1.5 }}>
-        <Box
-          onClick={() => router.push('/dashboard/settings')}
-          sx={{
-            display: 'flex', alignItems: 'center', gap: 1.25,
-            px: 1.5, py: 0.9, borderRadius: '9px', cursor: 'pointer',
-            background: isActive('/dashboard/settings')
-              ? isDark ? 'rgba(129,140,248,0.14)' : 'rgba(67,56,202,0.08)'
-              : 'transparent',
-            transition: 'background 0.18s ease',
-            '&:hover': { background: theme.palette.action.hover },
-          }}
-        >
-          <SettingsRoundedIcon sx={{ fontSize: 17, color: isActive('/dashboard/settings') ? 'primary.main' : 'text.secondary' }} />
-          <Typography sx={{ fontSize: '0.82rem', fontWeight: isActive('/dashboard/settings') ? 600 : 400, color: isActive('/dashboard/settings') ? 'primary.main' : 'text.secondary' }}>
-            Settings
-          </Typography>
-        </Box>
+      {/* Bottom nav: Settings, Billing, Help */}
+      <Box sx={{ px: 1.5, pb: 2.5, borderTop: `1px solid ${theme.palette.divider}`, pt: 1.5, display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+        {[
+          { path: '/dashboard/settings',     label: 'Settings',       Icon: SettingsRoundedIcon,    color: 'primary.main' },
+          { path: '/dashboard/billing',      label: 'Billing',        Icon: CreditCardRoundedIcon,  color: '#34d399' },
+          { path: '/dashboard/help',         label: 'Help & Support', Icon: HelpOutlineRoundedIcon, color: '#fbbf24' },
+        ].map(({ path, label, Icon, color }) => {
+          const active = isActive(path);
+          return (
+            <Box key={path} onClick={() => router.push(path)} sx={{
+              display: 'flex', alignItems: 'center', gap: 1.25,
+              px: 1.5, py: 0.9, borderRadius: '9px', cursor: 'pointer', position: 'relative',
+              background: active
+                ? isDark ? 'rgba(129,140,248,0.14)' : 'rgba(67,56,202,0.08)'
+                : 'transparent',
+              transition: 'background 0.18s ease',
+              '&:hover': { background: active ? (isDark ? 'rgba(129,140,248,0.18)' : 'rgba(67,56,202,0.11)') : theme.palette.action.hover },
+            }}>
+              {active && (
+                <Box sx={{ position: 'absolute', left: 0, top: '20%', bottom: '20%', width: 3, borderRadius: '0 3px 3px 0', bgcolor: 'primary.main' }} />
+              )}
+              <Icon sx={{ fontSize: 17, color: active ? color : 'text.secondary', transition: 'color 0.18s', flexShrink: 0 }} />
+              <Typography sx={{ fontSize: '0.82rem', fontWeight: active ? 600 : 400, color: active ? color : 'text.secondary', transition: 'color 0.18s' }}>
+                {label}
+              </Typography>
+            </Box>
+          );
+        })}
       </Box>
     </Box>
   );

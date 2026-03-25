@@ -21,6 +21,7 @@ import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import LocalFireDepartmentRoundedIcon from '@mui/icons-material/LocalFireDepartmentRounded';
 import { LEADS, STATUS_CONFIG, TAG_CONFIG, Lead, LeadStatus, LeadTag } from './leadsData';
 import { lightGradients, darkGradients } from '@/theme/palette';
+import CSVImportModal from '../shared/CSVImportModal';
 
 // ── Animated counter ──────────────────────────────────────────────────────────
 function CountUp({ target, suffix = '' }: { target: number; suffix?: string }) {
@@ -338,103 +339,6 @@ function LeadCard({ lead, isDark, theme, index }: { lead: Lead; isDark: boolean;
   );
 }
 
-// ── Import modal ──────────────────────────────────────────────────────────────
-function ImportModal({ open, onClose, isDark, grad }: { open: boolean; onClose: () => void; isDark: boolean; grad: string }) {
-  const [tab, setTab] = useState<'csv' | 'manual'>('csv');
-  const [dragging, setDragging] = useState(false);
-  const [fileName, setFileName] = useState<string | null>(null);
-
-  return (
-    <Modal open={open} onClose={onClose}>
-      <Box sx={{
-        position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-        width: { xs: '92vw', sm: 480 }, borderRadius: '16px',
-        background: isDark ? '#0f172a' : '#fff',
-        border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(15,23,42,0.1)'}`,
-        boxShadow: isDark ? '0 32px 80px rgba(0,0,0,0.6)' : '0 32px 80px rgba(15,23,42,0.15)',
-        outline: 'none', overflow: 'hidden',
-      }}>
-        {/* Header */}
-        <Box sx={{ px: 2.5, pt: 2.5, pb: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.07)' : 'rgba(15,23,42,0.08)'}` }}>
-          <Box>
-            <Typography sx={{ fontSize: '0.95rem', fontWeight: 700, color: 'text.primary' }}>Import Leads</Typography>
-            <Typography sx={{ fontSize: '0.68rem', color: 'text.secondary', mt: 0.2 }}>Upload CSV or add manually</Typography>
-          </Box>
-          <IconButton size="small" onClick={onClose} sx={{ color: 'text.secondary', width: 30, height: 30, borderRadius: '8px', '&:hover': { background: isDark ? 'rgba(255,255,255,0.07)' : 'rgba(15,23,42,0.05)' } }}>
-            <CloseRoundedIcon sx={{ fontSize: 16 }} />
-          </IconButton>
-        </Box>
-
-        {/* Tabs */}
-        <Box sx={{ display: 'flex', gap: 0.5, px: 2.5, pt: 1.5 }}>
-          {(['csv', 'manual'] as const).map(t => (
-            <Box key={t} component="button" onClick={() => setTab(t)} sx={{
-              px: 1.25, py: 0.5, borderRadius: '8px', border: 'none', cursor: 'pointer',
-              fontSize: '0.72rem', fontWeight: tab === t ? 700 : 500,
-              background: tab === t ? (isDark ? 'rgba(129,140,248,0.2)' : 'rgba(67,56,202,0.1)') : 'transparent',
-              color: tab === t ? (isDark ? '#818cf8' : '#4338ca') : 'text.secondary',
-              transition: 'all 0.15s ease',
-            }}>
-              {t === 'csv' ? 'Upload CSV' : 'Manual Entry'}
-            </Box>
-          ))}
-        </Box>
-
-        <Box sx={{ px: 2.5, py: 2 }}>
-          {tab === 'csv' ? (
-            <Box
-              onDragOver={e => { e.preventDefault(); setDragging(true); }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) setFileName(f.name); }}
-              sx={{
-                border: `2px dashed ${dragging ? (isDark ? '#818cf8' : '#4338ca') : (isDark ? 'rgba(255,255,255,0.15)' : 'rgba(15,23,42,0.15)')}`,
-                borderRadius: '12px', p: 3, textAlign: 'center', cursor: 'pointer',
-                background: dragging ? (isDark ? 'rgba(129,140,248,0.07)' : 'rgba(67,56,202,0.04)') : 'transparent',
-                transition: 'all 0.2s ease',
-              }}
-            >
-              <FileUploadRoundedIcon sx={{ fontSize: 32, color: isDark ? 'rgba(255,255,255,0.25)' : 'rgba(15,23,42,0.2)', mb: 1 }} />
-              {fileName ? (
-                <Typography sx={{ fontSize: '0.78rem', fontWeight: 600, color: isDark ? '#818cf8' : '#4338ca' }}>{fileName}</Typography>
-              ) : (
-                <>
-                  <Typography sx={{ fontSize: '0.78rem', fontWeight: 600, color: 'text.primary', mb: 0.4 }}>Drop your CSV here</Typography>
-                  <Typography sx={{ fontSize: '0.65rem', color: 'text.disabled' }}>or click to browse · Max 10MB</Typography>
-                </>
-              )}
-            </Box>
-          ) : (
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
-              {['Full Name', 'Email Address', 'Company', 'Role'].map(field => (
-                <Box key={field}>
-                  <Typography sx={{ fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', mb: 0.4 }}>{field}</Typography>
-                  <Box sx={{
-                    px: 1.25, py: 0.85, borderRadius: '9px',
-                    border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(15,23,42,0.12)'}`,
-                    background: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(15,23,42,0.02)',
-                  }}>
-                    <InputBase placeholder={`Enter ${field.toLowerCase()}...`} sx={{ fontSize: '0.78rem', color: 'text.primary', width: '100%', '& input::placeholder': { color: 'text.disabled', opacity: 1 } }} />
-                  </Box>
-                </Box>
-              ))}
-            </Box>
-          )}
-        </Box>
-
-        {/* Footer */}
-        <Box sx={{ px: 2.5, pb: 2.5, display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
-          <Button onClick={onClose} sx={{ fontSize: '0.75rem', fontWeight: 600, color: 'text.secondary', px: 2, py: 0.7, borderRadius: '9px', textTransform: 'none', border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(15,23,42,0.12)'}`, '&:hover': { background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(15,23,42,0.04)' } }}>
-            Cancel
-          </Button>
-          <Button sx={{ fontSize: '0.75rem', fontWeight: 700, color: '#fff', px: 2, py: 0.7, borderRadius: '9px', textTransform: 'none', background: grad, '&:hover': { opacity: 0.88 } }}>
-            {tab === 'csv' ? 'Import CSV' : 'Add Lead'}
-          </Button>
-        </Box>
-      </Box>
-    </Modal>
-  );
-}
-
 // ── Empty state ───────────────────────────────────────────────────────────────
 function EmptyState({ isDark, grad, onImport }: { isDark: boolean; grad: string; onImport: () => void }) {
   return (
@@ -646,7 +550,7 @@ export default function LeadsPage() {
         )}
       </Box>
 
-      <ImportModal open={importOpen} onClose={() => setImportOpen(false)} isDark={isDark} grad={grad} />
+      <CSVImportModal open={importOpen} onClose={() => setImportOpen(false)} />
     </Box>
   );
 }
