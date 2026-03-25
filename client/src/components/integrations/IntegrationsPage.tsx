@@ -869,11 +869,11 @@ export default function IntegrationsPage() {
   const totalAutomations = INTEGRATIONS.reduce((s, i) => s + (i.automationsTriggered ?? 0), 0);
 
   return (
-    <Box sx={{ flex: 1, overflowY: 'auto', minHeight: 0,
+    <Box sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0, width: '100%',
       '&::-webkit-scrollbar': { width: 4 },
       '&::-webkit-scrollbar-thumb': { background: alpha(theme.palette.text.disabled, 0.18), borderRadius: 2 },
     }}>
-      <Box sx={{ px: { xs: 1.5, sm: 2.5, md: 3 }, pt: 2.5, pb: 4 }}>
+      <Box sx={{ width: '100%', boxSizing: 'border-box', px: { xs: 1.5, sm: 2.5, md: 3 }, pt: 2.5, pb: 4 }}>
 
         {/* ── Page header ── */}
         <Box sx={{
@@ -905,26 +905,28 @@ export default function IntegrationsPage() {
           </Box>
 
           {/* Stats strip */}
-          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1, mb: 2 }}>
+          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: { xs: 0.75, sm: 1 }, mb: 2 }}>
             {[
-              { label: 'Connected', value: totalConnected, suffix: '', color: '#34d399', icon: CheckRoundedIcon },
-              { label: 'Leads imported', value: totalLeads, suffix: '', color: '#818cf8', icon: PeopleRoundedIcon },
-              { label: 'Automations fired', value: totalAutomations, suffix: '', color: '#fbbf24', icon: BoltRoundedIcon },
+              { label: 'Connected',        value: totalConnected,   color: '#34d399', icon: CheckRoundedIcon },
+              { label: 'Leads imported',   value: totalLeads,       color: '#818cf8', icon: PeopleRoundedIcon },
+              { label: 'Automations fired',value: totalAutomations, color: '#fbbf24', icon: BoltRoundedIcon },
             ].map(s => (
               <Box key={s.label} sx={{
-                px: { xs: 1, sm: 1.75 }, py: 1, borderRadius: '13px',
+                px: { xs: 0.75, sm: 1.75 }, py: { xs: 0.85, sm: 1 }, borderRadius: '13px',
                 background: isDark ? alpha(s.color, 0.08) : alpha(s.color, 0.05),
                 border: `1px solid ${alpha(s.color, isDark ? 0.2 : 0.12)}`,
-                display: 'flex', alignItems: 'center', gap: { xs: 0.75, sm: 1 },
+                display: 'flex', flexDirection: { xs: 'column', sm: 'row' },
+                alignItems: { xs: 'flex-start', sm: 'center' }, gap: { xs: 0.4, sm: 1 },
+                minWidth: 0, overflow: 'hidden',
               }}>
-                <Box sx={{ width: { xs: 26, sm: 30 }, height: { xs: 26, sm: 30 }, borderRadius: '9px', background: alpha(s.color, isDark ? 0.18 : 0.12), display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <s.icon sx={{ fontSize: { xs: 12, sm: 14 }, color: s.color }} />
+                <Box sx={{ width: { xs: 22, sm: 30 }, height: { xs: 22, sm: 30 }, borderRadius: '8px', background: alpha(s.color, isDark ? 0.18 : 0.12), display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <s.icon sx={{ fontSize: { xs: 11, sm: 14 }, color: s.color }} />
                 </Box>
                 <Box sx={{ minWidth: 0 }}>
-                  <Typography sx={{ fontSize: { xs: '0.95rem', sm: '1.1rem' }, fontWeight: 900, color: s.color, lineHeight: 1, letterSpacing: '-0.04em' }}>
+                  <Typography sx={{ fontSize: { xs: '0.88rem', sm: '1.1rem' }, fontWeight: 900, color: s.color, lineHeight: 1, letterSpacing: '-0.04em' }}>
                     <CountUp target={s.value} />
                   </Typography>
-                  <Typography sx={{ fontSize: '0.58rem', color: 'text.disabled', whiteSpace: 'nowrap' }}>{s.label}</Typography>
+                  <Typography sx={{ fontSize: { xs: '0.55rem', sm: '0.58rem' }, color: 'text.disabled', lineHeight: 1.3, mt: 0.15 }}>{s.label}</Typography>
                 </Box>
               </Box>
             ))}

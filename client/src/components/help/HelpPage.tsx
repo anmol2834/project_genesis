@@ -116,7 +116,7 @@ function AIPanel() {
   }
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', height: 420,
+    <Box sx={{ display: 'flex', flexDirection: 'column', height: 420, width: '100%', boxSizing: 'border-box',
       border: `1px solid ${theme.palette.divider}`, borderRadius: 2,
       bgcolor: isDark ? alpha('#818cf8', 0.04) : alpha('#818cf8', 0.02), overflow: 'hidden' }}>
       {/* Header */}
@@ -276,14 +276,15 @@ export default function HelpPage() {
   const [ticketOpen, setTicketOpen] = useState(false);
 
   return (
-    <Box sx={{ flex: 1, overflowY: 'auto', minHeight: 0,
+    <Box sx={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0, width: '100%',
       '&::-webkit-scrollbar': { width: 4 },
       '&::-webkit-scrollbar-thumb': { background: alpha(theme.palette.text.disabled, 0.2), borderRadius: 2 },
       bgcolor: theme.palette.background.default }}>
       <TicketModal open={ticketOpen} onClose={() => setTicketOpen(false)} />
 
       {/* ── Hero ── */}
-      <Box sx={{ position: 'relative', overflow: 'hidden', px: { xs: 2, md: 4 }, py: { xs: 5, md: 7 },
+      <Box sx={{ position: 'relative', overflow: 'hidden', width: '100%', boxSizing: 'border-box',
+        px: { xs: 2, md: 4 }, py: { xs: 4, md: 7 },
         background: isDark
           ? `linear-gradient(135deg, #1e1b4b 0%, #0f172a 50%, #1e293b 100%)`
           : `linear-gradient(135deg, #eef2ff 0%, #f5f3ff 60%, #ede9fe 100%)`,
@@ -294,7 +295,7 @@ export default function HelpPage() {
           background: alpha('#818cf8', isDark ? 0.15 : 0.12), filter: 'blur(60px)', pointerEvents: 'none' }} />
         <Box sx={{ position: 'absolute', bottom: -40, left: '30%', width: 200, height: 200, borderRadius: '50%',
           background: alpha('#c084fc', isDark ? 0.12 : 0.1), filter: 'blur(50px)', pointerEvents: 'none' }} />
-        <Box sx={{ position: 'relative', maxWidth: 640, mx: 'auto', textAlign: 'center' }}>
+        <Box sx={{ position: 'relative', width: '100%', maxWidth: { xs: '100%', md: 640 }, mx: { xs: 0, md: 'auto' }, textAlign: 'center' }}>
           <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.75, px: 1.5, py: 0.5, mb: 2,
             borderRadius: '999px', border: `1px solid ${alpha('#818cf8', 0.35)}`, bgcolor: alpha('#818cf8', 0.1) }}>
             <AutoAwesomeRoundedIcon sx={{ fontSize: 14, color: '#818cf8' }} />
@@ -310,7 +311,7 @@ export default function HelpPage() {
       </Box>
 
       {/* ── Content ── */}
-      <Box sx={{ maxWidth: 1200, mx: 'auto', px: { xs: 2, md: 4 }, py: 4 }}>
+      <Box sx={{ width: '100%', boxSizing: 'border-box', px: { xs: 2, sm: 3, md: 4 }, py: 4 }}>
 
         {/* ── Categories ── */}
         <SectionLabel>Browse by category</SectionLabel>
@@ -364,7 +365,7 @@ export default function HelpPage() {
                       </Typography>
                     </Box>
                   </Box>
-                  {art.popular && <GlowChip label="Popular" color="#818cf8" />}
+                  {art.popular && <Box sx={{ display: { xs: 'none', sm: 'flex' } }}><GlowChip label="Popular" color="#818cf8" /></Box>}
                   <ChevronRightRoundedIcon sx={{ fontSize: 16, color: theme.palette.text.disabled, flexShrink: 0 }} />
                 </Box>
               ))}
@@ -375,7 +376,7 @@ export default function HelpPage() {
             <SectionLabel>Video tutorials</SectionLabel>
             <Box sx={{ display: 'grid', gap: 1.5, gridTemplateColumns: { xs: '1fr 1fr', sm: 'repeat(4,1fr)' } }}>
               {VIDEO_TUTORIALS.map((v, i) => (
-                <Box key={i} sx={{ borderRadius: 2, overflow: 'hidden', cursor: 'pointer',
+                <Box key={i} sx={{ borderRadius: 2, overflow: 'hidden', cursor: 'pointer', minWidth: 0,
                   border: `1px solid ${theme.palette.divider}`,
                   transition: 'all 0.18s', '&:hover': { transform: 'translateY(-2px)',
                     boxShadow: `0 6px 20px ${alpha(v.color, 0.25)}` } }}>
