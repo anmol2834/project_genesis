@@ -1,0 +1,310 @@
+services:
+  # ============================================================================
+  # GATEWAY SERVICE - Port 8000
+  # ============================================================================
+  gateway-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gateway-service
+    working_dir: /app/services/gateway-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./services/gateway-service:/app/services/gateway-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # AUTH SERVICE - Port 8001
+  # ============================================================================
+  auth-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: auth-service
+    working_dir: /app/services/auth-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./services/auth-service:/app/services/auth-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # USER SERVICE - Port 8002
+  # ============================================================================
+  user-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: user-service
+    working_dir: /app/services/user-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8002
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./services/user-service:/app/services/user-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # BUSINESS SERVICE - Port 8003
+  # ============================================================================
+  business-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: business-service
+    working_dir: /app/services/business-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8003
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./services/business-service:/app/services/business-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # EMAIL SERVICE - Port 8004
+  # ============================================================================
+  email-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: email-service
+    working_dir: /app/services/email-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8004
+    ports:
+      - "8004:8004"
+    volumes:
+      - ./services/email-service:/app/services/email-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # INBOX SERVICE - Port 8005
+  # ============================================================================
+  inbox-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inbox-service
+    working_dir: /app/services/inbox-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8005
+    ports:
+      - "8005:8005"
+    volumes:
+      - ./services/inbox-service:/app/services/inbox-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # CAMPAIGN SERVICE - Port 8006
+  # ============================================================================
+  campaign-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: campaign-service
+    working_dir: /app/services/campaign-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8006
+    ports:
+      - "8006:8006"
+    volumes:
+      - ./services/campaign-service:/app/services/campaign-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # LEADS SERVICE - Port 8007
+  # ============================================================================
+  leads-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: leads-service
+    working_dir: /app/services/leads-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8007
+    ports:
+      - "8007:8007"
+    volumes:
+      - ./services/leads-service:/app/services/leads-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # ANALYTICS SERVICE - Port 8008
+  # ============================================================================
+  analytics-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: analytics-service
+    working_dir: /app/services/analytics-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8008
+    ports:
+      - "8008:8008"
+    volumes:
+      - ./services/analytics-service:/app/services/analytics-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # AUTOMATION SERVICE - Port 8009
+  # ============================================================================
+  automation-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: automation-service
+    working_dir: /app/services/automation-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8009
+    ports:
+      - "8009:8009"
+    volumes:
+      - ./services/automation-service:/app/services/automation-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # RESEARCH SERVICE - Port 8010
+  # ============================================================================
+  research-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: research-service
+    working_dir: /app/services/research-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8010
+    ports:
+      - "8010:8010"
+    volumes:
+      - ./services/research-service:/app/services/research-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # NOTIFICATION SERVICE - Port 8011
+  # ============================================================================
+  notification-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notification-service
+    working_dir: /app/services/notification-service
+    command: uvicorn main:app --host 0.0.0.0 --port 8011
+    ports:
+      - "8011:8011"
+    volumes:
+      - ./services/notification-service:/app/services/notification-service
+      - ./shared:/app/shared
+      - ./.env:/app/.env
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - microservices-network
+    restart: unless-stopped
+
+  # ============================================================================
+  # QDRANT VECTOR DATABASE - Ports 6333 (REST), 6334 (gRPC)
+  # ============================================================================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"  # REST API
+      - "6334:6334"  # gRPC API
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__SERVICE__HTTP_PORT=6333
+    networks:
+      - microservices-network
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+# ============================================================================
+# NETWORKS
+# ============================================================================
+networks:
+  microservices-network:
+    driver: bridge
+    name: mailautomation-network
+
+# ============================================================================
+# VOLUMES
+# ============================================================================
+volumes:
+  qdrant_data:
+    driver: local
+    name: mailautomation-qdrant-data
