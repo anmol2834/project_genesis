@@ -8,7 +8,8 @@ import { motion } from 'framer-motion';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { lightGradients, darkGradients } from '@/theme/palette';
-import { useSignup } from '@/hooks/mutations/useAuthMutations';
+import { useAuth } from '@/contexts/AuthContext';
+import { useSignup, useGetProfile } from '@/hooks/mutations/useAuthMutations';
 import type { Step1Data } from './Step1Account';
 import type { Step3Data } from './Step3Business';
 import type { Step4Data } from './Step4AIContext';
@@ -26,13 +27,18 @@ export default function Step6Review({ step1, step3, step4, emailConnected, onBac
   const isDark = theme.palette.mode === 'dark';
   const grad = isDark ? darkGradients : lightGradients;
   const router = useRouter();
+  
+  // Auth context and mutations
+  const { setAuthData } = useAuth();
+  const signupMutation = useSignup();
+  const getProfileMutation = useGetProfile();
+  
   const [done, setDone] = useState(false);
 
-  const signup = useSignup();
-
   const handleLaunch = async () => {
-    signup.mutate(
-      {
+    try {
+      // Step 1: Signup and get tokens
+      const signupResponse = await signupMutation.mutateAsync({
         full_name: step1.fullName,
         email: step1.email,
         password: step1.password,
@@ -45,11 +51,25 @@ export default function Step6Review({ step1, step3, step4, emailConnected, onBac
         target_audience: step4.audience,
         communication_tone: step4.tone,
         use_cases: step4.useCases,
-      },
-      {
-        onSuccess: () => setDone(true),
-      },
-    );
+      });
+
+      // Step 2: Store tokens in localStorage immediately so apiClient can use them
+      localStorage.setItem('auth_tokens', JSON.stringify(signupResponse.tokens));
+      const expiryTimestamp = Date.now() + (signupResponse.tokens.expires_in * 1000);
+      localStorage.setItem('auth_token_expiry', expiryTimestamp.toString());
+
+      // Step 3: Fetch full user profile (apiClient will now have the token)
+      const userProfile = await getProfileMutation.mutateAsync();
+
+      // Step 4: Update auth context with user data and tokens
+      setAuthData(userProfile, signupResponse.tokens);
+
+      // Step 5: Show success state
+      setDone(true);
+    } catch (error) {
+      // Error is already handled by React Query and displayed via signupMutation.error
+      console.error('[Step6Review] Signup failed:', error);
+    }
   };
 
   const rows: { label: string; value: string }[] = [
@@ -62,6 +82,9 @@ export default function Step6Review({ step1, step3, step4, emailConnected, onBac
     { label: 'Use-cases', value: step4.useCases.length ? step4.useCases.join(', ') : '—' },
     { label: 'Inbox',     value: emailConnected ? 'Connected' : 'Not connected' },
   ];
+
+  const isLoading = signupMutation.isPending || getProfileMutation.isPending;
+  const errorMsg = signupMutation.error?.message || getProfileMutation.error?.message || '';
 
   if (done) {
     return (
@@ -109,7 +132,7 @@ export default function Step6Review({ step1, step3, step4, emailConnected, onBac
       </Box>
 
       {/* AI ready badge */}
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, p: 1.25, borderRadius: '8px', background: alpha(theme.palette.primary.main, isDark ? 0.08 : 0.05), border: `1px solid ${alpha(theme.palette.primary.main, isDark ? 0.16 : 0.10)}`, mb: signup.isError ? 1.5 : 2 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, p: 1.25, borderRadius: '8px', background: alpha(theme.palette.primary.main, isDark ? 0.08 : 0.05), border: `1px solid ${alpha(theme.palette.primary.main, isDark ? 0.16 : 0.10)}`, mb: errorMsg ? 1.5 : 2 }}>
         <AutoAwesomeRoundedIcon sx={{ fontSize: 14, color: 'primary.main', flexShrink: 0 }} />
         <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', lineHeight: 1.4 }}>
           AI will be initialized with your business context and start generating replies immediately.
@@ -117,22 +140,37 @@ export default function Step6Review({ step1, step3, step4, emailConnected, onBac
       </Box>
 
       {/* API error */}
-      {signup.isError && (
-        <Alert severity="error" sx={{ mb: 2, fontSize: '0.78rem', borderRadius: '8px', py: 0.5 }}>
-          {signup.error?.message ?? 'Signup failed. Please try again.'}
+      {errorMsg && (
+        <Alert 
+          severity="error" 
+          onClose={() => {
+            signupMutation.reset();
+            getProfileMutation.reset();
+          }}
+          sx={{ mb: 2, fontSize: '0.78rem', borderRadius: '8px', py: 0.5 }}
+        >
+          {errorMsg}
         </Alert>
       )}
 
       <Box sx={{ display: 'flex', gap: 1 }}>
-        <Button onClick={onBack} disabled={signup.isPending} variant="outlined" sx={{ minHeight: 40, fontSize: '0.8rem', borderRadius: '8px', px: 2, borderColor: alpha(theme.palette.primary.main, 0.3), flexShrink: 0 }}>
+        <Button 
+          onClick={onBack} 
+          disabled={isLoading} 
+          variant="outlined" 
+          sx={{ minHeight: 40, fontSize: '0.8rem', borderRadius: '8px', px: 2, borderColor: alpha(theme.palette.primary.main, 0.3), flexShrink: 0 }}
+        >
           Back
         </Button>
         <Button
-          onClick={handleLaunch} variant="contained" fullWidth disabled={signup.isPending}
-          startIcon={signup.isPending ? <CircularProgress size={14} color="inherit" /> : <BoltRoundedIcon sx={{ fontSize: '16px !important' }} />}
+          onClick={handleLaunch} 
+          variant="contained" 
+          fullWidth 
+          disabled={isLoading}
+          startIcon={isLoading ? <CircularProgress size={14} color="inherit" /> : <BoltRoundedIcon sx={{ fontSize: '16px !important' }} />}
           sx={{ minHeight: 40, fontSize: '0.875rem', fontWeight: 600, borderRadius: '8px', background: grad.primary, boxShadow: isDark ? '0 4px 16px rgba(129,140,248,0.22)' : '0 4px 16px rgba(67,56,202,0.16)', '&:hover': { filter: 'brightness(1.07)' }, '&:disabled': { opacity: 0.6 } }}
         >
-          {signup.isPending ? 'Creating account…' : 'Start using AI'}
+          {isLoading ? 'Creating account…' : 'Start using AI'}
         </Button>
       </Box>
     </motion.div>

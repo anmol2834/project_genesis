@@ -19,7 +19,7 @@ from shared.config import get_config
 from shared.logger import setup_logging, get_logger, set_request_id, clear_request_id
 from shared.database import init_database, close_database, check_database_health
 from shared.cache import init_redis, close_redis, check_redis_health
-from shared.utils import close_http_client
+from router import route_request, close_http_client
 
 # Initialize logger
 logger = setup_logging("gateway-service")
@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
     await init_redis()
     
     logger.info("Gateway Service started successfully")
+    logger.info("Service routing enabled for all microservices")
     
     yield
     
@@ -56,7 +57,7 @@ async def lifespan(app: FastAPI):
 # Create FastAPI application
 app = FastAPI(
     title="Gateway Service",
-    description="API Gateway for Mail Automation System",
+    description="Enterprise API Gateway with Circuit Breaker, Rate Limiting, and Service Discovery",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -124,8 +125,25 @@ async def root():
     return {
         "service": "gateway-service",
         "version": "1.0.0",
-        "status": "running"
+        "status": "running",
+        "features": [
+            "Service Discovery",
+            "Circuit Breaker",
+            "Rate Limiting (60 req/min per endpoint)",
+            "Automatic Retry with Exponential Backoff",
+            "Request ID Tracking",
+            "Connection Pooling"
+        ]
     }
+
+
+# ── Catch-all route for service forwarding ───────────────────────────────────
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+async def gateway_router(request: Request):
+    """
+    Main gateway router - forwards all requests to appropriate microservices
+    """
+    return await route_request(request)
 
 
 if __name__ == "__main__":
@@ -136,5 +154,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=config.DEBUG,
-        log_level=config.LOG_LEVEL.lower()
+        log_level=config.LOG_LEVEL.lower(),
+        access_log=False  # Disable access logs (200 OK, etc.)
     )

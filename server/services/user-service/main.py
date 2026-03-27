@@ -18,6 +18,8 @@ from shared.config import get_config
 from shared.logger import setup_logging, set_request_id, clear_request_id
 from shared.database import init_database, close_database, check_database_health
 from shared.cache import init_redis, close_redis, check_redis_health
+from api import settings_router
+from models import User, UserSettings  # Import models to register with SQLAlchemy
 
 logger = setup_logging("user-service")
 config = get_config()
@@ -50,6 +52,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routers
+app.include_router(settings_router)
 
 
 @app.middleware("http")
@@ -94,4 +99,10 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=config.DEBUG)
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=8002, 
+        reload=config.DEBUG,
+        access_log=False  # Disable access logs (200 OK, etc.)
+    )

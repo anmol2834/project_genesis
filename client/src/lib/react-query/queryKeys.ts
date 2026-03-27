@@ -72,4 +72,9 @@ export const queryKeys = {
     paymentMethods: () => ['billing', 'payment-methods'] as const,
   },
 
+  // ── Settings ───────────────────────────────────────────────────────────────
+  settings: {
+    all: () => ['settings'] as const,
+  },
+
 } as const;

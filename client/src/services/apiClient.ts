@@ -25,8 +25,28 @@ export const apiClient: AxiosInstance = axios.create({
 // ── Request interceptor: attach JWT ──────────────────────────────────────────
 apiClient.interceptors.request.use((config) => {
   if (typeof window !== 'undefined') {
-    const token = localStorage.getItem('mailflow_token');
-    if (token) config.headers.Authorization = `Bearer ${token}`;
+    // Try to get token from auth_tokens (new format) or mailflow_token (legacy)
+    let token = null;
+    
+    // First try auth_tokens (AuthContext format)
+    const authTokensStr = localStorage.getItem('auth_tokens');
+    if (authTokensStr) {
+      try {
+        const authTokens = JSON.parse(authTokensStr);
+        token = authTokens.access_token;
+      } catch (e) {
+        console.error('Failed to parse auth_tokens:', e);
+      }
+    }
+    
+    // Fallback to mailflow_token (legacy format)
+    if (!token) {
+      token = localStorage.getItem('mailflow_token');
+    }
+    
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
   }
   return config;
 });
@@ -45,6 +65,9 @@ apiClient.interceptors.response.use(
     // 401 → clear token and redirect to sign-in
     if (status === 401 && typeof window !== 'undefined') {
       localStorage.removeItem('mailflow_token');
+      localStorage.removeItem('auth_tokens');
+      localStorage.removeItem('auth_user');
+      localStorage.removeItem('auth_token_expiry');
       window.location.href = '/sign-in';
     }
 

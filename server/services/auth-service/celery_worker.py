@@ -20,8 +20,12 @@ celery_app = get_celery_app()
 # Import tasks to register them
 from tasks import embedding_tasks
 
-logger.info("Auth service Celery worker initialized")
-logger.info(f"Registered tasks: {list(celery_app.tasks.keys())}")
+print("\n" + "="*60)
+print("  CELERY WORKER - PRODUCTION MODE")
+print("="*60)
+print(f"  Task: auth.create_user_embedding")
+print(f"  Concurrency: 2 workers")
+print("="*60 + "\n")
 
 if __name__ == '__main__':
     celery_app.start()

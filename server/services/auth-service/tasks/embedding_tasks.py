@@ -72,16 +72,13 @@ def create_user_embedding(self, user_id: str):
     Fully synchronous — no asyncio, no event loop issues.
     Retries up to 5 times with exponential backoff on failure.
     """
-    logger.info(f"Embedding task started for user {user_id} (attempt {self.request.retries + 1})")
-
     try:
         row = _fetch_user_sync(user_id)
     except Exception as e:
-        logger.error(f"DB fetch failed for user {user_id}: {e}", exc_info=True)
+        logger.error(f"DB fetch failed for {user_id}: {e}")
         raise self.retry(exc=e)
 
     if row is None:
-        # User doesn't exist — no point retrying
         logger.error(f"User {user_id} not found in DB, skipping embedding")
         return {"success": False, "message": f"User {user_id} not found", "user_id": user_id}
 
@@ -101,12 +98,12 @@ def create_user_embedding(self, user_id: str):
     try:
         success = generate_user_embeddings(user_id, user_data)
     except Exception as e:
-        logger.error(f"Embedding generation failed for user {user_id}: {e}", exc_info=True)
+        logger.error(f"Embedding failed for {user_id}: {e}")
         raise self.retry(exc=e)
 
     if not success:
-        logger.error(f"Embedding returned False for user {user_id}, retrying")
-        raise self.retry(exc=Exception("generate_user_embeddings returned False"))
+        logger.error(f"Embedding returned False for {user_id}")
+        raise self.retry(exc=Exception("Embedding generation failed"))
 
-    logger.info(f"Embedding task completed for user {user_id}")
-    return {"success": True, "message": "Embeddings generated successfully", "user_id": user_id}
+    print(f"[SUCCESS] Embeddings created for user {user_id}")
+    return {"success": True, "message": "Embeddings generated", "user_id": user_id}

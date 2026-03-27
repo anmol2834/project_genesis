@@ -1,0 +1,159 @@
+import axios, { AxiosError } from 'axios';
+import type { ApiError } from '@/services/apiClient';
+
+/**
+ * Dedicated Axios instance for the auth-service (port 8001).
+ * Auth endpoints are NOT proxied through the gateway — hit the service directly.
+ */
+const authClient = axios.create({
+  baseURL: process.env.NEXT_PUBLIC_AUTH_SERVICE_URL ?? 'http://localhost:8001',
+  timeout: 15_000,
+  headers: { 'Content-Type': 'application/json' },
+});
+
+// Normalise errors into ApiError shape — same pattern as apiClient.ts
+authClient.interceptors.response.use(
+  (res) => res,
+  (err: AxiosError<{ detail?: string; message?: string }>) => {
+    const status  = err.response?.status ?? 0;
+    const message =
+      err.response?.data?.detail ??
+      err.response?.data?.message ??
+      err.message ??
+      'An unexpected error occurred';
+    const apiError: ApiError = { message, status, code: err.code };
+    return Promise.reject(apiError);
+  },
+);
+
+// ── Types (mirror server schemas/auth.py exactly) ─────────────────────────────
+
+export interface TokenResponse {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+}
+
+export interface User {
+  user_id: string;
+  email: string;
+  full_name: string;
+  profile_pic?: string;
+  business_name?: string;
+  business_type?: string;
+  industries?: string[];
+  country?: string;
+  timezone?: string;
+  business_description?: string;
+  target_audience?: string;
+  communication_tone?: string;
+  use_cases?: string[];
+  created_at?: string;
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface LoginResponse {
+  success: boolean;
+  message: string;
+  user_id: string;
+  email: string;
+  full_name: string;
+  tokens: TokenResponse;
+}
+
+export interface SignupRequest {
+  full_name: string;
+  email: string;
+  password: string;
+  business_name: string;
+  business_type: string;
+  industries: string[];
+  country: string;
+  timezone: string;
+  business_description: string;
+  target_audience: string;
+  communication_tone: string;
+  use_cases: string[];
+}
+
+export interface SignupResponse {
+  success: boolean;
+  message: string;
+  user_id: string;
+  email: string;
+  tokens: TokenResponse;
+}
+
+export interface RefreshTokenRequest {
+  refresh_token: string;
+}
+
+export interface RefreshTokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+}
+
+export interface LogoutRequest {
+  refresh_token: string;
+}
+
+export interface SendOtpRequest  { email: string; }
+export interface SendOtpResponse { success: boolean; message: string; }
+
+export interface VerifyOtpRequest  { email: string; code: string; }
+export interface VerifyOtpResponse { success: boolean; message: string; }
+
+// ── API ───────────────────────────────────────────────────────────────────────
+
+export const authApi = {
+  /** Send OTP to email */
+  sendOtp: async (payload: SendOtpRequest): Promise<SendOtpResponse> => {
+    const res = await authClient.post<SendOtpResponse>('/auth/send-otp', payload);
+    return res.data;
+  },
+
+  /** Verify OTP code */
+  verifyOtp: async (payload: VerifyOtpRequest): Promise<VerifyOtpResponse> => {
+    const res = await authClient.post<VerifyOtpResponse>('/auth/verify-otp', payload);
+    return res.data;
+  },
+
+  /** Login with email and password */
+  login: async (payload: LoginRequest): Promise<LoginResponse> => {
+    const res = await authClient.post<LoginResponse>('/auth/login', payload);
+    return res.data;
+  },
+
+  /** Register new user */
+  signup: async (payload: SignupRequest): Promise<SignupResponse> => {
+    const res = await authClient.post<SignupResponse>('/auth/signup', payload);
+    return res.data;
+  },
+
+  /** Get current user profile */
+  getProfile: async (accessToken: string): Promise<User> => {
+    const res = await authClient.get<User>('/auth/me', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    return res.data;
+  },
+
+  /** Refresh access token */
+  refreshToken: async (payload: RefreshTokenRequest): Promise<RefreshTokenResponse> => {
+    const res = await authClient.post<RefreshTokenResponse>('/auth/refresh', payload);
+    return res.data;
+  },
+
+  /** Logout and invalidate tokens */
+  logout: async (payload: LogoutRequest, accessToken: string): Promise<void> => {
+    await authClient.post('/auth/logout', payload, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  },
+};

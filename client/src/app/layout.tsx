@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { AppThemeProvider } from '@/providers/AppThemeProvider';
 import { QueryProvider } from '@/lib/react-query/provider';
+import { AuthProvider } from '@/contexts/AuthContext';
 import '@/styles/globals.css';
 
 export const metadata: Metadata = {
@@ -14,7 +15,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <QueryProvider>
           <AppThemeProvider>
-            {children}
+            <AuthProvider>
+              {children}
+            </AuthProvider>
           </AppThemeProvider>
         </QueryProvider>
       </body>

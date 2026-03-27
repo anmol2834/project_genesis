@@ -24,6 +24,7 @@ from schemas.auth import (
     SendOtpRequest, SendOtpResponse, VerifyOtpRequest, VerifyOtpResponse
 )
 from models.user import User
+from models.user_settings import UserSettings
 from utils.password import hash_password, verify_password
 from utils.jwt import create_access_token, create_refresh_token, decode_token
 from tasks.embedding_tasks import create_user_embedding
@@ -112,7 +113,6 @@ async def send_otp(request: SendOtpRequest):
     """
     redis = get_redis_client()
     await redis.setex(f"otp:{request.email.lower().strip()}", OTP_TTL, DEV_OTP)
-    logger.info(f"OTP stored for {request.email}")
     return SendOtpResponse(success=True, message="Verification code sent")
 
 
@@ -132,7 +132,6 @@ async def verify_otp(request: VerifyOtpRequest):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification code")
 
     await redis.delete(key)
-    logger.info(f"OTP verified for {request.email}")
     return VerifyOtpResponse(success=True, message="Email verified")
 
 
@@ -145,8 +144,9 @@ async def signup(request: SignupRequest):
     1. Validate & deduplicate email
     2. Hash password (bcrypt)
     3. Persist to PostgreSQL
-    4. Issue JWT access + refresh tokens
-    5. Queue Qdrant embedding task (non-blocking)
+    4. Initialize default user settings
+    5. Issue JWT access + refresh tokens
+    6. Queue Qdrant embedding task (non-blocking)
     """
     try:
         logger.info(f"Signup attempt: {request.email}")
@@ -159,6 +159,7 @@ async def signup(request: SignupRequest):
             if existing:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
 
+            # Create new user
             new_user = User(
                 email=request.email,
                 password_hash=hash_password(request.password),
@@ -175,20 +176,28 @@ async def signup(request: SignupRequest):
                 use_cases=request.use_cases,
             )
             session.add(new_user)
+            await session.flush()  # Flush to get user.id before creating settings
+            
+            user_id = str(new_user.id)
+            
+            # Initialize default user settings
+            default_settings = UserSettings.create_default_settings(user_id)
+            # Set workspace name to business name by default
+            default_settings.workspace_name = request.business_name
+            session.add(default_settings)
+            
             await session.commit()
             await session.refresh(new_user)
-            user_id = str(new_user.id)
-
-        logger.info(f"User created: {user_id}")
 
         access_token = create_access_token(user_id, request.email)
         refresh_token = create_refresh_token(user_id, request.email)
 
         try:
             create_user_embedding.delay(user_id)
-            logger.info(f"Embedding task queued for {user_id}")
         except Exception as e:
-            logger.error(f"Embedding queue failed (non-fatal): {e}")
+            logger.error(f"Embedding queue failed: {e}")
+
+        logger.info(f"User created successfully: {user_id} with default settings")
 
         return SignupResponse(
             success=True,
@@ -244,8 +253,6 @@ async def login(request: LoginRequest, req: Request):
         access_token = create_access_token(user_id, user.email)
         refresh_token = create_refresh_token(user_id, user.email)
 
-        logger.info(f"Login successful: {user_id}")
-
         return LoginResponse(
             success=True,
             message="Login successful",
@@ -290,8 +297,6 @@ async def refresh_token(request: RefreshRequest):
 
     new_access_token = create_access_token(user_id, email)
 
-    logger.info(f"Token refreshed for user: {user_id}")
-
     return RefreshResponse(
         access_token=new_access_token,
         token_type="bearer",
@@ -324,7 +329,6 @@ async def logout(
             ttl = max(int(exp - time.time()), 1)
             await _blacklist_token(refresh_jti, ttl)
 
-    logger.info(f"User logged out: {payload.get('sub')}")
     return {"success": True, "message": "Logged out successfully"}
 
 

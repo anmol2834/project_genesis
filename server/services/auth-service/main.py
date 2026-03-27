@@ -28,8 +28,9 @@ config = get_config()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Auth Service starting up...")
+    print("[STARTUP] Initializing database...")
     await init_database()
+    print("[STARTUP] Initializing Redis...")
     await init_redis()
     
     # Create database tables
@@ -37,16 +38,16 @@ async def lifespan(app: FastAPI):
         engine = get_engine()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables created/verified")
+        print("[STARTUP] Database tables verified")
     except Exception as e:
         logger.error(f"Failed to create tables: {e}")
     
-    logger.info("Auth Service started successfully")
+    print("[STARTUP] ✓ Auth Service Ready\n")
     yield
-    logger.info("Auth Service shutting down...")
+    print("\n[SHUTDOWN] Closing connections...")
     await close_database()
     await close_redis()
-    logger.info("Auth Service shut down successfully")
+    print("[SHUTDOWN] ✓ Auth Service Stopped")
 
 
 app = FastAPI(
@@ -111,4 +112,20 @@ app.include_router(auth_router)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=config.DEBUG)
+    
+    print("\n" + "="*60)
+    print("  AUTH SERVICE - PRODUCTION MODE")
+    print("="*60)
+    print(f"  Port: 8001")
+    print(f"  Environment: {config.ENVIRONMENT}")
+    print(f"  Debug: {config.DEBUG}")
+    print("="*60 + "\n")
+    
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8001,
+        reload=config.DEBUG,
+        access_log=False,
+        log_level="warning"
+    )

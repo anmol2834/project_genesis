@@ -10,7 +10,10 @@ import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
 import VisibilityOffRoundedIcon from '@mui/icons-material/VisibilityOffRounded';
 import { motion, AnimatePresence } from 'framer-motion';
 import NextLink from 'next/link';
+import { useRouter } from 'next/navigation';
 import { lightGradients, darkGradients } from '@/theme/palette';
+import { useAuth } from '@/contexts/AuthContext';
+import { useLogin, useGetProfile } from '@/hooks/mutations/useAuthMutations';
 
 // ─── Google SVG icon (no external dep) ───────────────────────────────────────
 function GoogleIcon() {
@@ -50,12 +53,16 @@ export default function SignInForm() {
   const grad = isDark ? darkGradients : lightGradients;
   const emailId = useId();
   const passwordId = useId();
+  const router = useRouter();
+  
+  // Auth context and mutations
+  const { setAuthData } = useAuth();
+  const loginMutation = useLogin();
+  const getProfileMutation = useGetProfile();
 
   const [form, setForm] = useState<FormState>({ email: '', password: '', remember: false });
   const [showPassword, setShowPassword] = useState(false);
-  const [authState, setAuthState] = useState<AuthState>('idle');
   const [oauthLoading, setOauthLoading] = useState<'google' | 'microsoft' | null>(null);
-  const [errorMsg, setErrorMsg] = useState('');
   const [touched, setTouched] = useState({ email: false, password: false });
 
   // Inline validation
@@ -65,13 +72,19 @@ export default function SignInForm() {
   const passwordError = touched.password && form.password && form.password.length < 6
     ? 'Password must be at least 6 characters'
     : '';
-  const canSubmit = form.email && form.password && !emailError && !passwordError && authState !== 'loading';
+  
+  const isLoading = loginMutation.isPending || getProfileMutation.isPending;
+  const canSubmit = form.email && form.password && !emailError && !passwordError && !isLoading;
 
   const handleChange = useCallback((field: keyof FormState) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = field === 'remember' ? e.target.checked : e.target.value;
     setForm((p) => ({ ...p, [field]: value }));
-    if (errorMsg) setErrorMsg('');
-  }, [errorMsg]);
+    
+    // Clear errors when user starts typing
+    if (loginMutation.isError) {
+      loginMutation.reset();
+    }
+  }, [loginMutation]);
 
   const handleBlur = useCallback((field: 'email' | 'password') => () => {
     setTouched((p) => ({ ...p, [field]: true }));
@@ -82,21 +95,30 @@ export default function SignInForm() {
     setTouched({ email: true, password: true });
     if (!canSubmit) return;
 
-    setAuthState('loading');
-    setErrorMsg('');
+    try {
+      // Step 1: Login and get tokens
+      const loginResponse = await loginMutation.mutateAsync({
+        email: form.email,
+        password: form.password,
+      });
 
-    // Simulate auth call — replace with real API
-    await new Promise((r) => setTimeout(r, 1600));
+      // Step 2: Fetch full user profile
+      const userProfile = await getProfileMutation.mutateAsync(loginResponse.tokens.access_token);
 
-    // Demo: treat any input as error to show error state
-    setAuthState('error');
-    setErrorMsg('Invalid email or password. Please try again.');
-  }, [canSubmit]);
+      // Step 3: Update auth context with user data and tokens
+      setAuthData(userProfile, loginResponse.tokens);
+
+      // Step 4: Redirect to dashboard
+      router.push('/dashboard');
+    } catch (error) {
+      // Error is already handled by React Query and displayed via loginMutation.error
+      console.error('[SignInForm] Login failed:', error);
+    }
+  }, [canSubmit, form.email, form.password, loginMutation, getProfileMutation, setAuthData, router]);
 
   const handleOAuth = useCallback(async (provider: 'google' | 'microsoft') => {
     setOauthLoading(provider);
-    setErrorMsg('');
-    // Simulate OAuth redirect delay — replace with real OAuth flow
+    // TODO: Implement OAuth flow
     await new Promise((r) => setTimeout(r, 1200));
     setOauthLoading(null);
   }, []);
@@ -113,6 +135,9 @@ export default function SignInForm() {
     '& .MuiInputLabel-root': { fontSize: '0.875rem' },
     '& .MuiFormHelperText-root': { fontSize: '0.72rem', mx: 0, mt: 0.5 },
   };
+
+  // Get error message from either mutation
+  const errorMsg = loginMutation.error?.message || getProfileMutation.error?.message || '';
 
   return (
     <motion.div
@@ -147,7 +172,10 @@ export default function SignInForm() {
             >
               <Alert
                 severity="error"
-                onClose={() => { setErrorMsg(''); setAuthState('idle'); }}
+                onClose={() => {
+                  loginMutation.reset();
+                  getProfileMutation.reset();
+                }}
                 sx={{ fontSize: '0.78rem', py: 0.5, borderRadius: '8px', '& .MuiAlert-icon': { fontSize: 16 } }}
               >
                 {errorMsg}
@@ -166,7 +194,7 @@ export default function SignInForm() {
               key={key}
               variant="outlined"
               fullWidth
-              disabled={!!oauthLoading || authState === 'loading'}
+              disabled={!!oauthLoading || isLoading}
               onClick={() => handleOAuth(key)}
               startIcon={
                 oauthLoading === key
@@ -304,7 +332,7 @@ export default function SignInForm() {
               '&:disabled': { opacity: 0.5 },
             }}
           >
-            {authState === 'loading'
+            {isLoading
               ? <CircularProgress size={16} color="inherit" />
               : 'Sign in'
             }

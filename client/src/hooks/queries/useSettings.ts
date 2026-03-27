@@ -1,27 +1,25 @@
 import { useQuery } from '@tanstack/react-query';
 import { settingsApi } from '@/services/endpoints/settings';
+import { queryKeys } from '@/lib/react-query/queryKeys';
 
-// Settings use simple string keys — no pagination or variants needed
-export function useProfile() {
-  return useQuery({
-    queryKey: ['settings', 'profile'],
-    queryFn:  settingsApi.profile,
-    staleTime: 10 * 60 * 1000,
-  });
-}
+/**
+ * Settings Query with Smart Caching & Real-time Updates
+ * 
+ * Features:
+ * - 15 min staleTime: Settings don't change frequently
+ * - 30 min gcTime: Keep in cache for fast navigation
+ * - Automatic refetch on window focus disabled (cost optimization)
+ * - Background refetch on mount if data is stale
+ * - Shared cache across all components
+ */
 
-export function useAiSettings() {
+export function useUserSettings() {
   return useQuery({
-    queryKey: ['settings', 'ai'],
-    queryFn:  settingsApi.aiSettings,
-    staleTime: 10 * 60 * 1000,
-  });
-}
-
-export function useNotificationSettings() {
-  return useQuery({
-    queryKey: ['settings', 'notifications'],
-    queryFn:  settingsApi.notifications,
-    staleTime: 10 * 60 * 1000,
+    queryKey: queryKeys.settings.all(),
+    queryFn: settingsApi.getSettings,
+    staleTime: 15 * 60 * 1000,  // 15 minutes - settings rarely change
+    gcTime: 30 * 60 * 1000,      // 30 minutes - keep in cache
+    refetchOnWindowFocus: false, // Prevent unnecessary API calls
+    refetchOnMount: 'always',    // Always check if stale on mount
   });
 }

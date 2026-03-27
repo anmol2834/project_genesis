@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Box, Typography, useTheme, alpha, InputBase, Switch, IconButton, Modal, type Theme } from '@mui/material';
+import { Box, Typography, useTheme, alpha, InputBase, Switch, IconButton, Modal, CircularProgress, MenuItem, TextField, Autocomplete, Chip, type Theme } from '@mui/material';
+import { useRouter } from 'next/navigation';
 import PersonRoundedIcon from '@mui/icons-material/PersonRounded';
 import ManageAccountsRoundedIcon from '@mui/icons-material/ManageAccountsRounded';
 import EmailRoundedIcon from '@mui/icons-material/EmailRounded';
@@ -31,10 +32,87 @@ import VisibilityOffRoundedIcon from '@mui/icons-material/VisibilityOffRounded';
 import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
 import FiberManualRecordRoundedIcon from '@mui/icons-material/FiberManualRecordRounded';
 import { lightGradients, darkGradients } from '@/theme/palette';
+import { useAuth } from '@/contexts/AuthContext';
+import { useLogout } from '@/hooks/mutations/useAuthMutations';
+import { useUserSettings } from '@/hooks/queries/useSettings';
+import { useUpdateSettings } from '@/hooks/mutations/useSettingsMutations';
 import {
   NAV_ITEMS, CONNECTED_ACCOUNTS, ACTIVE_SESSIONS, AI_TONES, AUTOMATION_RULES,
   type SettingSection,
 } from './settingsData';
+
+// ── Constants from signup ──────────────────────────────────────────────────────
+const BUSINESS_TYPES = ['SaaS', 'Agency', 'E-commerce', 'Freelancer', 'Startup', 'Enterprise', 'Consulting', 'Non-profit', 'Other'];
+
+const INDUSTRIES = ['Technology', 'Marketing', 'Sales', 'Finance', 'Healthcare', 'Education', 'Legal', 'Real Estate', 'Retail', 'Media', 'Logistics', 'HR & Recruiting'];
+
+const COUNTRIES = [
+  'India', 'United States', 'United Kingdom', 'Canada', 'Australia',
+  'Germany', 'France', 'Netherlands', 'Singapore', 'Brazil', 'Mexico',
+  'Spain', 'Italy', 'Japan', 'South Korea', 'UAE', 'South Africa',
+  'Nigeria', 'Pakistan', 'Bangladesh', 'Other',
+];
+
+const TIMEZONES = [
+  'India — Kolkata (UTC+5:30)',
+  'United States — New York (UTC-5:00)',
+  'United States — Chicago (UTC-6:00)',
+  'United States — Denver (UTC-7:00)',
+  'United States — Los Angeles (UTC-8:00)',
+  'United States — Anchorage (UTC-9:00)',
+  'United States — Honolulu (UTC-10:00)',
+  'United Kingdom — London (UTC+0:00)',
+  'Canada — Toronto (UTC-5:00)',
+  'Canada — Vancouver (UTC-8:00)',
+  'Australia — Sydney (UTC+10:00)',
+  'Australia — Melbourne (UTC+10:00)',
+  'Australia — Perth (UTC+8:00)',
+  'Germany — Berlin (UTC+1:00)',
+  'France — Paris (UTC+1:00)',
+  'Netherlands — Amsterdam (UTC+1:00)',
+  'Spain — Madrid (UTC+1:00)',
+  'Italy — Rome (UTC+1:00)',
+  'Sweden — Stockholm (UTC+1:00)',
+  'Poland — Warsaw (UTC+1:00)',
+  'Finland — Helsinki (UTC+2:00)',
+  'Greece — Athens (UTC+2:00)',
+  'South Africa — Johannesburg (UTC+2:00)',
+  'Egypt — Cairo (UTC+2:00)',
+  'Russia — Moscow (UTC+3:00)',
+  'Saudi Arabia — Riyadh (UTC+3:00)',
+  'UAE — Dubai (UTC+4:00)',
+  'Pakistan — Karachi (UTC+5:00)',
+  'Bangladesh — Dhaka (UTC+6:00)',
+  'Thailand — Bangkok (UTC+7:00)',
+  'Vietnam — Ho Chi Minh (UTC+7:00)',
+  'Indonesia — Jakarta (UTC+7:00)',
+  'China — Beijing (UTC+8:00)',
+  'Singapore — Singapore (UTC+8:00)',
+  'Malaysia — Kuala Lumpur (UTC+8:00)',
+  'Philippines — Manila (UTC+8:00)',
+  'South Korea — Seoul (UTC+9:00)',
+  'Japan — Tokyo (UTC+9:00)',
+  'New Zealand — Auckland (UTC+12:00)',
+  'Brazil — São Paulo (UTC-3:00)',
+  'Argentina — Buenos Aires (UTC-3:00)',
+  'Mexico — Mexico City (UTC-6:00)',
+  'Nigeria — Lagos (UTC+1:00)',
+  'Kenya — Nairobi (UTC+3:00)',
+];
+
+const TONES = [
+  { key: 'professional', label: 'Professional', desc: 'Formal, clear, business-focused' },
+  { key: 'friendly',     label: 'Friendly',     desc: 'Warm, approachable, conversational' },
+  { key: 'sales',        label: 'Sales-driven', desc: 'Persuasive, action-oriented' },
+  { key: 'custom',       label: 'Custom',        desc: 'AI learns from your writing style' },
+];
+
+const USE_CASES = [
+  { key: 'sales',     label: 'Sales outreach' },
+  { key: 'support',   label: 'Customer support' },
+  { key: 'followups', label: 'Follow-ups' },
+  { key: 'outreach',  label: 'Cold outreach' },
+];
 
 // ── Icon map ──────────────────────────────────────────────────────────────────
 const ICON_MAP: Record<string, React.ElementType> = {
@@ -124,15 +202,26 @@ function FieldRow({
 
 // ── Inline editable field ─────────────────────────────────────────────────────
 function EditField({
-  value, placeholder, isDark, theme, type = 'text', fullWidth = false,
+  value, placeholder, isDark, theme, type = 'text', fullWidth = false, onChange,
 }: {
   value: string; placeholder?: string; isDark: boolean; theme: Theme;
-  type?: string; fullWidth?: boolean;
+  type?: string; fullWidth?: boolean; onChange?: (value: string) => void;
 }) {
   const [val, setVal] = useState(value);
   const [focused, setFocused] = useState(false);
   const [show, setShow] = useState(false);
   const isPass = type === 'password';
+
+  useEffect(() => {
+    setVal(value);
+  }, [value]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newValue = e.target.value;
+    setVal(newValue);
+    onChange?.(newValue);
+  };
+
   return (
     <Box sx={{
       display: 'flex', alignItems: 'center', gap: 0.5,
@@ -146,7 +235,7 @@ function EditField({
     }}>
       <InputBase
         value={val}
-        onChange={e => setVal(e.target.value)}
+        onChange={handleChange}
         placeholder={placeholder}
         type={isPass && !show ? 'password' : 'text'}
         onFocus={() => setFocused(true)}
@@ -268,8 +357,86 @@ function SectionHead({
 // PROFILE
 // ══════════════════════════════════════════════════════════════════════════════
 function ProfileSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
+  const router = useRouter();
+  const { user, getAccessToken, getRefreshToken, clearAuth, updateUser } = useAuth();
+  const logoutMutation = useLogout();
   const grad = isDark ? darkGradients : lightGradients;
   const color = '#818cf8';
+
+  // Local state for editable fields
+  const [editedName, setEditedName] = useState(user?.full_name || '');
+  const [editedEmail, setEditedEmail] = useState(user?.email || '');
+  const [editedCompany, setEditedCompany] = useState(user?.business_name || '');
+  const [editedIndustry, setEditedIndustry] = useState(user?.business_type || '');
+  const [editedCountry, setEditedCountry] = useState(user?.country || '');
+  const [editedTimezone, setEditedTimezone] = useState(user?.timezone || '');
+  const [editedIndustries, setEditedIndustries] = useState<string[]>(user?.industries || []);
+
+  // Sync local state when user data changes
+  useEffect(() => {
+    if (user) {
+      setEditedName(user.full_name || '');
+      setEditedEmail(user.email || '');
+      setEditedCompany(user.business_name || '');
+      setEditedIndustry(user.business_type || '');
+      setEditedCountry(user.country || '');
+      setEditedTimezone(user.timezone || '');
+      setEditedIndustries(user.industries || []);
+    }
+  }, [user]);
+
+  const handleLogout = async () => {
+    try {
+      const accessToken = getAccessToken();
+      const refreshToken = getRefreshToken();
+      
+      if (!accessToken || !refreshToken) {
+        clearAuth();
+        router.push('/sign-in');
+        return;
+      }
+
+      // Call logout API to invalidate tokens on server
+      await logoutMutation.mutateAsync({ refresh_token: refreshToken });
+
+      // Clear local auth state
+      clearAuth();
+
+      // Redirect to signin
+      router.push('/sign-in');
+    } catch (error) {
+      console.error('[ProfileSection] Logout failed:', error);
+      // Even if API call fails, clear local state and redirect
+      clearAuth();
+      router.push('/sign-in');
+    }
+  };
+
+  const handleSaveChanges = () => {
+    // Update AuthContext with new values
+    updateUser({
+      full_name: editedName,
+      email: editedEmail,
+      business_name: editedCompany,
+      business_type: editedIndustry,
+      country: editedCountry,
+      timezone: editedTimezone,
+      industries: editedIndustries,
+    });
+    // TODO: Call API to persist changes to backend
+  };
+
+  const inputSx = {
+    '& .MuiOutlinedInput-root': {
+      fontSize: '0.78rem',
+      borderRadius: '9px',
+      '&.Mui-focused': {
+        boxShadow: `0 0 0 3px ${alpha(theme.palette.primary.main, isDark ? 0.16 : 0.10)}`,
+      },
+    },
+    '& .MuiInputLabel-root': { fontSize: '0.78rem' },
+    '& .MuiSelect-select': { fontSize: '0.78rem' },
+  };
   return (
     <Box>
       <SectionHead title="Profile" subtitle="Your identity and business details" color={color} icon={PersonRoundedIcon} isDark={isDark} />
@@ -290,55 +457,139 @@ function ProfileSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             boxShadow: `0 8px 24px ${alpha(color, 0.35)}`,
           }}>
-            <Typography sx={{ fontSize: '1.5rem', fontWeight: 900, color: '#fff', letterSpacing: '-0.04em' }}>JD</Typography>
-          </Box>
-          <Box sx={{
-            position: 'absolute', bottom: -5, right: -5, width: 22, height: 22,
-            borderRadius: '7px', background: isDark ? '#1e293b' : '#fff',
-            border: `1.5px solid ${alpha(color, 0.4)}`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
-            transition: 'all 0.15s', '&:hover': { background: alpha(color, 0.15) },
-          }}>
-            <CameraAltRoundedIcon sx={{ fontSize: 11, color }} />
+            <Typography sx={{ fontSize: '1.5rem', fontWeight: 900, color: '#fff', letterSpacing: '-0.04em' }}>
+              {user?.full_name ? user.full_name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2) : 'JD'}
+            </Typography>
           </Box>
         </Box>
         <Box sx={{ flex: 1, minWidth: 0 }}>
-          <Typography sx={{ fontSize: '0.95rem', fontWeight: 800, color: 'text.primary', letterSpacing: '-0.02em' }}>John Doe</Typography>
-          <Typography sx={{ fontSize: '0.68rem', color: 'text.disabled' }}>john@company.com</Typography>
+          <Typography sx={{ fontSize: '0.95rem', fontWeight: 800, color: 'text.primary', letterSpacing: '-0.02em' }}>{user?.full_name || 'John Doe'}</Typography>
+          <Typography sx={{ fontSize: '0.68rem', color: 'text.disabled' }}>{user?.email || 'john@company.com'}</Typography>
           <Box sx={{ display: 'flex', gap: 0.75, mt: 0.75 }}>
             <GlowChip label="Pro Plan" color={color} isDark={isDark} />
             <GlowChip label="Admin" color="#34d399" isDark={isDark} />
           </Box>
         </Box>
-        <Btn label="Edit photo" color={color} icon={EditRoundedIcon} isDark={isDark} theme={theme} size="xs" />
+        <Box component="button" onClick={handleLogout} disabled={logoutMutation.isPending} sx={{
+          display: 'inline-flex', alignItems: 'center', gap: 0.5,
+          px: 1.25, py: 0.55, borderRadius: '8px',
+          border: `1px solid ${alpha('#f87171', isDark ? 0.3 : 0.22)}`,
+          background: alpha('#f87171', isDark ? 0.1 : 0.07),
+          color: '#f87171', fontSize: '0.72rem', fontWeight: 600,
+          cursor: 'pointer', transition: 'all 0.15s ease',
+          '&:hover': {
+            background: alpha('#f87171', isDark ? 0.2 : 0.14),
+            borderColor: alpha('#f87171', 0.5),
+            boxShadow: `0 0 10px ${alpha('#f87171', 0.2)}`,
+            transform: 'translateY(-1px)',
+          },
+          '&:disabled': { opacity: 0.5, cursor: 'not-allowed' },
+        }}>
+          {logoutMutation.isPending ? <CircularProgress size={11} sx={{ color: '#f87171' }} /> : null}
+          {logoutMutation.isPending ? 'Logging out...' : 'Logout'}
+        </Box>
       </Box>
 
       <Cluster label="Identity" labelColor={color} isDark={isDark} theme={theme}>
         <FieldRow label="Full name" isDark={isDark} theme={theme}>
-          <EditField value="John Doe" isDark={isDark} theme={theme} />
+          <EditField value={editedName} onChange={(val) => setEditedName(val)} isDark={isDark} theme={theme} />
         </FieldRow>
         <FieldRow label="Email address" hint="Login & notifications" isDark={isDark} theme={theme}>
-          <EditField value="john@company.com" isDark={isDark} theme={theme} />
+          <EditField value={editedEmail} onChange={(val) => setEditedEmail(val)} isDark={isDark} theme={theme} />
         </FieldRow>
-        <FieldRow label="Job title" isDark={isDark} theme={theme} last>
-          <EditField value="Head of Sales" isDark={isDark} theme={theme} />
+        <FieldRow label="Country" isDark={isDark} theme={theme}>
+          <Box sx={{ width: 190 }}>
+            <TextField
+              select
+              value={editedCountry}
+              onChange={(e) => setEditedCountry(e.target.value)}
+              size="small"
+              fullWidth
+              sx={inputSx}
+            >
+              {COUNTRIES.map(c => <MenuItem key={c} value={c} sx={{ fontSize: '0.78rem' }}>{c}</MenuItem>)}
+            </TextField>
+          </Box>
+        </FieldRow>
+        <FieldRow label="Timezone" isDark={isDark} theme={theme} last>
+          <Box sx={{ width: 190 }}>
+            <TextField
+              select
+              value={editedTimezone}
+              onChange={(e) => setEditedTimezone(e.target.value)}
+              size="small"
+              fullWidth
+              sx={inputSx}
+              SelectProps={{ MenuProps: { PaperProps: { sx: { maxHeight: 280 } } } }}
+            >
+              {TIMEZONES.map(t => (
+                <MenuItem key={t} value={t} sx={{ fontSize: '0.72rem', whiteSpace: 'normal', lineHeight: 1.4, py: 0.75 }}>
+                  {t}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Box>
         </FieldRow>
       </Cluster>
 
       <Cluster label="Business" labelColor={color} isDark={isDark} theme={theme}>
         <FieldRow label="Company name" isDark={isDark} theme={theme}>
-          <EditField value="Acme Corp" isDark={isDark} theme={theme} />
+          <EditField value={editedCompany} onChange={(val) => setEditedCompany(val)} isDark={isDark} theme={theme} />
         </FieldRow>
-        <FieldRow label="Industry" isDark={isDark} theme={theme}>
-          <EditField value="B2B SaaS" isDark={isDark} theme={theme} />
+        <FieldRow label="Business type" isDark={isDark} theme={theme}>
+          <Box sx={{ width: 190 }}>
+            <TextField
+              select
+              value={editedIndustry}
+              onChange={(e) => setEditedIndustry(e.target.value)}
+              size="small"
+              fullWidth
+              sx={inputSx}
+            >
+              {BUSINESS_TYPES.map(t => <MenuItem key={t} value={t} sx={{ fontSize: '0.78rem' }}>{t}</MenuItem>)}
+            </TextField>
+          </Box>
         </FieldRow>
+        <Box sx={{
+          display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
+          gap: 2, px: 1.5, py: 1.1,
+          borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}`,
+          transition: 'background 0.15s',
+          '&:hover': { background: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.015)' },
+        }}>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography sx={{ fontSize: '0.78rem', fontWeight: 500, color: 'text.primary', lineHeight: 1.3 }}>
+              Industries
+            </Typography>
+            <Typography sx={{ fontSize: '0.63rem', color: 'text.disabled', mt: 0.1, lineHeight: 1.4 }}>Multiple industries</Typography>
+          </Box>
+          <Box sx={{ flexShrink: 0, width: 190 }}>
+            <Autocomplete
+              multiple
+              options={INDUSTRIES}
+              value={editedIndustries}
+              onChange={(_, v) => setEditedIndustries(v)}
+              size="small"
+              renderTags={(val, getTagProps) =>
+                val.map((opt, i) => (
+                  <Chip {...getTagProps({ index: i })} key={opt} label={opt} size="small"
+                    sx={{ fontSize: '0.65rem', height: 20, '& .MuiChip-deleteIcon': { fontSize: 12 } }} />
+                ))
+              }
+              renderInput={(params) => (
+                <TextField {...params} placeholder="Select industries" sx={inputSx} />
+              )}
+              sx={{ '& .MuiOutlinedInput-root': { borderRadius: '9px', fontSize: '0.78rem' } }}
+            />
+          </Box>
+        </Box>
         <FieldRow label="Website" isDark={isDark} theme={theme} last>
           <EditField value="https://acme.com" isDark={isDark} theme={theme} />
         </FieldRow>
       </Cluster>
 
       <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <Btn label="Save changes" color={color} icon={CheckRoundedIcon} isDark={isDark} theme={theme} />
+        <Btn label="Save changes" color={color} icon={CheckRoundedIcon} onClick={handleSaveChanges} isDark={isDark} theme={theme} />
       </Box>
     </Box>
   );
@@ -347,9 +598,24 @@ function ProfileSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // ACCOUNT
 // ══════════════════════════════════════════════════════════════════════════════
-function AccountSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
-  const [twoFA, setTwoFA] = useState(false);
+function AccountSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+  const [twoFA, setTwoFA] = useState(settings?.two_factor_enabled ?? false);
+  const [showQR, setShowQR] = useState(false);
   const color = '#22d3ee';
+  
+  useEffect(() => {
+    if (settings?.two_factor_enabled !== undefined) {
+      setTwoFA(settings.two_factor_enabled);
+    }
+  }, [settings]);
+  
+  const handleToggle2FA = async (enabled: boolean) => {
+    setTwoFA(enabled);
+    if (updateSettings) {
+      await updateSettings.mutateAsync({ two_factor_enabled: enabled });
+    }
+  };
+  
   return (
     <Box>
       <SectionHead title="Account" subtitle="Password, 2FA, and active sessions" color={color} icon={ManageAccountsRoundedIcon} isDark={isDark} />
@@ -373,23 +639,63 @@ function AccountSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
         action={
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
             <GlowChip label={twoFA ? 'Enabled' : 'Disabled'} color={twoFA ? '#34d399' : '#f87171'} isDark={isDark} />
-            <Switch checked={twoFA} onChange={e => setTwoFA(e.target.checked)} size="small" />
+            <Switch checked={twoFA} onChange={e => handleToggle2FA(e.target.checked)} size="small" />
           </Box>
         }
       >
         <Box sx={{ px: 1.5, py: 1.25 }}>
           <Typography sx={{ fontSize: '0.72rem', color: 'text.secondary', lineHeight: 1.6 }}>
             {twoFA
-              ? '✓ Your account is protected with an authenticator app. Codes rotate every 30 seconds.'
-              : 'Add a one-time code from your authenticator app as a second login step.'}
+              ? '✓ Your account is protected with email-based 2FA. A verification code will be sent to your email on each login.'
+              : 'Add an extra layer of security by requiring a verification code sent to your email on each login.'}
           </Typography>
           {!twoFA && (
             <Box sx={{ mt: 1 }}>
-              <Btn label="Set up authenticator" color={color} icon={KeyRoundedIcon} isDark={isDark} theme={theme} />
+              <Btn label="Enable 2FA" color={color} icon={KeyRoundedIcon} onClick={() => setShowQR(true)} isDark={isDark} theme={theme} />
+            </Box>
+          )}
+          {twoFA && (
+            <Box sx={{ mt: 1, display: 'flex', gap: 1 }}>
+              <Btn label="Disable 2FA" danger icon={CloseRoundedIcon} onClick={() => setTwoFA(false)} isDark={isDark} theme={theme} size="xs" />
             </Box>
           )}
         </Box>
       </Cluster>
+
+      {/* 2FA Setup Modal */}
+      <Modal open={showQR} onClose={() => setShowQR(false)}>
+        <Box sx={{
+          position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+          width: 400, borderRadius: '18px', p: 3, outline: 'none',
+          background: isDark ? '#1e293b' : '#fff',
+          border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : theme.palette.divider}`,
+          boxShadow: `0 24px 64px ${alpha('#000', 0.4)}`,
+        }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+            <KeyRoundedIcon sx={{ color, fontSize: 20 }} />
+            <Typography sx={{ fontSize: '0.95rem', fontWeight: 800, color: 'text.primary' }}>Enable Two-Factor Authentication</Typography>
+          </Box>
+          <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', mb: 2, lineHeight: 1.7 }}>
+            When you enable 2FA, you'll receive a verification code via email every time you sign in. This adds an extra layer of security to your account.
+          </Typography>
+          <Box sx={{
+            p: 2, borderRadius: '12px', mb: 2,
+            background: isDark ? alpha(color, 0.08) : alpha(color, 0.05),
+            border: `1px solid ${alpha(color, isDark ? 0.2 : 0.12)}`,
+          }}>
+            <Typography sx={{ fontSize: '0.7rem', color: 'text.secondary', mb: 1 }}>How it works:</Typography>
+            <Typography sx={{ fontSize: '0.68rem', color: 'text.secondary', lineHeight: 1.6 }}>
+              1. Enter your email and password<br />
+              2. Receive a 6-digit code via email<br />
+              3. Enter the code to complete login
+            </Typography>
+          </Box>
+          <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
+            <Btn label="Cancel" isDark={isDark} theme={theme} onClick={() => setShowQR(false)} />
+            <Btn label="Enable 2FA" color={color} icon={CheckRoundedIcon} onClick={() => { setTwoFA(true); setShowQR(false); }} isDark={isDark} theme={theme} />
+          </Box>
+        </Box>
+      </Modal>
 
       <Cluster label="Active Sessions" labelColor={color} isDark={isDark} theme={theme}
         action={<Btn label="Revoke all" color="#f87171" isDark={isDark} theme={theme} size="xs" />}
@@ -409,9 +715,26 @@ function AccountSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // EMAIL ACCOUNTS
 // ══════════════════════════════════════════════════════════════════════════════
-function EmailSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
+function EmailSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
   const [defaultAcc, setDefaultAcc] = useState('1');
+  const [syncFreq, setSyncFreq] = useState<'5m' | '15m' | '30m'>(settings?.sync_frequency ?? '5m');
+  const [autoSync, setAutoSync] = useState(settings?.auto_sync_replies ?? true);
+  const [syncSent, setSyncSent] = useState(settings?.sync_sent_folder ?? true);
   const color = '#34d399';
+  
+  useEffect(() => {
+    if (settings) {
+      setSyncFreq(settings.sync_frequency ?? '5m');
+      setAutoSync(settings.auto_sync_replies ?? true);
+      setSyncSent(settings.sync_sent_folder ?? true);
+    }
+  }, [settings]);
+  
+  const handleUpdateSetting = async (key: string, value: any) => {
+    if (updateSettings) {
+      await updateSettings.mutateAsync({ [key]: value });
+    }
+  };
   return (
     <Box>
       <SectionHead title="Email Accounts" subtitle="Connected accounts and sync settings" color={color} icon={EmailRoundedIcon} isDark={isDark} />
@@ -463,13 +786,13 @@ function EmailSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
 
       <Cluster label="Sync Preferences" labelColor={color} isDark={isDark} theme={theme}>
         <FieldRow label="Auto-sync replies" hint="Pull new replies every 5 minutes" isDark={isDark} theme={theme}>
-          <Switch defaultChecked size="small" />
+          <Switch checked={autoSync} onChange={e => { setAutoSync(e.target.checked); handleUpdateSetting('auto_sync_replies', e.target.checked); }} size="small" />
         </FieldRow>
         <FieldRow label="Sync sent folder" hint="Track emails sent outside the platform" isDark={isDark} theme={theme}>
-          <Switch defaultChecked size="small" />
+          <Switch checked={syncSent} onChange={e => { setSyncSent(e.target.checked); handleUpdateSetting('sync_sent_folder', e.target.checked); }} size="small" />
         </FieldRow>
         <FieldRow label="Sync frequency" isDark={isDark} theme={theme} last>
-          <PillToggle options={[{ id: '5m', label: '5m' }, { id: '15m', label: '15m' }, { id: '30m', label: '30m' }]} value="5m" onChange={() => {}} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: '5m', label: '5m' }, { id: '15m', label: '15m' }, { id: '30m', label: '30m' }]} value={syncFreq} onChange={(v) => { setSyncFreq(v); handleUpdateSetting('sync_frequency', v); }} color={color} isDark={isDark} theme={theme} />
         </FieldRow>
       </Cluster>
     </Box>
@@ -479,10 +802,43 @@ function EmailSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // AI SETTINGS
 // ══════════════════════════════════════════════════════════════════════════════
-function AISection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
-  const [tone, setTone] = useState('professional');
-  const [autoLevel, setAutoLevel] = useState<'off' | 'assist' | 'auto'>('assist');
+function AISection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+  const { user } = useAuth();
+  const [tone, setTone] = useState(user?.communication_tone || 'professional');
+  const [autoLevel, setAutoLevel] = useState<'off' | 'assist' | 'auto'>(settings?.automation_level ?? 'assist');
+  const [maxReplyLength, setMaxReplyLength] = useState<'short' | 'medium' | 'long'>(settings?.max_reply_length ?? 'medium');
+  const [customInstructions, setCustomInstructions] = useState(user?.business_description || '');
+  const [targetAudience, setTargetAudience] = useState(user?.target_audience || '');
+  const [useCases, setUseCases] = useState<string[]>(user?.use_cases || []);
+  const [learnFromEdits, setLearnFromEdits] = useState(settings?.learn_from_edits ?? true);
+  const [personalizePerLead, setPersonalizePerLead] = useState(settings?.personalize_per_lead ?? true);
+  const [avoidRepetition, setAvoidRepetition] = useState(settings?.avoid_repetition ?? true);
   const color = '#c084fc';
+
+  // Sync with settings data
+  useEffect(() => {
+    if (settings) {
+      setAutoLevel(settings.automation_level ?? 'assist');
+      setMaxReplyLength(settings.max_reply_length ?? 'medium');
+      setLearnFromEdits(settings.learn_from_edits ?? true);
+      setPersonalizePerLead(settings.personalize_per_lead ?? true);
+      setAvoidRepetition(settings.avoid_repetition ?? true);
+    }
+  }, [settings]);
+  
+  // Sync with user data
+  useEffect(() => {
+    if (user?.communication_tone) setTone(user.communication_tone);
+    if (user?.business_description) setCustomInstructions(user.business_description);
+    if (user?.target_audience) setTargetAudience(user.target_audience);
+    if (user?.use_cases) setUseCases(user.use_cases);
+  }, [user]);
+  
+  const handleUpdateSetting = async (key: string, value: any) => {
+    if (updateSettings) {
+      await updateSettings.mutateAsync({ [key]: value });
+    }
+  };
 
   return (
     <Box>
@@ -504,26 +860,26 @@ function AISection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
 
       {/* Tone selector */}
       <Cluster label="Response Tone" labelColor={color} isDark={isDark} theme={theme}>
-        {AI_TONES.map((t, i) => (
-          <Box key={t.id} component="button" onClick={() => setTone(t.id)} sx={{
+        {TONES.map((t, i) => (
+          <Box key={t.key} component="button" onClick={() => setTone(t.key)} sx={{
             display: 'flex', alignItems: 'center', gap: 1.25, width: '100%',
             px: 1.5, py: 0.95, border: 'none', cursor: 'pointer', textAlign: 'left',
-            background: tone === t.id ? alpha(color, isDark ? 0.1 : 0.06) : 'transparent',
-            borderBottom: i < AI_TONES.length - 1 ? `1px solid ${isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}` : 'none',
+            background: tone === t.key ? alpha(color, isDark ? 0.1 : 0.06) : 'transparent',
+            borderBottom: i < TONES.length - 1 ? `1px solid ${isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'}` : 'none',
             transition: 'background 0.15s',
             '&:hover': { background: alpha(color, isDark ? 0.07 : 0.04) },
           }}>
             <Box sx={{
               width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-              background: tone === t.id ? color : isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.12)',
-              boxShadow: tone === t.id ? `0 0 8px ${alpha(color, 0.7)}` : 'none',
+              background: tone === t.key ? color : isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.12)',
+              boxShadow: tone === t.key ? `0 0 8px ${alpha(color, 0.7)}` : 'none',
               transition: 'all 0.2s',
             }} />
             <Box sx={{ flex: 1 }}>
-              <Typography sx={{ fontSize: '0.76rem', fontWeight: tone === t.id ? 700 : 500, color: tone === t.id ? color : 'text.primary' }}>{t.label}</Typography>
+              <Typography sx={{ fontSize: '0.76rem', fontWeight: tone === t.key ? 700 : 500, color: tone === t.key ? color : 'text.primary' }}>{t.label}</Typography>
               <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled' }}>{t.desc}</Typography>
             </Box>
-            {tone === t.id && <CheckRoundedIcon sx={{ fontSize: 14, color, flexShrink: 0 }} />}
+            {tone === t.key && <CheckRoundedIcon sx={{ fontSize: 14, color, flexShrink: 0 }} />}
           </Box>
         ))}
       </Cluster>
@@ -535,7 +891,7 @@ function AISection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
           { id: 'assist', label: 'AI Assist',      desc: 'AI drafts, you approve before sending', badge: 'Recommended' },
           { id: 'auto',   label: 'Full Autopilot', desc: 'AI sends replies automatically', badge: 'Advanced' },
         ] as const).map((opt, i) => (
-          <Box key={opt.id} component="button" onClick={() => setAutoLevel(opt.id)} sx={{
+          <Box key={opt.id} component="button" onClick={() => { setAutoLevel(opt.id); handleUpdateSetting('automation_level', opt.id); }} sx={{
             display: 'flex', alignItems: 'center', gap: 1.25, width: '100%',
             px: 1.5, py: 0.95, border: 'none', cursor: 'pointer', textAlign: 'left',
             background: autoLevel === opt.id ? alpha(color, isDark ? 0.1 : 0.06) : 'transparent',
@@ -572,7 +928,12 @@ function AISection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
             border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`,
             background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
           }}>
-            <InputBase multiline rows={3} defaultValue="We are a B2B SaaS company targeting mid-market companies. Always mention our 14-day free trial. Avoid aggressive sales language."
+            <InputBase 
+              multiline 
+              rows={3} 
+              value={customInstructions}
+              onChange={(e) => setCustomInstructions(e.target.value)}
+              placeholder="Tell AI about your business, tone preferences, and what to avoid..."
               sx={{ fontSize: '0.75rem', color: 'text.primary', width: '100%', px: 1.25, py: 0.9, '& textarea': { lineHeight: 1.6 } }}
             />
           </Box>
@@ -582,12 +943,70 @@ function AISection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
         </Box>
       </Cluster>
 
+      {/* Target Audience */}
+      <Cluster label="Target Audience" labelColor={color} isDark={isDark} theme={theme}>
+        <Box sx={{ px: 1.5, py: 1.25 }}>
+          <Typography sx={{ fontSize: '0.65rem', color: 'text.disabled', mb: 0.75 }}>
+            Describe your ideal customer or target audience.
+          </Typography>
+          <Box sx={{
+            borderRadius: '10px', overflow: 'hidden',
+            border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`,
+            background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+          }}>
+            <InputBase 
+              multiline 
+              rows={2} 
+              value={targetAudience}
+              onChange={(e) => setTargetAudience(e.target.value)}
+              placeholder="e.g., B2B SaaS companies, mid-market enterprises, tech startups..."
+              sx={{ fontSize: '0.75rem', color: 'text.primary', width: '100%', px: 1.25, py: 0.9, '& textarea': { lineHeight: 1.6 } }}
+            />
+          </Box>
+        </Box>
+      </Cluster>
+
+      {/* Use Cases */}
+      <Cluster label="Use Cases" labelColor={color} isDark={isDark} theme={theme}>
+        <Box sx={{ px: 1.5, py: 1.25 }}>
+          <Typography sx={{ fontSize: '0.65rem', color: 'text.disabled', mb: 0.75 }}>
+            How you plan to use AI for your business.
+          </Typography>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+            {USE_CASES.map((u) => {
+              const active = useCases.includes(u.key);
+              return (
+                <Box
+                  key={u.key}
+                  component="button"
+                  onClick={() => {
+                    const next = active ? useCases.filter(k => k !== u.key) : [...useCases, u.key];
+                    setUseCases(next);
+                  }}
+                  sx={{
+                    px: 1.25, py: 0.5, borderRadius: '7px', cursor: 'pointer', border: 'none',
+                    border: `1px solid ${active ? color : isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)'}`,
+                    background: active ? alpha(color, isDark ? 0.15 : 0.1) : 'transparent',
+                    transition: 'all 0.18s ease',
+                    '&:hover': { borderColor: color, background: alpha(color, isDark ? 0.1 : 0.06) },
+                  }}
+                >
+                  <Typography sx={{ fontSize: '0.7rem', color: active ? color : 'text.secondary', fontWeight: active ? 600 : 400 }}>
+                    {u.label}
+                  </Typography>
+                </Box>
+              );
+            })}
+          </Box>
+        </Box>
+      </Cluster>
+
       <Cluster label="Behavior" labelColor={color} isDark={isDark} theme={theme}>
-        <FieldRow label="Learn from my edits" hint="AI improves based on how you edit drafts" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
-        <FieldRow label="Personalize per lead" hint="Use lead data to customize each message" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
-        <FieldRow label="Avoid repetition" hint="Don't repeat phrases across a sequence" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
+        <FieldRow label="Learn from my edits" hint="AI improves based on how you edit drafts" isDark={isDark} theme={theme}><Switch checked={learnFromEdits} onChange={e => { setLearnFromEdits(e.target.checked); handleUpdateSetting('learn_from_edits', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Personalize per lead" hint="Use lead data to customize each message" isDark={isDark} theme={theme}><Switch checked={personalizePerLead} onChange={e => { setPersonalizePerLead(e.target.checked); handleUpdateSetting('personalize_per_lead', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Avoid repetition" hint="Don't repeat phrases across a sequence" isDark={isDark} theme={theme}><Switch checked={avoidRepetition} onChange={e => { setAvoidRepetition(e.target.checked); handleUpdateSetting('avoid_repetition', e.target.checked); }} size="small" /></FieldRow>
         <FieldRow label="Max reply length" isDark={isDark} theme={theme} last>
-          <PillToggle options={[{ id: 'short', label: 'Short' }, { id: 'medium', label: 'Medium' }, { id: 'long', label: 'Long' }]} value="medium" onChange={() => {}} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: 'short', label: 'Short' }, { id: 'medium', label: 'Medium' }, { id: 'long', label: 'Long' }]} value={maxReplyLength} onChange={(v) => { setMaxReplyLength(v); handleUpdateSetting('max_reply_length', v); }} color={color} isDark={isDark} theme={theme} />
         </FieldRow>
       </Cluster>
     </Box>
@@ -597,11 +1016,34 @@ function AISection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // AUTOMATION
 // ══════════════════════════════════════════════════════════════════════════════
-function AutomationSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
+function AutomationSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
   const [rules, setRules] = useState(AUTOMATION_RULES);
   const toggle = (id: string) => setRules(r => r.map(x => x.id === id ? { ...x, enabled: !x.enabled } : x));
+  const [delayBetweenSteps, setDelayBetweenSteps] = useState<'1d' | '3d' | '7d'>(settings?.delay_between_steps ?? '3d');
+  const [maxEmailsPerLead, setMaxEmailsPerLead] = useState<'3' | '5' | '7'>(String(settings?.max_emails_per_lead ?? 5) as '3' | '5' | '7');
+  const [automationEnabled, setAutomationEnabled] = useState(settings?.automation_enabled ?? true);
+  const [pauseOnWeekends, setPauseOnWeekends] = useState(settings?.pause_on_weekends ?? true);
+  const [respectSendingHours, setRespectSendingHours] = useState(settings?.respect_sending_hours ?? true);
+  const [stopOnReply, setStopOnReply] = useState(settings?.stop_on_reply ?? true);
   const color = '#fbbf24';
   const activeCount = rules.filter(r => r.enabled).length;
+  
+  useEffect(() => {
+    if (settings) {
+      setDelayBetweenSteps(settings.delay_between_steps ?? '3d');
+      setMaxEmailsPerLead(String(settings.max_emails_per_lead ?? 5) as '3' | '5' | '7');
+      setAutomationEnabled(settings.automation_enabled ?? true);
+      setPauseOnWeekends(settings.pause_on_weekends ?? true);
+      setRespectSendingHours(settings.respect_sending_hours ?? true);
+      setStopOnReply(settings.stop_on_reply ?? true);
+    }
+  }, [settings]);
+  
+  const handleUpdateSetting = async (key: string, value: any) => {
+    if (updateSettings) {
+      await updateSettings.mutateAsync({ [key]: value });
+    }
+  };
 
   return (
     <Box>
@@ -628,9 +1070,9 @@ function AutomationSection({ isDark, theme }: { isDark: boolean; theme: Theme })
       </Box>
 
       <Cluster label="Global Controls" labelColor={color} isDark={isDark} theme={theme}>
-        <FieldRow label="Enable automation engine" hint="Master switch for all automation" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
-        <FieldRow label="Pause on weekends" hint="No automated emails on Sat/Sun" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
-        <FieldRow label="Respect sending hours" hint="Only send between 9am–6pm local time" isDark={isDark} theme={theme} last><Switch defaultChecked size="small" /></FieldRow>
+        <FieldRow label="Enable automation engine" hint="Master switch for all automation" isDark={isDark} theme={theme}><Switch checked={automationEnabled} onChange={e => { setAutomationEnabled(e.target.checked); handleUpdateSetting('automation_enabled', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Pause on weekends" hint="No automated emails on Sat/Sun" isDark={isDark} theme={theme}><Switch checked={pauseOnWeekends} onChange={e => { setPauseOnWeekends(e.target.checked); handleUpdateSetting('pause_on_weekends', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Respect sending hours" hint="Only send between 9am–6pm local time" isDark={isDark} theme={theme} last><Switch checked={respectSendingHours} onChange={e => { setRespectSendingHours(e.target.checked); handleUpdateSetting('respect_sending_hours', e.target.checked); }} size="small" /></FieldRow>
       </Cluster>
 
       <Cluster label="Rules" labelColor={color} isDark={isDark} theme={theme}
@@ -655,11 +1097,11 @@ function AutomationSection({ isDark, theme }: { isDark: boolean; theme: Theme })
 
       <Cluster label="Sequence Defaults" labelColor={color} isDark={isDark} theme={theme}>
         <FieldRow label="Delay between steps" isDark={isDark} theme={theme}>
-          <PillToggle options={[{ id: '1d', label: '1d' }, { id: '3d', label: '3d' }, { id: '7d', label: '7d' }]} value="3d" onChange={() => {}} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: '1d', label: '1d' }, { id: '3d', label: '3d' }, { id: '7d', label: '7d' }]} value={delayBetweenSteps} onChange={(v) => { setDelayBetweenSteps(v); handleUpdateSetting('delay_between_steps', v); }} color={color} isDark={isDark} theme={theme} />
         </FieldRow>
-        <FieldRow label="Stop on reply" hint="Pause sequence when lead replies" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
+        <FieldRow label="Stop on reply" hint="Pause sequence when lead replies" isDark={isDark} theme={theme}><Switch checked={stopOnReply} onChange={e => { setStopOnReply(e.target.checked); handleUpdateSetting('stop_on_reply', e.target.checked); }} size="small" /></FieldRow>
         <FieldRow label="Max emails per lead" isDark={isDark} theme={theme} last>
-          <PillToggle options={[{ id: '3', label: '3' }, { id: '5', label: '5' }, { id: '7', label: '7' }]} value="5" onChange={() => {}} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: '3', label: '3' }, { id: '5', label: '5' }, { id: '7', label: '7' }]} value={maxEmailsPerLead} onChange={(v) => { setMaxEmailsPerLead(v); handleUpdateSetting('max_emails_per_lead', Number(v)); }} color={color} isDark={isDark} theme={theme} />
         </FieldRow>
       </Cluster>
     </Box>
@@ -669,26 +1111,55 @@ function AutomationSection({ isDark, theme }: { isDark: boolean; theme: Theme })
 // ══════════════════════════════════════════════════════════════════════════════
 // NOTIFICATIONS
 // ══════════════════════════════════════════════════════════════════════════════
-function NotificationsSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
+function NotificationsSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+  const [notifBatching, setNotifBatching] = useState<'instant' | 'hourly' | 'daily'>(settings?.notification_batching ?? 'instant');
+  const [emailNewReply, setEmailNewReply] = useState(settings?.email_new_reply ?? true);
+  const [emailCampaignComplete, setEmailCampaignComplete] = useState(settings?.email_campaign_complete ?? true);
+  const [emailLeadStatus, setEmailLeadStatus] = useState(settings?.email_lead_status ?? false);
+  const [emailWeeklyDigest, setEmailWeeklyDigest] = useState(settings?.email_weekly_digest ?? true);
+  const [inappRealtimeReplies, setInappRealtimeReplies] = useState(settings?.inapp_realtime_replies ?? true);
+  const [inappAiActions, setInappAiActions] = useState(settings?.inapp_ai_actions ?? true);
+  const [inappTeamActivity, setInappTeamActivity] = useState(settings?.inapp_team_activity ?? false);
+  const [inappSystemAlerts, setInappSystemAlerts] = useState(settings?.inapp_system_alerts ?? true);
   const color = '#f87171';
+  
+  useEffect(() => {
+    if (settings) {
+      setNotifBatching(settings.notification_batching ?? 'instant');
+      setEmailNewReply(settings.email_new_reply ?? true);
+      setEmailCampaignComplete(settings.email_campaign_complete ?? true);
+      setEmailLeadStatus(settings.email_lead_status ?? false);
+      setEmailWeeklyDigest(settings.email_weekly_digest ?? true);
+      setInappRealtimeReplies(settings.inapp_realtime_replies ?? true);
+      setInappAiActions(settings.inapp_ai_actions ?? true);
+      setInappTeamActivity(settings.inapp_team_activity ?? false);
+      setInappSystemAlerts(settings.inapp_system_alerts ?? true);
+    }
+  }, [settings]);
+  
+  const handleUpdateSetting = async (key: string, value: any) => {
+    if (updateSettings) {
+      await updateSettings.mutateAsync({ [key]: value });
+    }
+  };
   return (
     <Box>
       <SectionHead title="Notifications" subtitle="Alerts, digests, and activity updates" color={color} icon={NotificationsRoundedIcon} isDark={isDark} />
       <Cluster label="Email Alerts" labelColor={color} isDark={isDark} theme={theme}>
-        <FieldRow label="New reply received" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
-        <FieldRow label="Campaign completed" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
-        <FieldRow label="Lead status changed" isDark={isDark} theme={theme}><Switch size="small" /></FieldRow>
-        <FieldRow label="Weekly digest" hint="Summary every Monday morning" isDark={isDark} theme={theme} last><Switch defaultChecked size="small" /></FieldRow>
+        <FieldRow label="New reply received" isDark={isDark} theme={theme}><Switch checked={emailNewReply} onChange={e => { setEmailNewReply(e.target.checked); handleUpdateSetting('email_new_reply', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Campaign completed" isDark={isDark} theme={theme}><Switch checked={emailCampaignComplete} onChange={e => { setEmailCampaignComplete(e.target.checked); handleUpdateSetting('email_campaign_complete', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Lead status changed" isDark={isDark} theme={theme}><Switch checked={emailLeadStatus} onChange={e => { setEmailLeadStatus(e.target.checked); handleUpdateSetting('email_lead_status', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Weekly digest" hint="Summary every Monday morning" isDark={isDark} theme={theme} last><Switch checked={emailWeeklyDigest} onChange={e => { setEmailWeeklyDigest(e.target.checked); handleUpdateSetting('email_weekly_digest', e.target.checked); }} size="small" /></FieldRow>
       </Cluster>
       <Cluster label="In-App Alerts" labelColor={color} isDark={isDark} theme={theme}>
-        <FieldRow label="Real-time reply alerts" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
-        <FieldRow label="AI action notifications" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
-        <FieldRow label="Team activity" isDark={isDark} theme={theme}><Switch size="small" /></FieldRow>
-        <FieldRow label="System alerts" hint="Downtime, errors, account issues" isDark={isDark} theme={theme} last><Switch defaultChecked size="small" /></FieldRow>
+        <FieldRow label="Real-time reply alerts" isDark={isDark} theme={theme}><Switch checked={inappRealtimeReplies} onChange={e => { setInappRealtimeReplies(e.target.checked); handleUpdateSetting('inapp_realtime_replies', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="AI action notifications" isDark={isDark} theme={theme}><Switch checked={inappAiActions} onChange={e => { setInappAiActions(e.target.checked); handleUpdateSetting('inapp_ai_actions', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Team activity" isDark={isDark} theme={theme}><Switch checked={inappTeamActivity} onChange={e => { setInappTeamActivity(e.target.checked); handleUpdateSetting('inapp_team_activity', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="System alerts" hint="Downtime, errors, account issues" isDark={isDark} theme={theme} last><Switch checked={inappSystemAlerts} onChange={e => { setInappSystemAlerts(e.target.checked); handleUpdateSetting('inapp_system_alerts', e.target.checked); }} size="small" /></FieldRow>
       </Cluster>
       <Cluster label="Frequency" labelColor={color} isDark={isDark} theme={theme}>
         <FieldRow label="Notification batching" isDark={isDark} theme={theme} last>
-          <PillToggle options={[{ id: 'instant', label: 'Instant' }, { id: 'hourly', label: 'Hourly' }, { id: 'daily', label: 'Daily' }]} value="instant" onChange={() => {}} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: 'instant', label: 'Instant' }, { id: 'hourly', label: 'Hourly' }, { id: 'daily', label: 'Daily' }]} value={notifBatching} onChange={(v) => { setNotifBatching(v); handleUpdateSetting('notification_batching', v); }} color={color} isDark={isDark} theme={theme} />
         </FieldRow>
       </Cluster>
     </Box>
@@ -698,8 +1169,22 @@ function NotificationsSection({ isDark, theme }: { isDark: boolean; theme: Theme
 // ══════════════════════════════════════════════════════════════════════════════
 // SECURITY
 // ══════════════════════════════════════════════════════════════════════════════
-function SecuritySection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
+function SecuritySection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+  const [require2FAForTeam, setRequire2FAForTeam] = useState(settings?.require_2fa_for_team ?? false);
   const color = '#fb923c';
+  
+  useEffect(() => {
+    if (settings) {
+      setRequire2FAForTeam(settings.require_2fa_for_team ?? false);
+    }
+  }, [settings]);
+  
+  const handleUpdateSetting = async (key: string, value: any) => {
+    if (updateSettings) {
+      await updateSettings.mutateAsync({ [key]: value });
+    }
+  };
+  
   const auditLog = [
     { action: 'Password changed',    time: '2h ago',   ip: '192.168.1.1',  ok: true },
     { action: 'New device login',    time: '1d ago',   ip: '10.0.0.42',    ok: true },
@@ -710,7 +1195,7 @@ function SecuritySection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
     <Box>
       <SectionHead title="Security" subtitle="Access control, API keys, and audit log" color={color} icon={ShieldRoundedIcon} isDark={isDark} />
       <Cluster label="Access Control" labelColor={color} isDark={isDark} theme={theme}>
-        <FieldRow label="Require 2FA for team" hint="All members must enable 2FA" isDark={isDark} theme={theme}><Switch size="small" /></FieldRow>
+        <FieldRow label="Require 2FA for team" hint="All members must enable 2FA" isDark={isDark} theme={theme}><Switch checked={require2FAForTeam} onChange={e => { setRequire2FAForTeam(e.target.checked); handleUpdateSetting('require_2fa_for_team', e.target.checked); }} size="small" /></FieldRow>
         <FieldRow label="Single sign-on (SSO)" hint="Connect your identity provider" isDark={isDark} theme={theme}>
           <Btn label="Configure" color={color} isDark={isDark} theme={theme} size="xs" />
         </FieldRow>
@@ -719,18 +1204,14 @@ function SecuritySection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
         </FieldRow>
       </Cluster>
 
-      <Cluster label="API Keys" labelColor={color} isDark={isDark} theme={theme}
-        action={<Btn label="Generate key" color={color} icon={AddRoundedIcon} isDark={isDark} theme={theme} size="xs" />}
-      >
-        <Box sx={{ px: 1.5, py: 1.1, display: 'flex', alignItems: 'center', gap: 1.25 }}>
-          <Box sx={{ flex: 1, minWidth: 0 }}>
-            <Typography sx={{ fontSize: '0.75rem', fontWeight: 600, color: 'text.primary' }}>Production key</Typography>
-            <Typography sx={{ fontSize: '0.63rem', color: 'text.disabled', fontFamily: 'monospace', mt: 0.1 }}>
-              sk_live_••••••••••••••••••••••••
-            </Typography>
-          </Box>
-          <GlowChip label="Active" color="#34d399" isDark={isDark} />
-          <Btn label="Revoke" danger isDark={isDark} theme={theme} size="xs" />
+      <Cluster label="API Keys" labelColor={color} isDark={isDark} theme={theme}>
+        <Box sx={{ px: 1.5, py: 2, textAlign: 'center' }}>
+          <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', mb: 0.5 }}>
+            API Key Management
+          </Typography>
+          <Typography sx={{ fontSize: '0.68rem', color: 'text.disabled', lineHeight: 1.6 }}>
+            Coming Soon - Generate and manage API keys for programmatic access
+          </Typography>
         </Box>
       </Cluster>
 
@@ -756,8 +1237,27 @@ function SecuritySection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // TEAM
 // ══════════════════════════════════════════════════════════════════════════════
-function TeamSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
+function TeamSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+  const [defaultRole, setDefaultRole] = useState<'viewer' | 'member' | 'admin'>(settings?.default_member_role ?? 'member');
+  const [workspaceName, setWorkspaceName] = useState(settings?.workspace_name ?? 'Acme Corp');
+  const [inviteByDomain, setInviteByDomain] = useState(settings?.invite_by_domain ?? false);
+  const [requireAdminApproval, setRequireAdminApproval] = useState(settings?.require_admin_approval ?? true);
   const color = '#60a5fa';
+  
+  useEffect(() => {
+    if (settings) {
+      setDefaultRole(settings.default_member_role ?? 'member');
+      setWorkspaceName(settings.workspace_name ?? 'Acme Corp');
+      setInviteByDomain(settings.invite_by_domain ?? false);
+      setRequireAdminApproval(settings.require_admin_approval ?? true);
+    }
+  }, [settings]);
+  
+  const handleUpdateSetting = async (key: string, value: any) => {
+    if (updateSettings) {
+      await updateSettings.mutateAsync({ [key]: value });
+    }
+  };
   return (
     <Box>
       <SectionHead title="Team" subtitle="Workspace settings and member controls" color={color} icon={GroupsRoundedIcon} isDark={isDark} />
@@ -770,14 +1270,14 @@ function TeamSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
         ))}
       </Box>
       <Cluster label="Workspace" labelColor={color} isDark={isDark} theme={theme}>
-        <FieldRow label="Workspace name" isDark={isDark} theme={theme}><EditField value="Acme Corp" isDark={isDark} theme={theme} /></FieldRow>
+        <FieldRow label="Workspace name" isDark={isDark} theme={theme}><EditField value={workspaceName} onChange={(val) => { setWorkspaceName(val); handleUpdateSetting('workspace_name', val); }} isDark={isDark} theme={theme} /></FieldRow>
         <FieldRow label="Default member role" isDark={isDark} theme={theme} last>
-          <PillToggle options={[{ id: 'viewer', label: 'Viewer' }, { id: 'member', label: 'Member' }, { id: 'admin', label: 'Admin' }]} value="member" onChange={() => {}} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: 'viewer', label: 'Viewer' }, { id: 'member', label: 'Member' }, { id: 'admin', label: 'Admin' }]} value={defaultRole} onChange={(v) => { setDefaultRole(v); handleUpdateSetting('default_member_role', v); }} color={color} isDark={isDark} theme={theme} />
         </FieldRow>
       </Cluster>
       <Cluster label="Access Policy" labelColor={color} isDark={isDark} theme={theme}>
-        <FieldRow label="Invite by email domain" hint="Auto-approve @company.com emails" isDark={isDark} theme={theme}><Switch size="small" /></FieldRow>
-        <FieldRow label="Require admin approval" hint="New members need admin sign-off" isDark={isDark} theme={theme} last><Switch defaultChecked size="small" /></FieldRow>
+        <FieldRow label="Invite by email domain" hint="Auto-approve @company.com emails" isDark={isDark} theme={theme}><Switch checked={inviteByDomain} onChange={e => { setInviteByDomain(e.target.checked); handleUpdateSetting('invite_by_domain', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Require admin approval" hint="New members need admin sign-off" isDark={isDark} theme={theme} last><Switch checked={requireAdminApproval} onChange={e => { setRequireAdminApproval(e.target.checked); handleUpdateSetting('require_admin_approval', e.target.checked); }} size="small" /></FieldRow>
       </Cluster>
       <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
         <Btn label="Manage full team →" color={color} isDark={isDark} theme={theme} />
@@ -789,16 +1289,33 @@ function TeamSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // DATA & PRIVACY
 // ══════════════════════════════════════════════════════════════════════════════
-function DataSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
+function DataSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
   const [deleteModal, setDeleteModal] = useState(false);
+  const [analyticsImprovement, setAnalyticsImprovement] = useState(settings?.analytics_improvement ?? true);
+  const [personalizationData, setPersonalizationData] = useState(settings?.personalization_data ?? true);
+  const [thirdPartyIntegrations, setThirdPartyIntegrations] = useState(settings?.third_party_integrations ?? false);
   const color = '#a3e635';
+  
+  useEffect(() => {
+    if (settings) {
+      setAnalyticsImprovement(settings.analytics_improvement ?? true);
+      setPersonalizationData(settings.personalization_data ?? true);
+      setThirdPartyIntegrations(settings.third_party_integrations ?? false);
+    }
+  }, [settings]);
+  
+  const handleUpdateSetting = async (key: string, value: any) => {
+    if (updateSettings) {
+      await updateSettings.mutateAsync({ [key]: value });
+    }
+  };
   return (
     <Box>
       <SectionHead title="Data & Privacy" subtitle="Usage, exports, and account deletion" color={color} icon={StorageRoundedIcon} isDark={isDark} />
       <Cluster label="Data Usage" labelColor={color} isDark={isDark} theme={theme}>
-        <FieldRow label="Analytics & improvement" hint="Help improve AI with anonymized data" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
-        <FieldRow label="Personalization data" hint="Use activity to personalize experience" isDark={isDark} theme={theme}><Switch defaultChecked size="small" /></FieldRow>
-        <FieldRow label="Third-party integrations" hint="Share data with connected apps" isDark={isDark} theme={theme} last><Switch size="small" /></FieldRow>
+        <FieldRow label="Analytics & improvement" hint="Help improve AI with anonymized data" isDark={isDark} theme={theme}><Switch checked={analyticsImprovement} onChange={e => { setAnalyticsImprovement(e.target.checked); handleUpdateSetting('analytics_improvement', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Personalization data" hint="Use activity to personalize experience" isDark={isDark} theme={theme}><Switch checked={personalizationData} onChange={e => { setPersonalizationData(e.target.checked); handleUpdateSetting('personalization_data', e.target.checked); }} size="small" /></FieldRow>
+        <FieldRow label="Third-party integrations" hint="Share data with connected apps" isDark={isDark} theme={theme} last><Switch checked={thirdPartyIntegrations} onChange={e => { setThirdPartyIntegrations(e.target.checked); handleUpdateSetting('third_party_integrations', e.target.checked); }} size="small" /></FieldRow>
       </Cluster>
 
       <Cluster label="Export" labelColor={color} isDark={isDark} theme={theme}>
@@ -926,22 +1443,51 @@ export default function SettingsPage() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const grad = isDark ? darkGradients : lightGradients;
 
+  // Fetch settings data with React Query
+  const { data: settings, isLoading: settingsLoading, error: settingsError } = useUserSettings();
+  const updateSettingsMutation = useUpdateSettings();
+
   const filtered = NAV_ITEMS.filter(n =>
     !search || n.label.toLowerCase().includes(search.toLowerCase()) || n.description.toLowerCase().includes(search.toLowerCase())
   );
 
   const activeItem = NAV_ITEMS.find(n => n.id === active)!;
 
+  // Show loading state while fetching settings
+  if (settingsLoading) {
+    return (
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  // Show error state if settings fetch failed
+  if (settingsError) {
+    return (
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', px: 3 }}>
+        <Box sx={{ textAlign: 'center' }}>
+          <Typography variant="h6" color="error" gutterBottom>
+            Failed to load settings
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            {settingsError.message || 'Please try refreshing the page'}
+          </Typography>
+        </Box>
+      </Box>
+    );
+  }
+
   const SECTION_MAP: Record<SettingSection, React.ReactNode> = {
     profile:       <ProfileSection isDark={isDark} theme={theme} />,
-    account:       <AccountSection isDark={isDark} theme={theme} />,
-    email:         <EmailSection isDark={isDark} theme={theme} />,
-    ai:            <AISection isDark={isDark} theme={theme} />,
-    automation:    <AutomationSection isDark={isDark} theme={theme} />,
-    notifications: <NotificationsSection isDark={isDark} theme={theme} />,
-    security:      <SecuritySection isDark={isDark} theme={theme} />,
-    team:          <TeamSection isDark={isDark} theme={theme} />,
-    data:          <DataSection isDark={isDark} theme={theme} />,
+    account:       <AccountSection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
+    email:         <EmailSection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
+    ai:            <AISection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
+    automation:    <AutomationSection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
+    notifications: <NotificationsSection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
+    security:      <SecuritySection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
+    team:          <TeamSection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
+    data:          <DataSection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
     about:         <AboutSection isDark={isDark} theme={theme} />,
   };
 

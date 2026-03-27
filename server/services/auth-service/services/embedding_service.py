@@ -25,7 +25,6 @@ def get_embedding_model() -> SentenceTransformer:
     global _model
     if _model is None:
         _model = SentenceTransformer('all-MiniLM-L6-v2')
-        logger.info("Embedding model loaded: all-MiniLM-L6-v2")
     return _model
 
 
@@ -78,11 +77,8 @@ def generate_user_embeddings(user_id: str, user_data: Dict) -> bool:
     Returns True on success, False on any failure.
     """
     try:
-        logger.info(f"Generating embeddings for user {user_id}")
-
         model = get_embedding_model()
         chunks = create_embedding_chunks(user_data)
-        logger.info(f"Created {len(chunks)} chunks for user {user_id}")
 
         # Ensure collection exists before upserting
         create_collection(
@@ -107,13 +103,11 @@ def generate_user_embeddings(user_id: str, user_data: Dict) -> bool:
 
         success = upsert_vectors(config.QDRANT_COLLECTION, vectors)
 
-        if success:
-            logger.info(f"Stored {len(vectors)} embeddings for user {user_id}")
-        else:
-            logger.error(f"Failed to store embeddings for user {user_id}")
+        if not success:
+            logger.error(f"Failed to store embeddings for {user_id}")
 
         return success
 
     except Exception as e:
-        logger.error(f"Embedding generation error for user {user_id}: {e}", exc_info=True)
+        logger.error(f"Embedding error for {user_id}: {e}")
         return False
