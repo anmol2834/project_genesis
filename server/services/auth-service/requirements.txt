@@ -1,11 +1,6 @@
-fastapi
-uvicorn[standard]
-pydantic
-pydantic-settings
-python-dotenv
-sqlalchemy
-asyncpg
-redis
-python-jose[cryptography]
-passlib[bcrypt]
-httpx
+# Auth service — extra deps beyond project-genesis-base-ml
+# All core deps (fastapi, sqlalchemy, redis, celery, qdrant-client,
+# sentence-transformers, torch, python-jose, bcrypt) are in the base images.
+# Add any auth-specific extras here.
+
+# Currently no extras needed — all deps covered by base-ml image

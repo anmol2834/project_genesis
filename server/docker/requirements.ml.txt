@@ -1,0 +1,12 @@
+# ============================================================================
+# ML REQUIREMENTS — installed on top of base image
+# Only used by: auth-service, auth-celery-worker
+# CPU-only torch to avoid GPU bloat
+# ============================================================================
+
+# CPU-only torch — avoids pulling CUDA (~3GB saved vs default)
+torch==2.1.2+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Sentence transformers (depends on torch)
+sentence-transformers==2.2.2
+transformers==4.36.2

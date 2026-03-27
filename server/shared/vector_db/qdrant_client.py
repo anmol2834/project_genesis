@@ -8,6 +8,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 from typing import List, Dict, Any, Optional
 import logging
+import uuid
 
 from shared.config import get_config
 
@@ -87,7 +88,7 @@ def check_qdrant_health() -> bool:
 def create_collection(
     collection_name: str,
     vector_size: int = 384,
-    distance: Distance = Distance.COSINE
+    distance: str = "Cosine"
 ) -> bool:
     """
     Create a new collection in Qdrant
@@ -109,12 +110,23 @@ def create_collection(
             logger.info(f"Collection '{collection_name}' already exists")
             return True
         
+        # Map string distance metric to enum
+        distance_map = {
+            "Cosine": Distance.COSINE,
+            "COSINE": Distance.COSINE,
+            "Euclid": Distance.EUCLID,
+            "EUCLID": Distance.EUCLID,
+            "Dot": Distance.DOT,
+            "DOT": Distance.DOT,
+        }
+        distance_enum = distance_map.get(distance, Distance.COSINE)
+
         # Create collection
         client.create_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(
                 size=vector_size,
-                distance=distance
+                distance=distance_enum
             )
         )
         
@@ -149,12 +161,12 @@ def upsert_vectors(
     try:
         client = get_qdrant_client()
         
-        # Convert to PointStruct
+        # Convert to PointStruct — Qdrant requires int or UUID point IDs
         qdrant_points = [
             PointStruct(
-                id=point["id"],
+                id=str(uuid.uuid5(uuid.NAMESPACE_DNS, str(point["id"]))),
                 vector=point["vector"],
-                payload=point.get("payload", {})
+                payload={**point.get("payload", {}), "original_id": str(point["id"])}
             )
             for point in points
         ]
@@ -257,9 +269,11 @@ def delete_vectors(
     try:
         client = get_qdrant_client()
         
+        # Convert string IDs to the same UUID5 used during upsert
+        uuid_ids = [str(uuid.uuid5(uuid.NAMESPACE_DNS, str(pid))) for pid in point_ids]
         client.delete(
             collection_name=collection_name,
-            points_selector=point_ids
+            points_selector=uuid_ids
         )
         
         logger.info(f"Deleted {len(point_ids)} points from '{collection_name}'")
@@ -286,12 +300,11 @@ def get_collection_info(collection_name: str) -> Optional[Dict[str, Any]]:
         
         return {
             "name": collection_name,
-            "vectors_count": info.vectors_count,
-            "points_count": info.points_count,
-            "status": info.status,
+            "points_count": getattr(info, "points_count", None) or getattr(info, "vectors_count", 0),
+            "status": str(info.status),
             "config": {
                 "vector_size": info.config.params.vectors.size,
-                "distance": info.config.params.vectors.distance
+                "distance": str(info.config.params.vectors.distance)
             }
         }
     except Exception as e:

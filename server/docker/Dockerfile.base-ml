@@ -1,0 +1,13 @@
+# ============================================================================
+# BASE-ML IMAGE — extends base, adds ML deps (torch, sentence-transformers)
+# Only used by: auth-service, auth-celery-worker
+# Build: docker build -f docker/Dockerfile.base-ml -t project-genesis-base-ml:latest .
+# ============================================================================
+FROM project-genesis-base:latest
+
+# Copy ML-specific requirements
+COPY docker/requirements.ml.txt /tmp/requirements.ml.txt
+
+# Install ML deps — heavy layer, cached until requirements.ml.txt changes
+# CPU-only torch to keep image size manageable
+RUN pip install --no-cache-dir -r /tmp/requirements.ml.txt

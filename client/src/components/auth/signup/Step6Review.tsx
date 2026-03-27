@@ -1,12 +1,14 @@
 'use client';
 
-import { Box, Typography, Button, useTheme, alpha, CircularProgress } from '@mui/material';
+import { Box, Typography, Button, useTheme, alpha, CircularProgress, Alert } from '@mui/material';
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
 import AutoAwesomeRoundedIcon from '@mui/icons-material/AutoAwesomeRounded';
 import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import { motion } from 'framer-motion';
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { lightGradients, darkGradients } from '@/theme/palette';
+import { useSignup } from '@/hooks/mutations/useAuthMutations';
 import type { Step1Data } from './Step1Account';
 import type { Step3Data } from './Step3Business';
 import type { Step4Data } from './Step4AIContext';
@@ -23,25 +25,42 @@ export default function Step6Review({ step1, step3, step4, emailConnected, onBac
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const grad = isDark ? darkGradients : lightGradients;
-  const [loading, setLoading] = useState(false);
+  const router = useRouter();
   const [done, setDone] = useState(false);
 
+  const signup = useSignup();
+
   const handleLaunch = async () => {
-    setLoading(true);
-    await new Promise(r => setTimeout(r, 1800));
-    setLoading(false);
-    setDone(true);
+    signup.mutate(
+      {
+        full_name: step1.fullName,
+        email: step1.email,
+        password: step1.password,
+        business_name: step3.businessName,
+        business_type: step3.businessType,
+        industries: step3.industries,
+        country: step3.country,
+        timezone: step3.timezone,
+        business_description: step4.description,
+        target_audience: step4.audience,
+        communication_tone: step4.tone,
+        use_cases: step4.useCases,
+      },
+      {
+        onSuccess: () => setDone(true),
+      },
+    );
   };
 
   const rows: { label: string; value: string }[] = [
-    { label: 'Name',       value: step1.fullName },
-    { label: 'Email',      value: step1.email },
-    { label: 'Business',   value: step3.businessName || '—' },
-    { label: 'Type',       value: step3.businessType || '—' },
-    { label: 'Country',    value: step3.country || '—' },
-    { label: 'Tone',       value: step4.tone ? step4.tone.charAt(0).toUpperCase() + step4.tone.slice(1) : '—' },
-    { label: 'Use-cases',  value: step4.useCases.length ? step4.useCases.join(', ') : '—' },
-    { label: 'Inbox',      value: emailConnected ? 'Connected' : 'Not connected' },
+    { label: 'Name',      value: step1.fullName },
+    { label: 'Email',     value: step1.email },
+    { label: 'Business',  value: step3.businessName || '—' },
+    { label: 'Type',      value: step3.businessType || '—' },
+    { label: 'Country',   value: step3.country || '—' },
+    { label: 'Tone',      value: step4.tone ? step4.tone.charAt(0).toUpperCase() + step4.tone.slice(1) : '—' },
+    { label: 'Use-cases', value: step4.useCases.length ? step4.useCases.join(', ') : '—' },
+    { label: 'Inbox',     value: emailConnected ? 'Connected' : 'Not connected' },
   ];
 
   if (done) {
@@ -59,6 +78,7 @@ export default function Step6Review({ step1, step3, step4, emailConnected, onBac
           </Typography>
           <Button
             variant="contained" fullWidth
+            onClick={() => router.push('/dashboard')}
             sx={{ minHeight: 40, fontSize: '0.875rem', fontWeight: 600, borderRadius: '8px', background: grad.primary, boxShadow: isDark ? '0 4px 16px rgba(129,140,248,0.22)' : '0 4px 16px rgba(67,56,202,0.16)', '&:hover': { filter: 'brightness(1.07)' } }}
           >
             Go to dashboard
@@ -89,23 +109,30 @@ export default function Step6Review({ step1, step3, step4, emailConnected, onBac
       </Box>
 
       {/* AI ready badge */}
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, p: 1.25, borderRadius: '8px', background: alpha(theme.palette.primary.main, isDark ? 0.08 : 0.05), border: `1px solid ${alpha(theme.palette.primary.main, isDark ? 0.16 : 0.10)}`, mb: 2 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, p: 1.25, borderRadius: '8px', background: alpha(theme.palette.primary.main, isDark ? 0.08 : 0.05), border: `1px solid ${alpha(theme.palette.primary.main, isDark ? 0.16 : 0.10)}`, mb: signup.isError ? 1.5 : 2 }}>
         <AutoAwesomeRoundedIcon sx={{ fontSize: 14, color: 'primary.main', flexShrink: 0 }} />
         <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', lineHeight: 1.4 }}>
           AI will be initialized with your business context and start generating replies immediately.
         </Typography>
       </Box>
 
+      {/* API error */}
+      {signup.isError && (
+        <Alert severity="error" sx={{ mb: 2, fontSize: '0.78rem', borderRadius: '8px', py: 0.5 }}>
+          {signup.error?.message ?? 'Signup failed. Please try again.'}
+        </Alert>
+      )}
+
       <Box sx={{ display: 'flex', gap: 1 }}>
-        <Button onClick={onBack} variant="outlined" sx={{ minHeight: 40, fontSize: '0.8rem', borderRadius: '8px', px: 2, borderColor: alpha(theme.palette.primary.main, 0.3), flexShrink: 0 }}>
+        <Button onClick={onBack} disabled={signup.isPending} variant="outlined" sx={{ minHeight: 40, fontSize: '0.8rem', borderRadius: '8px', px: 2, borderColor: alpha(theme.palette.primary.main, 0.3), flexShrink: 0 }}>
           Back
         </Button>
         <Button
-          onClick={handleLaunch} variant="contained" fullWidth disabled={loading}
-          startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <BoltRoundedIcon sx={{ fontSize: '16px !important' }} />}
+          onClick={handleLaunch} variant="contained" fullWidth disabled={signup.isPending}
+          startIcon={signup.isPending ? <CircularProgress size={14} color="inherit" /> : <BoltRoundedIcon sx={{ fontSize: '16px !important' }} />}
           sx={{ minHeight: 40, fontSize: '0.875rem', fontWeight: 600, borderRadius: '8px', background: grad.primary, boxShadow: isDark ? '0 4px 16px rgba(129,140,248,0.22)' : '0 4px 16px rgba(67,56,202,0.16)', '&:hover': { filter: 'brightness(1.07)' }, '&:disabled': { opacity: 0.6 } }}
         >
-          {loading ? 'Initializing AI…' : 'Start using AI'}
+          {signup.isPending ? 'Creating account…' : 'Start using AI'}
         </Button>
       </Box>
     </motion.div>

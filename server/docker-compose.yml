@@ -1,277 +1,371 @@
 services:
+
   # ============================================================================
-  # GATEWAY SERVICE - Port 8000
+  # GATEWAY SERVICE — Port 8000
   # ============================================================================
   gateway-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/gateway-service/Dockerfile
+    image: project-genesis-gateway:latest
+    pull_policy: build
     container_name: gateway-service
-    working_dir: /app/services/gateway-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     volumes:
-      - ./services/gateway-service:/app/services/gateway-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # AUTH SERVICE - Port 8001
+  # AUTH SERVICE — Port 8001
   # ============================================================================
   auth-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/auth-service/Dockerfile
+    image: project-genesis-auth:latest
+    pull_policy: build
     container_name: auth-service
-    working_dir: /app/services/auth-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8001
     ports:
       - "8001:8001"
     volumes:
-      - ./services/auth-service:/app/services/auth-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
+      - sentence_transformers_cache:/root/.cache/torch/sentence_transformers
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ============================================================================
+  # AUTH CELERY WORKER
+  # Reuses the same image as auth-service — no separate build, just different command
+  # ============================================================================
+  auth-celery-worker:
+    build:
+      context: .
+      dockerfile: services/auth-service/Dockerfile
+    image: project-genesis-auth:latest
+    pull_policy: build
+    container_name: auth-celery-worker
+    working_dir: /app/services/auth-service
+    command: celery -A celery_worker worker --loglevel=info --concurrency=4 --pool=solo
+    volumes:
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
+      - sentence_transformers_cache:/root/.cache/torch/sentence_transformers
+    environment:
+      - PYTHONPATH=/app
+      - C_FORCE_ROOT=true
+    networks:
+      - microservices-network
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
     restart: unless-stopped
 
   # ============================================================================
-  # USER SERVICE - Port 8002
+  # USER SERVICE — Port 8002
   # ============================================================================
   user-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/user-service/Dockerfile
+    image: project-genesis-user:latest
+    pull_policy: build
     container_name: user-service
-    working_dir: /app/services/user-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8002
     ports:
       - "8002:8002"
     volumes:
-      - ./services/user-service:/app/services/user-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # BUSINESS SERVICE - Port 8003
+  # BUSINESS SERVICE — Port 8003
   # ============================================================================
   business-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/business-service/Dockerfile
+    image: project-genesis-business:latest
+    pull_policy: build
     container_name: business-service
-    working_dir: /app/services/business-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8003
     ports:
       - "8003:8003"
     volumes:
-      - ./services/business-service:/app/services/business-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # EMAIL SERVICE - Port 8004
+  # EMAIL SERVICE — Port 8004
   # ============================================================================
   email-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/email-service/Dockerfile
+    image: project-genesis-email:latest
+    pull_policy: build
     container_name: email-service
-    working_dir: /app/services/email-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8004
     ports:
       - "8004:8004"
     volumes:
-      - ./services/email-service:/app/services/email-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # INBOX SERVICE - Port 8005
+  # INBOX SERVICE — Port 8005
   # ============================================================================
   inbox-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/inbox-service/Dockerfile
+    image: project-genesis-inbox:latest
+    pull_policy: build
     container_name: inbox-service
-    working_dir: /app/services/inbox-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8005
     ports:
       - "8005:8005"
     volumes:
-      - ./services/inbox-service:/app/services/inbox-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # CAMPAIGN SERVICE - Port 8006
+  # CAMPAIGN SERVICE — Port 8006
   # ============================================================================
   campaign-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/campaign-service/Dockerfile
+    image: project-genesis-campaign:latest
+    pull_policy: build
     container_name: campaign-service
-    working_dir: /app/services/campaign-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8006
     ports:
       - "8006:8006"
     volumes:
-      - ./services/campaign-service:/app/services/campaign-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # LEADS SERVICE - Port 8007
+  # LEADS SERVICE — Port 8007
   # ============================================================================
   leads-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/leads-service/Dockerfile
+    image: project-genesis-leads:latest
+    pull_policy: build
     container_name: leads-service
-    working_dir: /app/services/leads-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8007
     ports:
       - "8007:8007"
     volumes:
-      - ./services/leads-service:/app/services/leads-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8007/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # ANALYTICS SERVICE - Port 8008
+  # ANALYTICS SERVICE — Port 8008
   # ============================================================================
   analytics-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/analytics-service/Dockerfile
+    image: project-genesis-analytics:latest
+    pull_policy: build
     container_name: analytics-service
-    working_dir: /app/services/analytics-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8008
     ports:
       - "8008:8008"
     volumes:
-      - ./services/analytics-service:/app/services/analytics-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8008/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # AUTOMATION SERVICE - Port 8009
+  # AUTOMATION SERVICE — Port 8009
   # ============================================================================
   automation-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/automation-service/Dockerfile
+    image: project-genesis-automation:latest
+    pull_policy: build
     container_name: automation-service
-    working_dir: /app/services/automation-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8009
     ports:
       - "8009:8009"
     volumes:
-      - ./services/automation-service:/app/services/automation-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8009/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # RESEARCH SERVICE - Port 8010
+  # RESEARCH SERVICE — Port 8010
   # ============================================================================
   research-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/research-service/Dockerfile
+    image: project-genesis-research:latest
+    pull_policy: build
     container_name: research-service
-    working_dir: /app/services/research-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8010
     ports:
       - "8010:8010"
     volumes:
-      - ./services/research-service:/app/services/research-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # NOTIFICATION SERVICE - Port 8011
+  # NOTIFICATION SERVICE — Port 8011
   # ============================================================================
   notification-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/notification-service/Dockerfile
+    image: project-genesis-notification:latest
+    pull_policy: build
     container_name: notification-service
-    working_dir: /app/services/notification-service
-    command: uvicorn main:app --host 0.0.0.0 --port 8011
     ports:
       - "8011:8011"
     volumes:
-      - ./services/notification-service:/app/services/notification-service
-      - ./shared:/app/shared
-      - ./.env:/app/.env
+      - ./shared:/app/shared:ro
+      - ./.env:/app/.env:ro
     environment:
       - PYTHONPATH=/app
     networks:
       - microservices-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ============================================================================
-  # QDRANT VECTOR DATABASE - Ports 6333 (REST), 6334 (gRPC)
+  # QDRANT VECTOR DATABASE
   # ============================================================================
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.7.4
     container_name: qdrant
     ports:
-      - "6333:6333"  # REST API
-      - "6334:6334"  # gRPC API
+      - "6333:6333"
+      - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
@@ -281,7 +375,7 @@ services:
       - microservices-network
     restart: always
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/"]
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -308,3 +402,6 @@ volumes:
   qdrant_data:
     driver: local
     name: mailautomation-qdrant-data
+  sentence_transformers_cache:
+    driver: local
+    name: mailautomation-transformers-cache

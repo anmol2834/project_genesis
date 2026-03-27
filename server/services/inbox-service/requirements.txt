@@ -1,10 +1,1 @@
-fastapi
-uvicorn[standard]
-pydantic
-pydantic-settings
-python-dotenv
-sqlalchemy
-asyncpg
-motor
-redis
-httpx
+# Inbox service — all deps covered by project-genesis-base

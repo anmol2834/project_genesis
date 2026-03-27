@@ -14,6 +14,12 @@ import type { TimeRange } from '@/services/endpoints/analytics';
 
 export const queryKeys = {
 
+  // ── Auth ───────────────────────────────────────────────────────────────────
+  auth: {
+    me: () => ['auth', 'me'] as const,
+  },
+
+
   // ── Campaigns ──────────────────────────────────────────────────────────────
   campaigns: {
     all:    ()         => ['campaigns']                    as const,

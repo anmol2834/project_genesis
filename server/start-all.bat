@@ -32,6 +32,10 @@ echo Starting Auth Service (Port 8001)...
 start "Auth Service" cmd /k "cd services\auth-service && run.bat"
 timeout /t 2 /nobreak >nul
 
+echo Starting Auth Celery Worker...
+start "Auth Celery Worker" cmd /k "cd /d %~dp0services\auth-service && set PYTHONPATH=%~dp0 && celery -A celery_worker worker --loglevel=info --concurrency=2 --pool=solo -n auth-worker@%%h"
+timeout /t 2 /nobreak >nul
+
 echo Starting User Service (Port 8002)...
 start "User Service" cmd /k "cd services\user-service && run.bat"
 timeout /t 2 /nobreak >nul

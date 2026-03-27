@@ -1,3 +1,4 @@
+export * from './useAuthMutations';
 export * from './useCampaignMutations';
 export * from './useLeadMutations';
 export * from './useInboxMutations';

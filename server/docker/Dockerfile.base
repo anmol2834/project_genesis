@@ -1,10 +1,6 @@
 # ============================================================================
-# ROOT Dockerfile — alias for docker/Dockerfile.base
-# Kept for backward compatibility. Prefer using build.sh / build.bat.
-#
-# To build the full system:
-#   Windows: build.bat
-#   Linux:   ./build.sh
+# BASE IMAGE — shared by all standard microservices
+# Build: docker build -f docker/Dockerfile.base -t project-genesis-base:latest .
 # ============================================================================
 FROM python:3.11-slim
 
@@ -15,13 +11,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# System deps — minimal, only what's needed
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy ONLY the shared requirements file first — cache this layer
 COPY docker/requirements.base.txt /tmp/requirements.base.txt
+
+# Install all shared deps — this layer is cached until requirements.base.txt changes
 RUN pip install --no-cache-dir -r /tmp/requirements.base.txt
 
+# Copy shared module — cached until shared/ changes
 COPY shared/ /app/shared/

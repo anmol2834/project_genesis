@@ -1,14 +1,2 @@
-fastapi
-uvicorn[standard]
-pydantic
-pydantic-settings
-python-dotenv
-sqlalchemy
-asyncpg
-motor
-redis
-celery
-httpx
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
+# Email service — all deps covered by project-genesis-base
+# (google-auth, google-auth-oauthlib, google-auth-httplib2 are in base)

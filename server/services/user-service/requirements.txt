@@ -1,9 +1,1 @@
-fastapi
-uvicorn[standard]
-pydantic
-pydantic-settings
-python-dotenv
-sqlalchemy
-asyncpg
-redis
-httpx
+# User service — all deps covered by project-genesis-base

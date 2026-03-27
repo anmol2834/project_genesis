@@ -16,8 +16,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 from shared.config import get_config
 from shared.logger import setup_logging, set_request_id, clear_request_id
-from shared.database import init_database, close_database, check_database_health
+from shared.database import init_database, close_database, check_database_health, get_engine
 from shared.cache import init_redis, close_redis, check_redis_health
+
+from models.user import Base
+from api.auth import router as auth_router
 
 logger = setup_logging("auth-service")
 config = get_config()
@@ -28,6 +31,16 @@ async def lifespan(app: FastAPI):
     logger.info("Auth Service starting up...")
     await init_database()
     await init_redis()
+    
+    # Create database tables
+    try:
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables created/verified")
+    except Exception as e:
+        logger.error(f"Failed to create tables: {e}")
+    
     logger.info("Auth Service started successfully")
     yield
     logger.info("Auth Service shutting down...")
@@ -90,6 +103,10 @@ async def root():
         "version": "1.0.0",
         "status": "running"
     }
+
+
+# Include routers
+app.include_router(auth_router)
 
 
 if __name__ == "__main__":

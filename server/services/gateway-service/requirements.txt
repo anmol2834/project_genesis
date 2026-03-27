@@ -1,10 +1,1 @@
-fastapi
-uvicorn[standard]
-pydantic
-pydantic-settings
-python-dotenv
-sqlalchemy
-asyncpg
-motor
-redis
-httpx
+# Gateway service — all deps covered by project-genesis-base
