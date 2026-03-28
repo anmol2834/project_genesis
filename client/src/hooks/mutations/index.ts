@@ -8,3 +8,4 @@ export * from './useIntegrationMutations';
 export * from './useBillingMutations';
 export * from './useSettingsMutations';
 export * from './useResearchMutations';
+export * from './useProfileMutations';

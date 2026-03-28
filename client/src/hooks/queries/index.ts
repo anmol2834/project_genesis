@@ -8,3 +8,4 @@ export * from './useIntegrations';
 export * from './useBilling';
 export * from './useSettings';
 export * from './useResearch';
+export * from './useProfile';

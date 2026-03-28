@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 import sys
 import os
 
@@ -24,6 +24,9 @@ from router import route_request, close_http_client
 # Initialize logger
 logger = setup_logging("gateway-service")
 config = get_config()
+
+# Health check cache
+_health_cache = {"status": None, "timestamp": None}
 
 
 @asynccontextmanager
@@ -94,6 +97,12 @@ async def health_check():
     Health check endpoint
     Returns service health status
     """
+    # Use cached health status if available and fresh (< 10 seconds old)
+    if _health_cache["status"] and _health_cache["timestamp"]:
+        age = (datetime.utcnow() - _health_cache["timestamp"]).total_seconds()
+        if age < 10:
+            return _health_cache["status"]
+    
     # Check database health
     db_healthy = await check_database_health()
     
@@ -103,7 +112,7 @@ async def health_check():
     # Overall health status
     healthy = db_healthy and redis_healthy
     
-    return JSONResponse(
+    response = JSONResponse(
         status_code=200 if healthy else 503,
         content={
             "status": "healthy" if healthy else "unhealthy",
@@ -115,6 +124,12 @@ async def health_check():
             }
         }
     )
+    
+    # Cache the result
+    _health_cache["status"] = response
+    _health_cache["timestamp"] = datetime.utcnow()
+    
+    return response
 
 
 @app.get("/")

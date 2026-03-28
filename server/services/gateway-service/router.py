@@ -5,8 +5,11 @@ Handles routing, load balancing, circuit breaking, and request forwarding
 
 from fastapi import Request, HTTPException, status
 from fastapi.responses import Response
+from starlette.requests import ClientDisconnect
 import httpx
 import asyncio
+import hashlib
+import json
 from typing import Dict, Optional
 from datetime import datetime, timedelta
 import sys
@@ -26,14 +29,14 @@ SERVICE_REGISTRY = {
     "auth-service": {
         "url": config.AUTH_SERVICE_URL or "http://localhost:8001",
         "prefix": "/auth",
-        "timeout": 10.0,
+        "timeout": 30.0,
         "retry": 2,
     },
     "user-service": {
         "url": config.USER_SERVICE_URL or "http://localhost:8002",
         "prefix": "/user-service",
-        "timeout": 10.0,
-        "retry": 2,
+        "timeout": 30.0,
+        "retry": 1,
     },
     "business-service": {
         "url": config.BUSINESS_SERVICE_URL or "http://localhost:8003",
@@ -160,32 +163,66 @@ class CircuitBreaker:
 
 circuit_breaker = CircuitBreaker()
 
+# ── Request Deduplication ─────────────────────────────────────────────────────
+_pending_requests: Dict[str, asyncio.Future] = {}
+_pending_lock = asyncio.Lock()
+
+async def get_request_key(request: Request, body: bytes) -> str:
+    """
+    Generate unique key for request deduplication
+    Based on: method + path + user + body hash
+    """
+    # Get user identifier from Authorization header
+    auth_header = request.headers.get("Authorization", "")
+    user_id = auth_header[-20:] if auth_header else "anonymous"  # Last 20 chars of token
+    
+    # Hash body for large payloads
+    body_hash = hashlib.md5(body).hexdigest() if body else "empty"
+    
+    # Create unique key
+    key = f"{request.method}:{request.url.path}:{user_id}:{body_hash}"
+    return key
+
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
 async def check_rate_limit(client_ip: str, endpoint: str) -> bool:
     """
     Check if request is within rate limit
     Returns True if allowed, False if rate limited
+    Uses Redis with graceful fallback
     """
-    redis = get_redis_client()
-    key = f"rate_limit:{client_ip}:{endpoint}"
-    
     try:
-        # Get current count
-        count = await redis.get(key)
+        redis = get_redis_client()
+        key = f"rate_limit:{client_ip}:{endpoint}"
         
-        if count is None:
-            # First request
-            await redis.setex(key, 60, 1)
+        # Use pipeline for atomic operations
+        pipe = redis.pipeline()
+        
+        # Get current count
+        pipe.get(key)
+        pipe.ttl(key)
+        
+        # Execute pipeline with timeout
+        results = await asyncio.wait_for(pipe.execute(), timeout=2.0)
+        count_str, ttl = results
+        
+        if count_str is None:
+            # First request - set with expiry
+            await asyncio.wait_for(redis.setex(key, 60, 1), timeout=2.0)
             return True
         
-        count = int(count)
+        count = int(count_str)
         
         # Check if over limit (60 requests per minute per endpoint)
         if count >= 60:
             return False
         
         # Increment counter
-        await redis.incr(key)
+        await asyncio.wait_for(redis.incr(key), timeout=2.0)
+        return True
+    
+    except asyncio.TimeoutError:
+        logger.warning(f"Rate limit check timeout for {client_ip}")
+        # Fail open - allow request if Redis is slow
         return True
     
     except Exception as e:
@@ -218,6 +255,7 @@ async def forward_request(
 ) -> Response:
     """
     Forward request to target service with retry logic
+    Handles client disconnects gracefully and deduplicates rapid requests
     """
     service_name = service_config["name"]
     service_url = service_config["url"]
@@ -258,13 +296,47 @@ async def forward_request(
     headers["X-Forwarded-Proto"] = request.url.scheme
     headers["X-Gateway-Request-ID"] = request.headers.get("X-Request-ID", "unknown")
     
-    # Get request body
-    body = await request.body()
+    # Get request body with client disconnect handling
+    try:
+        body = await request.body()
+    except ClientDisconnect:
+        logger.warning(f"Client disconnected before request body was read for {service_name}")
+        raise HTTPException(
+            status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
+            detail="Client closed connection"
+        )
+    except Exception as e:
+        logger.error(f"Error reading request body: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid request body"
+        )
+    
+    # Request deduplication for PATCH/PUT requests (settings updates)
+    if request.method in ["PATCH", "PUT"]:
+        request_key = await get_request_key(request, body)
+        
+        async with _pending_lock:
+            if request_key in _pending_requests:
+                # Duplicate request in progress - wait for it
+                logger.info(f"Deduplicating request to {service_name}")
+                try:
+                    return await asyncio.wait_for(_pending_requests[request_key], timeout=timeout)
+                except asyncio.TimeoutError:
+                    # Original request timed out, proceed with new request
+                    pass
+            
+            # Create future for this request
+            future = asyncio.Future()
+            _pending_requests[request_key] = future
+    else:
+        request_key = None
+        future = None
     
     client = get_http_client()
     
     try:
-        # Forward request (removed verbose logging)
+        # Forward request with timeout
         response = await client.request(
             method=request.method,
             url=target_url,
@@ -276,18 +348,56 @@ async def forward_request(
         # Record success
         await circuit_breaker.record_success(service_name)
         
-        # Return response
-        return Response(
+        # Create response
+        result = Response(
             content=response.content,
             status_code=response.status_code,
             headers=dict(response.headers),
         )
+        
+        # Set future result if deduplication was used
+        if future and not future.done():
+            future.set_result(result)
+        
+        return result
     
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
-        logger.error(f"Request to {service_name} failed (attempt {attempt + 1}): {e}")
+    except httpx.ReadTimeout as e:
+        logger.error(f"Request to {service_name} timed out (attempt {attempt + 1}): {timeout}s timeout exceeded")
         
         # Record failure
         await circuit_breaker.record_failure(service_name)
+        
+        # Cancel future if exists
+        if future and not future.done():
+            future.set_exception(HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=f"Service {service_name} request timed out after {timeout}s"
+            ))
+        
+        # Retry if attempts remaining
+        if attempt < max_retries:
+            logger.info(f"Retrying request to {service_name} (attempt {attempt + 2})")
+            await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
+            return await forward_request(request, service_config, attempt + 1)
+        
+        # Max retries exceeded
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"Service {service_name} request timed out after {timeout}s"
+        )
+    
+    except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
+        logger.error(f"Request to {service_name} failed (attempt {attempt + 1}): {type(e).__name__} - {str(e)}")
+        
+        # Record failure
+        await circuit_breaker.record_failure(service_name)
+        
+        # Cancel future if exists
+        if future and not future.done():
+            future.set_exception(HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Service {service_name} is unavailable"
+            ))
         
         # Retry if attempts remaining
         if attempt < max_retries:
@@ -304,10 +414,24 @@ async def forward_request(
     except Exception as e:
         logger.error(f"Unexpected error forwarding to {service_name}: {e}", exc_info=True)
         await circuit_breaker.record_failure(service_name)
+        
+        # Cancel future if exists
+        if future and not future.done():
+            future.set_exception(HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Gateway error"
+            ))
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Gateway error"
         )
+    
+    finally:
+        # Clean up pending request
+        if request_key:
+            async with _pending_lock:
+                _pending_requests.pop(request_key, None)
 
 # ── Main Router Handler ───────────────────────────────────────────────────────
 async def route_request(request: Request) -> Response:

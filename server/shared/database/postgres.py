@@ -47,7 +47,7 @@ def get_engine():
             max_overflow=config.DB_MAX_OVERFLOW,
             pool_timeout=config.DB_POOL_TIMEOUT,
             pool_pre_ping=True,  # Verify connections before using
-            pool_recycle=3600,   # Recycle connections after 1 hour
+            pool_recycle=1800,   # Recycle connections after 30 minutes (AWS RDS)
             poolclass=AsyncAdaptedQueuePool,
             connect_args=connect_args,
         )

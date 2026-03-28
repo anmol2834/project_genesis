@@ -39,6 +39,13 @@ def get_celery_app() -> Celery:
             timezone=config.CELERY_TIMEZONE,
             enable_utc=config.CELERY_ENABLE_UTC,
             
+            # Task routing - separate queues for each service
+            task_routes={
+                'auth.create_user_embedding': {'queue': 'auth_queue'},
+                'user.update_user_embedding': {'queue': 'user_queue'},
+            },
+            task_default_queue='celery',
+            
             # Worker configuration
             worker_prefetch_multiplier=1,
             worker_max_tasks_per_child=1000,
@@ -50,13 +57,25 @@ def get_celery_app() -> Celery:
             task_time_limit=300,  # 5 minutes
             task_soft_time_limit=240,  # 4 minutes
             
-            # Result backend configuration
-            result_expires=3600,  # 1 hour
-            result_persistent=True,
+            # Result backend — disable result tracking entirely to prevent
+            # Redis pubsub connections being opened per task (exhausts free-tier limits)
+            task_ignore_result=True,
+            result_expires=3600,
+            result_persistent=False,
+            result_backend_transport_options={
+                'retry_on_timeout': True,
+                'max_connections': 2,
+            },
             
-            # Broker configuration
+            # Broker configuration — keep pool minimal for free-tier Redis
             broker_connection_retry_on_startup=True,
             broker_connection_max_retries=10,
+            broker_pool_limit=2,
+            broker_transport_options={
+                'visibility_timeout': 3600,
+                'max_connections': 2,
+                'socket_keepalive': True,
+            },
         )
         
         logger.info("Celery application created")

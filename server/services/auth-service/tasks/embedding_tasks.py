@@ -12,47 +12,44 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 from celery.exceptions import MaxRetriesExceededError
 from shared.celery import get_celery_app
 from shared.logger import get_logger
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 
 from services.embedding_service import generate_user_embeddings
 
 logger = get_logger(__name__)
 celery_app = get_celery_app()
 
+_engine = None
+
+
+def get_sync_engine():
+    """Reusable sync engine with NullPool to prevent connection leaks"""
+    global _engine
+    if _engine is None:
+        from shared.config import get_config
+        config = get_config()
+        sync_url = config.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+        connect_args = {}
+        if "rds.amazonaws.com" in sync_url:
+            connect_args["sslmode"] = "require"
+        _engine = create_engine(sync_url, connect_args=connect_args, poolclass=NullPool)
+    return _engine
+
 
 def _fetch_user_sync(user_id: str):
-    """
-    Fetch user from PostgreSQL using a synchronous psycopg2 connection.
-    Celery workers are sync processes — no event loop, no asyncpg.
-    Creates a fresh connection per task to avoid pool/loop conflicts.
-    """
-    from sqlalchemy import create_engine, text
-    from shared.config import get_config
-
-    config = get_config()
-
-    # Convert asyncpg URL → psycopg2 URL
-    sync_url = config.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-
-    connect_args = {}
-    if "rds.amazonaws.com" in sync_url:
-        connect_args["sslmode"] = "require"
-
-    engine = create_engine(sync_url, connect_args=connect_args, pool_pre_ping=True)
-
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(
-                text("""
-                    SELECT id, business_name, business_type, industry,
-                           country, business_description, target_audience,
-                           communication_tone, use_cases, created_at
-                    FROM users WHERE id = :uid
-                """),
-                {"uid": user_id},
-            ).fetchone()
-    finally:
-        engine.dispose()
-
+    """Fetch user using reusable engine to prevent connection leaks"""
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("""
+                SELECT id, business_name, business_type, industry,
+                       country, business_description, target_audience,
+                       communication_tone, use_cases, created_at
+                FROM users WHERE id = :uid
+            """),
+            {"uid": user_id},
+        ).fetchone()
     return row
 
 
@@ -65,6 +62,8 @@ def _fetch_user_sync(user_id: str):
     retry_backoff_max=600,
     retry_jitter=True,
     acks_late=True,
+    autoretry_for=(Exception,),
+    retry_kwargs={'max_retries': 5}
 )
 def create_user_embedding(self, user_id: str):
     """
@@ -76,7 +75,7 @@ def create_user_embedding(self, user_id: str):
         row = _fetch_user_sync(user_id)
     except Exception as e:
         logger.error(f"DB fetch failed for {user_id}: {e}")
-        raise self.retry(exc=e)
+        raise
 
     if row is None:
         logger.error(f"User {user_id} not found in DB, skipping embedding")
@@ -99,11 +98,11 @@ def create_user_embedding(self, user_id: str):
         success = generate_user_embeddings(user_id, user_data)
     except Exception as e:
         logger.error(f"Embedding failed for {user_id}: {e}")
-        raise self.retry(exc=e)
+        raise
 
     if not success:
         logger.error(f"Embedding returned False for {user_id}")
-        raise self.retry(exc=Exception("Embedding generation failed"))
+        raise Exception("Embedding generation failed")
 
     print(f"[SUCCESS] Embeddings created for user {user_id}")
     return {"success": True, "message": "Embeddings generated", "user_id": user_id}

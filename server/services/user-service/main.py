@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 import sys
 import os
 
@@ -18,11 +18,14 @@ from shared.config import get_config
 from shared.logger import setup_logging, set_request_id, clear_request_id
 from shared.database import init_database, close_database, check_database_health
 from shared.cache import init_redis, close_redis, check_redis_health
-from api import settings_router
+from api import settings_router, profile_router
 from models import User, UserSettings  # Import models to register with SQLAlchemy
 
 logger = setup_logging("user-service")
 config = get_config()
+
+# Health check cache
+_health_cache = {"status": None, "timestamp": None}
 
 
 @asynccontextmanager
@@ -55,6 +58,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(settings_router)
+app.include_router(profile_router)
 
 
 @app.middleware("http")
@@ -70,11 +74,18 @@ async def request_id_middleware(request: Request, call_next):
 
 @app.get("/health")
 async def health_check():
+    # Use cached health status if available and fresh (< 10 seconds old)
+    if _health_cache["status"] and _health_cache["timestamp"]:
+        age = (datetime.utcnow() - _health_cache["timestamp"]).total_seconds()
+        if age < 10:
+            return _health_cache["status"]
+    
+    # Perform actual health check
     db_healthy = await check_database_health()
     redis_healthy = await check_redis_health()
     healthy = db_healthy and redis_healthy
     
-    return JSONResponse(
+    response = JSONResponse(
         status_code=200 if healthy else 503,
         content={
             "status": "healthy" if healthy else "unhealthy",
@@ -86,6 +97,12 @@ async def health_check():
             }
         }
     )
+    
+    # Cache the result
+    _health_cache["status"] = response
+    _health_cache["timestamp"] = datetime.utcnow()
+    
+    return response
 
 
 @app.get("/")

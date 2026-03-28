@@ -9,13 +9,15 @@ from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, Fi
 from typing import List, Dict, Any, Optional
 import logging
 import uuid
+import threading
 
 from shared.config import get_config
 
 logger = logging.getLogger(__name__)
 
-# Global Qdrant client instance
+# Global Qdrant client instance with thread lock
 _qdrant_client: Optional[QdrantClient] = None
+_client_lock = threading.Lock()
 
 
 def get_qdrant_client() -> QdrantClient:
@@ -26,15 +28,20 @@ def get_qdrant_client() -> QdrantClient:
     global _qdrant_client
     
     if _qdrant_client is None:
-        config = get_config()
-        
-        _qdrant_client = QdrantClient(
-            url=config.QDRANT_URL,
-            timeout=30,
-            prefer_grpc=False,  # Use REST API for simplicity
-        )
-        
-        logger.info(f"Qdrant client created: {config.QDRANT_URL}")
+        with _client_lock:
+            if _qdrant_client is None:  # Double-check locking
+                config = get_config()
+                
+                try:
+                    _qdrant_client = QdrantClient(
+                        url=config.QDRANT_URL,
+                        timeout=30,
+                        prefer_grpc=False,  # Use REST API for simplicity
+                    )
+                    logger.info(f"Qdrant client created: {config.QDRANT_URL}")
+                except Exception as e:
+                    logger.error(f"Failed to create Qdrant client: {e}")
+                    raise
     
     return _qdrant_client
 

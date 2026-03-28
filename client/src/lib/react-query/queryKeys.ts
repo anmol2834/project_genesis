@@ -19,6 +19,11 @@ export const queryKeys = {
     me: () => ['auth', 'me'] as const,
   },
 
+  // ── Profile ────────────────────────────────────────────────────────────────
+  profile: {
+    detail: () => ['profile'] as const,
+  },
+
 
   // ── Campaigns ──────────────────────────────────────────────────────────────
   campaigns: {

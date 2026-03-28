@@ -21,7 +21,8 @@ export default function DashboardShell({ children }: { children: React.ReactNode
   const grad = isDark ? darkGradients : lightGradients;
 
   // Get user initials for avatar
-  const getInitials = (name: string) => {
+  const getInitials = (name?: string) => {
+    if (!name) return 'U';
     return name
       .split(' ')
       .map(n => n[0])
@@ -86,7 +87,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
                 '&:hover': { transform: 'scale(1.05)' },
               }}
             >
-              {user ? getInitials(user.full_name) : 'U'}
+              {getInitials(user?.full_name)}
             </Box>
 
             {/* Theme Toggle */}

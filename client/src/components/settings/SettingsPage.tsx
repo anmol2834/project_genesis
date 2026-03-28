@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Box, Typography, useTheme, alpha, InputBase, Switch, IconButton, Modal, CircularProgress, MenuItem, TextField, Autocomplete, Chip, type Theme } from '@mui/material';
+import LottieLoader from '@/components/common/LottieLoader';
 import { useRouter } from 'next/navigation';
 import PersonRoundedIcon from '@mui/icons-material/PersonRounded';
 import ManageAccountsRoundedIcon from '@mui/icons-material/ManageAccountsRounded';
@@ -14,20 +15,17 @@ import GroupsRoundedIcon from '@mui/icons-material/GroupsRounded';
 import StorageRoundedIcon from '@mui/icons-material/StorageRounded';
 import InfoRoundedIcon from '@mui/icons-material/InfoRounded';
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded';
-import EditRoundedIcon from '@mui/icons-material/EditRounded';
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import LockRoundedIcon from '@mui/icons-material/LockRounded';
-import DevicesRoundedIcon from '@mui/icons-material/DevicesRounded';
 import KeyRoundedIcon from '@mui/icons-material/KeyRounded';
 import DownloadRoundedIcon from '@mui/icons-material/DownloadRounded';
 import WarningAmberRoundedIcon from '@mui/icons-material/WarningAmberRounded';
 import OpenInNewRoundedIcon from '@mui/icons-material/OpenInNewRounded';
 import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded';
 import MenuRoundedIcon from '@mui/icons-material/MenuRounded';
-import CameraAltRoundedIcon from '@mui/icons-material/CameraAltRounded';
 import VisibilityOffRoundedIcon from '@mui/icons-material/VisibilityOffRounded';
 import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
 import FiberManualRecordRoundedIcon from '@mui/icons-material/FiberManualRecordRounded';
@@ -36,69 +34,18 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useLogout } from '@/hooks/mutations/useAuthMutations';
 import { useUserSettings } from '@/hooks/queries/useSettings';
 import { useUpdateSettings } from '@/hooks/mutations/useSettingsMutations';
+import { useUserProfile } from '@/hooks/queries/useProfile';
+import { useUpdateProfile } from '@/hooks/mutations/useProfileMutations';
 import {
-  NAV_ITEMS, CONNECTED_ACCOUNTS, ACTIVE_SESSIONS, AI_TONES, AUTOMATION_RULES,
+  NAV_ITEMS, CONNECTED_ACCOUNTS, ACTIVE_SESSIONS, AUTOMATION_RULES,
   type SettingSection,
 } from './settingsData';
+import type { SettingsSectionProps, ProfileSectionProps } from './types';
 
 // ── Constants from signup ──────────────────────────────────────────────────────
 const BUSINESS_TYPES = ['SaaS', 'Agency', 'E-commerce', 'Freelancer', 'Startup', 'Enterprise', 'Consulting', 'Non-profit', 'Other'];
 
 const INDUSTRIES = ['Technology', 'Marketing', 'Sales', 'Finance', 'Healthcare', 'Education', 'Legal', 'Real Estate', 'Retail', 'Media', 'Logistics', 'HR & Recruiting'];
-
-const COUNTRIES = [
-  'India', 'United States', 'United Kingdom', 'Canada', 'Australia',
-  'Germany', 'France', 'Netherlands', 'Singapore', 'Brazil', 'Mexico',
-  'Spain', 'Italy', 'Japan', 'South Korea', 'UAE', 'South Africa',
-  'Nigeria', 'Pakistan', 'Bangladesh', 'Other',
-];
-
-const TIMEZONES = [
-  'India — Kolkata (UTC+5:30)',
-  'United States — New York (UTC-5:00)',
-  'United States — Chicago (UTC-6:00)',
-  'United States — Denver (UTC-7:00)',
-  'United States — Los Angeles (UTC-8:00)',
-  'United States — Anchorage (UTC-9:00)',
-  'United States — Honolulu (UTC-10:00)',
-  'United Kingdom — London (UTC+0:00)',
-  'Canada — Toronto (UTC-5:00)',
-  'Canada — Vancouver (UTC-8:00)',
-  'Australia — Sydney (UTC+10:00)',
-  'Australia — Melbourne (UTC+10:00)',
-  'Australia — Perth (UTC+8:00)',
-  'Germany — Berlin (UTC+1:00)',
-  'France — Paris (UTC+1:00)',
-  'Netherlands — Amsterdam (UTC+1:00)',
-  'Spain — Madrid (UTC+1:00)',
-  'Italy — Rome (UTC+1:00)',
-  'Sweden — Stockholm (UTC+1:00)',
-  'Poland — Warsaw (UTC+1:00)',
-  'Finland — Helsinki (UTC+2:00)',
-  'Greece — Athens (UTC+2:00)',
-  'South Africa — Johannesburg (UTC+2:00)',
-  'Egypt — Cairo (UTC+2:00)',
-  'Russia — Moscow (UTC+3:00)',
-  'Saudi Arabia — Riyadh (UTC+3:00)',
-  'UAE — Dubai (UTC+4:00)',
-  'Pakistan — Karachi (UTC+5:00)',
-  'Bangladesh — Dhaka (UTC+6:00)',
-  'Thailand — Bangkok (UTC+7:00)',
-  'Vietnam — Ho Chi Minh (UTC+7:00)',
-  'Indonesia — Jakarta (UTC+7:00)',
-  'China — Beijing (UTC+8:00)',
-  'Singapore — Singapore (UTC+8:00)',
-  'Malaysia — Kuala Lumpur (UTC+8:00)',
-  'Philippines — Manila (UTC+8:00)',
-  'South Korea — Seoul (UTC+9:00)',
-  'Japan — Tokyo (UTC+9:00)',
-  'New Zealand — Auckland (UTC+12:00)',
-  'Brazil — São Paulo (UTC-3:00)',
-  'Argentina — Buenos Aires (UTC-3:00)',
-  'Mexico — Mexico City (UTC-6:00)',
-  'Nigeria — Lagos (UTC+1:00)',
-  'Kenya — Nairobi (UTC+3:00)',
-];
 
 const TONES = [
   { key: 'professional', label: 'Professional', desc: 'Formal, clear, business-focused' },
@@ -140,7 +87,7 @@ function CountUp({ target }: { target: number }) {
 
 // ── Glass cluster — groups related fields together ────────────────────────────
 function Cluster({
-  children, isDark, theme, label, labelColor, action,
+  children, isDark, label, labelColor, action,
 }: {
   children: React.ReactNode; isDark: boolean; theme: Theme;
   label?: string; labelColor?: string; action?: React.ReactNode;
@@ -176,7 +123,7 @@ function Cluster({
 
 // ── Field row inside a cluster ────────────────────────────────────────────────
 function FieldRow({
-  label, hint, children, isDark, theme, last = false, danger = false,
+  label, hint, children, isDark, last = false, danger = false,
 }: {
   label: string; hint?: string; children: React.ReactNode;
   isDark: boolean; theme: Theme; last?: boolean; danger?: boolean;
@@ -253,11 +200,12 @@ function EditField({
 
 // ── Pill toggle ───────────────────────────────────────────────────────────────
 function PillToggle<T extends string>({
-  options, value, onChange, isDark, theme, color = '#818cf8',
+  options, value, onChange, isDark, color = '#818cf8',
 }: {
   options: { id: T; label: string }[]; value: T; onChange: (v: T) => void;
-  isDark: boolean; theme: Theme; color?: string;
+  isDark: boolean; color?: string;
 }) {
+  const theme = useTheme();
   return (
     <Box sx={{
       display: 'inline-flex', gap: 0.2, p: 0.25, borderRadius: '9px',
@@ -298,7 +246,7 @@ function GlowChip({ label, color, isDark }: { label: string; color: string; isDa
 
 // ── Compact action button ─────────────────────────────────────────────────────
 function Btn({
-  label, color = '#818cf8', onClick, icon: Icon, danger = false, isDark, theme, size = 'sm',
+  label, color = '#818cf8', onClick, icon: Icon, danger = false, isDark, size = 'sm',
 }: {
   label: string; color?: string; onClick?: () => void; icon?: React.ElementType;
   danger?: boolean; isDark: boolean; theme: Theme; size?: 'sm' | 'xs';
@@ -356,34 +304,52 @@ function SectionHead({
 // ══════════════════════════════════════════════════════════════════════════════
 // PROFILE
 // ══════════════════════════════════════════════════════════════════════════════
-function ProfileSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
+function ProfileSection({ isDark, theme, profile, updateProfile }: ProfileSectionProps) {
   const router = useRouter();
-  const { user, getAccessToken, getRefreshToken, clearAuth, updateUser } = useAuth();
+  const { user, getAccessToken, getRefreshToken, clearAuth } = useAuth();
   const logoutMutation = useLogout();
   const grad = isDark ? darkGradients : lightGradients;
   const color = '#818cf8';
 
-  // Local state for editable fields
-  const [editedName, setEditedName] = useState(user?.full_name || '');
-  const [editedEmail, setEditedEmail] = useState(user?.email || '');
-  const [editedCompany, setEditedCompany] = useState(user?.business_name || '');
-  const [editedIndustry, setEditedIndustry] = useState(user?.business_type || '');
-  const [editedCountry, setEditedCountry] = useState(user?.country || '');
-  const [editedTimezone, setEditedTimezone] = useState(user?.timezone || '');
-  const [editedIndustries, setEditedIndustries] = useState<string[]>(user?.industries || []);
+  // Use profile data from React Query, fallback to AuthContext
+  const profileData = profile || user;
+  
+  // Local state for editable fields - initialize once from props
+  const [editedName, setEditedName] = useState('');
+  const [editedEmail, setEditedEmail] = useState('');
+  const [editedCompany, setEditedCompany] = useState('');
+  const [editedIndustry, setEditedIndustry] = useState('');
+  const [editedCountry, setEditedCountry] = useState('');
+  const [editedTimezone, setEditedTimezone] = useState('');
+  const [editedIndustries, setEditedIndustries] = useState<string[]>([]);
+  const [isInitialized, setIsInitialized] = useState(false);
 
-  // Sync local state when user data changes
-  useEffect(() => {
-    if (user) {
-      setEditedName(user.full_name || '');
-      setEditedEmail(user.email || '');
-      setEditedCompany(user.business_name || '');
-      setEditedIndustry(user.business_type || '');
-      setEditedCountry(user.country || '');
-      setEditedTimezone(user.timezone || '');
-      setEditedIndustries(user.industries || []);
-    }
-  }, [user]);
+  // Initialize form once when data is available
+  if (!isInitialized && profileData) {
+    setEditedName(profileData.full_name || '');
+    setEditedEmail(profileData.email || '');
+    setEditedCompany(profileData.business_name || '');
+    setEditedIndustry(profileData.business_type || '');
+    setEditedCountry(profileData.country || '');
+    setEditedTimezone(profileData.timezone || '');
+    setEditedIndustries(profileData.industries || []);
+    setIsInitialized(true);
+  }
+
+  // Calculate hasChanges for profile fields (full_name is non-AI, others are AI context)
+  const hasProfileChanges = profileData ? (
+    editedName !== (profileData.full_name || '') ||
+    editedCompany !== (profileData.business_name || '') ||
+    editedIndustry !== (profileData.business_type || '') ||
+    JSON.stringify(editedIndustries) !== JSON.stringify(profileData.industries || [])
+  ) : false;
+  
+  // Calculate if ONLY business fields (AI context) have changed
+  const hasBusinessChanges = profileData ? (
+    editedCompany !== (profileData.business_name || '') ||
+    editedIndustry !== (profileData.business_type || '') ||
+    JSON.stringify(editedIndustries) !== JSON.stringify(profileData.industries || [])
+  ) : false;
 
   const handleLogout = async () => {
     try {
@@ -412,18 +378,37 @@ function ProfileSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
     }
   };
 
-  const handleSaveChanges = () => {
-    // Update AuthContext with new values
-    updateUser({
-      full_name: editedName,
-      email: editedEmail,
-      business_name: editedCompany,
-      business_type: editedIndustry,
-      country: editedCountry,
-      timezone: editedTimezone,
-      industries: editedIndustries,
-    });
-    // TODO: Call API to persist changes to backend
+  const handleSaveChanges = async () => {
+    if (!updateProfile || !hasProfileChanges) return;
+    
+    // Build update payload with only changed fields (exclude email, country, timezone)
+    const updates: Record<string, string | string[]> = {};
+    
+    if (editedName !== (profileData?.full_name || '')) updates.full_name = editedName;
+    if (editedCompany !== (profileData?.business_name || '')) updates.business_name = editedCompany;
+    if (editedIndustry !== (profileData?.business_type || '')) updates.business_type = editedIndustry;
+    if (JSON.stringify(editedIndustries) !== JSON.stringify(profileData?.industries || [])) {
+      updates.industries = editedIndustries;
+    }
+    
+    if (Object.keys(updates).length === 0) return;
+    
+    // Check if any business fields (AI context) are being updated
+    const businessFieldsUpdated = ['business_name', 'business_type', 'industries'].some(field => field in updates);
+    
+    try {
+      await updateProfile.mutateAsync(updates);
+      
+      if (businessFieldsUpdated) {
+        console.log('[ProfileSection] Business fields updated - Celery task will be triggered:', Object.keys(updates).filter(k => ['business_name', 'business_type', 'industries'].includes(k)));
+      } else {
+        console.log('[ProfileSection] Only non-AI fields updated - No Celery task');
+      }
+      // Success - optimistic update already handled by React Query
+    } catch (error) {
+      console.error('[ProfileSection] Update failed:', error);
+      // Error - rollback already handled by React Query
+    }
   };
 
   const inputSx = {
@@ -494,41 +479,14 @@ function ProfileSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
         <FieldRow label="Full name" isDark={isDark} theme={theme}>
           <EditField value={editedName} onChange={(val) => setEditedName(val)} isDark={isDark} theme={theme} />
         </FieldRow>
-        <FieldRow label="Email address" hint="Login & notifications" isDark={isDark} theme={theme}>
-          <EditField value={editedEmail} onChange={(val) => setEditedEmail(val)} isDark={isDark} theme={theme} />
+        <FieldRow label="Email address" hint="Cannot be changed" isDark={isDark} theme={theme}>
+          <Typography sx={{ fontSize: '0.78rem', color: 'text.disabled', fontStyle: 'italic' }}>{editedEmail}</Typography>
         </FieldRow>
-        <FieldRow label="Country" isDark={isDark} theme={theme}>
-          <Box sx={{ width: 190 }}>
-            <TextField
-              select
-              value={editedCountry}
-              onChange={(e) => setEditedCountry(e.target.value)}
-              size="small"
-              fullWidth
-              sx={inputSx}
-            >
-              {COUNTRIES.map(c => <MenuItem key={c} value={c} sx={{ fontSize: '0.78rem' }}>{c}</MenuItem>)}
-            </TextField>
-          </Box>
+        <FieldRow label="Country" hint="Cannot be changed" isDark={isDark} theme={theme}>
+          <Typography sx={{ fontSize: '0.78rem', color: 'text.disabled', fontStyle: 'italic' }}>{editedCountry || 'Not set'}</Typography>
         </FieldRow>
-        <FieldRow label="Timezone" isDark={isDark} theme={theme} last>
-          <Box sx={{ width: 190 }}>
-            <TextField
-              select
-              value={editedTimezone}
-              onChange={(e) => setEditedTimezone(e.target.value)}
-              size="small"
-              fullWidth
-              sx={inputSx}
-              SelectProps={{ MenuProps: { PaperProps: { sx: { maxHeight: 280 } } } }}
-            >
-              {TIMEZONES.map(t => (
-                <MenuItem key={t} value={t} sx={{ fontSize: '0.72rem', whiteSpace: 'normal', lineHeight: 1.4, py: 0.75 }}>
-                  {t}
-                </MenuItem>
-              ))}
-            </TextField>
-          </Box>
+        <FieldRow label="Timezone" hint="Cannot be changed" isDark={isDark} theme={theme} last>
+          <Typography sx={{ fontSize: '0.78rem', color: 'text.disabled', fontStyle: 'italic' }}>{editedTimezone || 'Not set'}</Typography>
         </FieldRow>
       </Cluster>
 
@@ -588,8 +546,27 @@ function ProfileSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
         </FieldRow>
       </Cluster>
 
-      <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <Btn label="Save changes" color={color} icon={CheckRoundedIcon} onClick={handleSaveChanges} isDark={isDark} theme={theme} />
+      <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
+        {hasProfileChanges && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mr: 1 }}>
+            <Typography sx={{ fontSize: '0.7rem', color: 'text.disabled' }}>
+              Unsaved changes
+            </Typography>
+            {hasBusinessChanges && (
+              <Typography sx={{ fontSize: '0.65rem', color: color, fontWeight: 600 }}>
+                (AI context will update)
+              </Typography>
+            )}
+          </Box>
+        )}
+        <Btn 
+          label={updateProfile?.isPending ? 'Saving...' : 'Save changes'} 
+          color={color} 
+          icon={updateProfile?.isPending ? undefined : CheckRoundedIcon} 
+          onClick={handleSaveChanges} 
+          isDark={isDark} 
+          theme={theme}
+        />
       </Box>
     </Box>
   );
@@ -598,16 +575,10 @@ function ProfileSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // ACCOUNT
 // ══════════════════════════════════════════════════════════════════════════════
-function AccountSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+function AccountSection({ isDark, theme, settings, updateSettings }: SettingsSectionProps) {
   const [twoFA, setTwoFA] = useState(settings?.two_factor_enabled ?? false);
   const [showQR, setShowQR] = useState(false);
   const color = '#22d3ee';
-  
-  useEffect(() => {
-    if (settings?.two_factor_enabled !== undefined) {
-      setTwoFA(settings.two_factor_enabled);
-    }
-  }, [settings]);
   
   const handleToggle2FA = async (enabled: boolean) => {
     setTwoFA(enabled);
@@ -676,7 +647,7 @@ function AccountSection({ isDark, theme, settings, updateSettings }: { isDark: b
             <Typography sx={{ fontSize: '0.95rem', fontWeight: 800, color: 'text.primary' }}>Enable Two-Factor Authentication</Typography>
           </Box>
           <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', mb: 2, lineHeight: 1.7 }}>
-            When you enable 2FA, you'll receive a verification code via email every time you sign in. This adds an extra layer of security to your account.
+            When you enable 2FA, you&apos;ll receive a verification code via email every time you sign in. This adds an extra layer of security to your account.
           </Typography>
           <Box sx={{
             p: 2, borderRadius: '12px', mb: 2,
@@ -715,24 +686,20 @@ function AccountSection({ isDark, theme, settings, updateSettings }: { isDark: b
 // ══════════════════════════════════════════════════════════════════════════════
 // EMAIL ACCOUNTS
 // ══════════════════════════════════════════════════════════════════════════════
-function EmailSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+function EmailSection({ isDark, theme, settings, updateSettings }: SettingsSectionProps) {
   const [defaultAcc, setDefaultAcc] = useState('1');
   const [syncFreq, setSyncFreq] = useState<'5m' | '15m' | '30m'>(settings?.sync_frequency ?? '5m');
   const [autoSync, setAutoSync] = useState(settings?.auto_sync_replies ?? true);
   const [syncSent, setSyncSent] = useState(settings?.sync_sent_folder ?? true);
   const color = '#34d399';
   
-  useEffect(() => {
-    if (settings) {
-      setSyncFreq(settings.sync_frequency ?? '5m');
-      setAutoSync(settings.auto_sync_replies ?? true);
-      setSyncSent(settings.sync_sent_folder ?? true);
-    }
-  }, [settings]);
-  
-  const handleUpdateSetting = async (key: string, value: any) => {
+  const handleUpdateSetting = async (key: string, value: unknown) => {
     if (updateSettings) {
-      await updateSettings.mutateAsync({ [key]: value });
+      try {
+        await updateSettings.mutateAsync({ [key]: value });
+      } catch (error) {
+        console.error(`[EmailSection] Failed to update ${key}:`, error);
+      }
     }
   };
   return (
@@ -792,7 +759,7 @@ function EmailSection({ isDark, theme, settings, updateSettings }: { isDark: boo
           <Switch checked={syncSent} onChange={e => { setSyncSent(e.target.checked); handleUpdateSetting('sync_sent_folder', e.target.checked); }} size="small" />
         </FieldRow>
         <FieldRow label="Sync frequency" isDark={isDark} theme={theme} last>
-          <PillToggle options={[{ id: '5m', label: '5m' }, { id: '15m', label: '15m' }, { id: '30m', label: '30m' }]} value={syncFreq} onChange={(v) => { setSyncFreq(v); handleUpdateSetting('sync_frequency', v); }} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: '5m', label: '5m' }, { id: '15m', label: '15m' }, { id: '30m', label: '30m' }]} value={syncFreq} onChange={(v) => { setSyncFreq(v); handleUpdateSetting('sync_frequency', v); }} color={color} isDark={isDark} />
         </FieldRow>
       </Cluster>
     </Box>
@@ -802,7 +769,7 @@ function EmailSection({ isDark, theme, settings, updateSettings }: { isDark: boo
 // ══════════════════════════════════════════════════════════════════════════════
 // AI SETTINGS
 // ══════════════════════════════════════════════════════════════════════════════
-function AISection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+function AISection({ isDark, theme, settings, updateSettings, profile, updateProfile }: SettingsSectionProps) {
   const { user } = useAuth();
   const [tone, setTone] = useState(user?.communication_tone || 'professional');
   const [autoLevel, setAutoLevel] = useState<'off' | 'assist' | 'auto'>(settings?.automation_level ?? 'assist');
@@ -814,29 +781,82 @@ function AISection({ isDark, theme, settings, updateSettings }: { isDark: boolea
   const [personalizePerLead, setPersonalizePerLead] = useState(settings?.personalize_per_lead ?? true);
   const [avoidRepetition, setAvoidRepetition] = useState(settings?.avoid_repetition ?? true);
   const color = '#c084fc';
-
-  // Sync with settings data
-  useEffect(() => {
-    if (settings) {
-      setAutoLevel(settings.automation_level ?? 'assist');
-      setMaxReplyLength(settings.max_reply_length ?? 'medium');
-      setLearnFromEdits(settings.learn_from_edits ?? true);
-      setPersonalizePerLead(settings.personalize_per_lead ?? true);
-      setAvoidRepetition(settings.avoid_repetition ?? true);
-    }
-  }, [settings]);
   
-  // Sync with user data
-  useEffect(() => {
-    if (user?.communication_tone) setTone(user.communication_tone);
-    if (user?.business_description) setCustomInstructions(user.business_description);
-    if (user?.target_audience) setTargetAudience(user.target_audience);
-    if (user?.use_cases) setUseCases(user.use_cases);
-  }, [user]);
+  // Calculate if AI context fields have changed
+  const hasAIChanges = profile ? (
+    tone !== (profile.communication_tone || 'professional') ||
+    customInstructions !== (profile.business_description || '') ||
+    targetAudience !== (profile.target_audience || '') ||
+    JSON.stringify(useCases) !== JSON.stringify(profile.use_cases || [])
+  ) : false;
   
-  const handleUpdateSetting = async (key: string, value: any) => {
+  const handleUpdateSetting = async (key: string, value: unknown) => {
     if (updateSettings) {
-      await updateSettings.mutateAsync({ [key]: value });
+      try {
+        await updateSettings.mutateAsync({ [key]: value });
+      } catch (error) {
+        console.error(`[AISection] Failed to update ${key}:`, error);
+      }
+    }
+  };
+
+  const handleSaveAIChanges = async () => {
+    if (!updateProfile) {
+      console.error('[AISection] updateProfile is undefined');
+      return;
+    }
+    
+    if (!hasAIChanges) {
+      console.log('[AISection] No AI changes detected');
+      return;
+    }
+    
+    console.log('[AISection] Current profile:', profile);
+    console.log('[AISection] Current state:', { tone, customInstructions, targetAudience, useCases });
+    
+    // Build update payload with only changed AI context fields
+    const updates: Record<string, string | string[]> = {};
+    
+    if (tone !== (profile?.communication_tone || 'professional')) {
+      updates.communication_tone = tone;
+      console.log('[AISection] Tone changed:', profile?.communication_tone, '→', tone);
+    }
+    if (customInstructions !== (profile?.business_description || '')) {
+      updates.business_description = customInstructions;
+      console.log('[AISection] Instructions changed');
+    }
+    if (targetAudience !== (profile?.target_audience || '')) {
+      updates.target_audience = targetAudience;
+      console.log('[AISection] Audience changed');
+    }
+    if (JSON.stringify(useCases) !== JSON.stringify(profile?.use_cases || [])) {
+      updates.use_cases = useCases;
+      console.log('[AISection] Use cases changed:', profile?.use_cases, '→', useCases);
+    }
+    
+    if (Object.keys(updates).length === 0) {
+      console.log('[AISection] No updates to send (empty payload)');
+      return;
+    }
+    
+    console.log('[AISection] Sending update payload:', updates);
+    
+    try {
+      const result = await updateProfile.mutateAsync(updates);
+      console.log('[AISection] ✅ Update successful!');
+      console.log('[AISection] AI context fields updated:', Object.keys(updates));
+      console.log('[AISection] Vector update triggered:', result?.vector_update_triggered);
+      console.log('[AISection] Fields updated:', result?.fields_updated);
+      console.log('[AISection] Full response:', result);
+    } catch (error: unknown) {
+      const err = error as { message?: string; response?: unknown; status?: number };
+      console.error('[AISection] ❌ Update failed');
+      console.error('[AISection] Error object:', error);
+      console.error('[AISection] Error type:', typeof error);
+      console.error('[AISection] Error keys:', Object.keys(error instanceof Object ? error : {}));
+      console.error('[AISection] Error message:', err?.message);
+      console.error('[AISection] Error response:', err?.response);
+      console.error('[AISection] Error status:', err?.status);
     }
   };
 
@@ -937,9 +957,6 @@ function AISection({ isDark, theme, settings, updateSettings }: { isDark: boolea
               sx={{ fontSize: '0.75rem', color: 'text.primary', width: '100%', px: 1.25, py: 0.9, '& textarea': { lineHeight: 1.6 } }}
             />
           </Box>
-          <Box sx={{ mt: 1, display: 'flex', justifyContent: 'flex-end' }}>
-            <Btn label="Save instructions" color={color} icon={CheckRoundedIcon} isDark={isDark} theme={theme} size="xs" />
-          </Box>
         </Box>
       </Cluster>
 
@@ -980,11 +997,12 @@ function AISection({ isDark, theme, settings, updateSettings }: { isDark: boolea
                   key={u.key}
                   component="button"
                   onClick={() => {
+                    const active = useCases.includes(u.key);
                     const next = active ? useCases.filter(k => k !== u.key) : [...useCases, u.key];
                     setUseCases(next);
                   }}
                   sx={{
-                    px: 1.25, py: 0.5, borderRadius: '7px', cursor: 'pointer', border: 'none',
+                    px: 1.25, py: 0.5, borderRadius: '7px', cursor: 'pointer',
                     border: `1px solid ${active ? color : isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)'}`,
                     background: active ? alpha(color, isDark ? 0.15 : 0.1) : 'transparent',
                     transition: 'all 0.18s ease',
@@ -1001,12 +1019,29 @@ function AISection({ isDark, theme, settings, updateSettings }: { isDark: boolea
         </Box>
       </Cluster>
 
+      {/* Save AI Changes Button */}
+      <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mb: 2.5 }}>
+        {hasAIChanges && (
+          <Typography sx={{ fontSize: '0.7rem', color: 'text.disabled', alignSelf: 'center', mr: 1 }}>
+            Unsaved AI context changes
+          </Typography>
+        )}
+        <Btn 
+          label={updateProfile?.isPending ? 'Saving...' : 'Save AI Settings'} 
+          color={color} 
+          icon={updateProfile?.isPending ? undefined : CheckRoundedIcon} 
+          onClick={handleSaveAIChanges} 
+          isDark={isDark} 
+          theme={theme}
+        />
+      </Box>
+
       <Cluster label="Behavior" labelColor={color} isDark={isDark} theme={theme}>
         <FieldRow label="Learn from my edits" hint="AI improves based on how you edit drafts" isDark={isDark} theme={theme}><Switch checked={learnFromEdits} onChange={e => { setLearnFromEdits(e.target.checked); handleUpdateSetting('learn_from_edits', e.target.checked); }} size="small" /></FieldRow>
         <FieldRow label="Personalize per lead" hint="Use lead data to customize each message" isDark={isDark} theme={theme}><Switch checked={personalizePerLead} onChange={e => { setPersonalizePerLead(e.target.checked); handleUpdateSetting('personalize_per_lead', e.target.checked); }} size="small" /></FieldRow>
         <FieldRow label="Avoid repetition" hint="Don't repeat phrases across a sequence" isDark={isDark} theme={theme}><Switch checked={avoidRepetition} onChange={e => { setAvoidRepetition(e.target.checked); handleUpdateSetting('avoid_repetition', e.target.checked); }} size="small" /></FieldRow>
         <FieldRow label="Max reply length" isDark={isDark} theme={theme} last>
-          <PillToggle options={[{ id: 'short', label: 'Short' }, { id: 'medium', label: 'Medium' }, { id: 'long', label: 'Long' }]} value={maxReplyLength} onChange={(v) => { setMaxReplyLength(v); handleUpdateSetting('max_reply_length', v); }} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: 'short', label: 'Short' }, { id: 'medium', label: 'Medium' }, { id: 'long', label: 'Long' }]} value={maxReplyLength} onChange={(v) => { setMaxReplyLength(v); handleUpdateSetting('max_reply_length', v); }} color={color} isDark={isDark} />
         </FieldRow>
       </Cluster>
     </Box>
@@ -1016,7 +1051,7 @@ function AISection({ isDark, theme, settings, updateSettings }: { isDark: boolea
 // ══════════════════════════════════════════════════════════════════════════════
 // AUTOMATION
 // ══════════════════════════════════════════════════════════════════════════════
-function AutomationSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+function AutomationSection({ isDark, theme, settings, updateSettings }: SettingsSectionProps) {
   const [rules, setRules] = useState(AUTOMATION_RULES);
   const toggle = (id: string) => setRules(r => r.map(x => x.id === id ? { ...x, enabled: !x.enabled } : x));
   const [delayBetweenSteps, setDelayBetweenSteps] = useState<'1d' | '3d' | '7d'>(settings?.delay_between_steps ?? '3d');
@@ -1028,18 +1063,7 @@ function AutomationSection({ isDark, theme, settings, updateSettings }: { isDark
   const color = '#fbbf24';
   const activeCount = rules.filter(r => r.enabled).length;
   
-  useEffect(() => {
-    if (settings) {
-      setDelayBetweenSteps(settings.delay_between_steps ?? '3d');
-      setMaxEmailsPerLead(String(settings.max_emails_per_lead ?? 5) as '3' | '5' | '7');
-      setAutomationEnabled(settings.automation_enabled ?? true);
-      setPauseOnWeekends(settings.pause_on_weekends ?? true);
-      setRespectSendingHours(settings.respect_sending_hours ?? true);
-      setStopOnReply(settings.stop_on_reply ?? true);
-    }
-  }, [settings]);
-  
-  const handleUpdateSetting = async (key: string, value: any) => {
+  const handleUpdateSetting = async (key: string, value: unknown) => {
     if (updateSettings) {
       await updateSettings.mutateAsync({ [key]: value });
     }
@@ -1097,11 +1121,11 @@ function AutomationSection({ isDark, theme, settings, updateSettings }: { isDark
 
       <Cluster label="Sequence Defaults" labelColor={color} isDark={isDark} theme={theme}>
         <FieldRow label="Delay between steps" isDark={isDark} theme={theme}>
-          <PillToggle options={[{ id: '1d', label: '1d' }, { id: '3d', label: '3d' }, { id: '7d', label: '7d' }]} value={delayBetweenSteps} onChange={(v) => { setDelayBetweenSteps(v); handleUpdateSetting('delay_between_steps', v); }} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: '1d', label: '1d' }, { id: '3d', label: '3d' }, { id: '7d', label: '7d' }]} value={delayBetweenSteps} onChange={(v) => { setDelayBetweenSteps(v); handleUpdateSetting('delay_between_steps', v); }} color={color} isDark={isDark} />
         </FieldRow>
         <FieldRow label="Stop on reply" hint="Pause sequence when lead replies" isDark={isDark} theme={theme}><Switch checked={stopOnReply} onChange={e => { setStopOnReply(e.target.checked); handleUpdateSetting('stop_on_reply', e.target.checked); }} size="small" /></FieldRow>
         <FieldRow label="Max emails per lead" isDark={isDark} theme={theme} last>
-          <PillToggle options={[{ id: '3', label: '3' }, { id: '5', label: '5' }, { id: '7', label: '7' }]} value={maxEmailsPerLead} onChange={(v) => { setMaxEmailsPerLead(v); handleUpdateSetting('max_emails_per_lead', Number(v)); }} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: '3', label: '3' }, { id: '5', label: '5' }, { id: '7', label: '7' }]} value={maxEmailsPerLead} onChange={(v) => { setMaxEmailsPerLead(v); handleUpdateSetting('max_emails_per_lead', Number(v)); }} color={color} isDark={isDark} />
         </FieldRow>
       </Cluster>
     </Box>
@@ -1111,7 +1135,7 @@ function AutomationSection({ isDark, theme, settings, updateSettings }: { isDark
 // ══════════════════════════════════════════════════════════════════════════════
 // NOTIFICATIONS
 // ══════════════════════════════════════════════════════════════════════════════
-function NotificationsSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+function NotificationsSection({ isDark, theme, settings, updateSettings }: SettingsSectionProps) {
   const [notifBatching, setNotifBatching] = useState<'instant' | 'hourly' | 'daily'>(settings?.notification_batching ?? 'instant');
   const [emailNewReply, setEmailNewReply] = useState(settings?.email_new_reply ?? true);
   const [emailCampaignComplete, setEmailCampaignComplete] = useState(settings?.email_campaign_complete ?? true);
@@ -1123,21 +1147,7 @@ function NotificationsSection({ isDark, theme, settings, updateSettings }: { isD
   const [inappSystemAlerts, setInappSystemAlerts] = useState(settings?.inapp_system_alerts ?? true);
   const color = '#f87171';
   
-  useEffect(() => {
-    if (settings) {
-      setNotifBatching(settings.notification_batching ?? 'instant');
-      setEmailNewReply(settings.email_new_reply ?? true);
-      setEmailCampaignComplete(settings.email_campaign_complete ?? true);
-      setEmailLeadStatus(settings.email_lead_status ?? false);
-      setEmailWeeklyDigest(settings.email_weekly_digest ?? true);
-      setInappRealtimeReplies(settings.inapp_realtime_replies ?? true);
-      setInappAiActions(settings.inapp_ai_actions ?? true);
-      setInappTeamActivity(settings.inapp_team_activity ?? false);
-      setInappSystemAlerts(settings.inapp_system_alerts ?? true);
-    }
-  }, [settings]);
-  
-  const handleUpdateSetting = async (key: string, value: any) => {
+  const handleUpdateSetting = async (key: string, value: unknown) => {
     if (updateSettings) {
       await updateSettings.mutateAsync({ [key]: value });
     }
@@ -1159,7 +1169,7 @@ function NotificationsSection({ isDark, theme, settings, updateSettings }: { isD
       </Cluster>
       <Cluster label="Frequency" labelColor={color} isDark={isDark} theme={theme}>
         <FieldRow label="Notification batching" isDark={isDark} theme={theme} last>
-          <PillToggle options={[{ id: 'instant', label: 'Instant' }, { id: 'hourly', label: 'Hourly' }, { id: 'daily', label: 'Daily' }]} value={notifBatching} onChange={(v) => { setNotifBatching(v); handleUpdateSetting('notification_batching', v); }} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: 'instant', label: 'Instant' }, { id: 'hourly', label: 'Hourly' }, { id: 'daily', label: 'Daily' }]} value={notifBatching} onChange={(v) => { setNotifBatching(v); handleUpdateSetting('notification_batching', v); }} color={color} isDark={isDark} />
         </FieldRow>
       </Cluster>
     </Box>
@@ -1169,17 +1179,11 @@ function NotificationsSection({ isDark, theme, settings, updateSettings }: { isD
 // ══════════════════════════════════════════════════════════════════════════════
 // SECURITY
 // ══════════════════════════════════════════════════════════════════════════════
-function SecuritySection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+function SecuritySection({ isDark, theme, settings, updateSettings }: SettingsSectionProps) {
   const [require2FAForTeam, setRequire2FAForTeam] = useState(settings?.require_2fa_for_team ?? false);
   const color = '#fb923c';
   
-  useEffect(() => {
-    if (settings) {
-      setRequire2FAForTeam(settings.require_2fa_for_team ?? false);
-    }
-  }, [settings]);
-  
-  const handleUpdateSetting = async (key: string, value: any) => {
+  const handleUpdateSetting = async (key: string, value: unknown) => {
     if (updateSettings) {
       await updateSettings.mutateAsync({ [key]: value });
     }
@@ -1237,23 +1241,14 @@ function SecuritySection({ isDark, theme, settings, updateSettings }: { isDark: 
 // ══════════════════════════════════════════════════════════════════════════════
 // TEAM
 // ══════════════════════════════════════════════════════════════════════════════
-function TeamSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+function TeamSection({ isDark, theme, settings, updateSettings }: SettingsSectionProps) {
   const [defaultRole, setDefaultRole] = useState<'viewer' | 'member' | 'admin'>(settings?.default_member_role ?? 'member');
   const [workspaceName, setWorkspaceName] = useState(settings?.workspace_name ?? 'Acme Corp');
   const [inviteByDomain, setInviteByDomain] = useState(settings?.invite_by_domain ?? false);
   const [requireAdminApproval, setRequireAdminApproval] = useState(settings?.require_admin_approval ?? true);
   const color = '#60a5fa';
   
-  useEffect(() => {
-    if (settings) {
-      setDefaultRole(settings.default_member_role ?? 'member');
-      setWorkspaceName(settings.workspace_name ?? 'Acme Corp');
-      setInviteByDomain(settings.invite_by_domain ?? false);
-      setRequireAdminApproval(settings.require_admin_approval ?? true);
-    }
-  }, [settings]);
-  
-  const handleUpdateSetting = async (key: string, value: any) => {
+  const handleUpdateSetting = async (key: string, value: unknown) => {
     if (updateSettings) {
       await updateSettings.mutateAsync({ [key]: value });
     }
@@ -1272,7 +1267,7 @@ function TeamSection({ isDark, theme, settings, updateSettings }: { isDark: bool
       <Cluster label="Workspace" labelColor={color} isDark={isDark} theme={theme}>
         <FieldRow label="Workspace name" isDark={isDark} theme={theme}><EditField value={workspaceName} onChange={(val) => { setWorkspaceName(val); handleUpdateSetting('workspace_name', val); }} isDark={isDark} theme={theme} /></FieldRow>
         <FieldRow label="Default member role" isDark={isDark} theme={theme} last>
-          <PillToggle options={[{ id: 'viewer', label: 'Viewer' }, { id: 'member', label: 'Member' }, { id: 'admin', label: 'Admin' }]} value={defaultRole} onChange={(v) => { setDefaultRole(v); handleUpdateSetting('default_member_role', v); }} color={color} isDark={isDark} theme={theme} />
+          <PillToggle options={[{ id: 'viewer', label: 'Viewer' }, { id: 'member', label: 'Member' }, { id: 'admin', label: 'Admin' }]} value={defaultRole} onChange={(v) => { setDefaultRole(v); handleUpdateSetting('default_member_role', v); }} color={color} isDark={isDark} />
         </FieldRow>
       </Cluster>
       <Cluster label="Access Policy" labelColor={color} isDark={isDark} theme={theme}>
@@ -1289,22 +1284,14 @@ function TeamSection({ isDark, theme, settings, updateSettings }: { isDark: bool
 // ══════════════════════════════════════════════════════════════════════════════
 // DATA & PRIVACY
 // ══════════════════════════════════════════════════════════════════════════════
-function DataSection({ isDark, theme, settings, updateSettings }: { isDark: boolean; theme: Theme; settings?: any; updateSettings?: any }) {
+function DataSection({ isDark, theme, settings, updateSettings }: SettingsSectionProps) {
   const [deleteModal, setDeleteModal] = useState(false);
   const [analyticsImprovement, setAnalyticsImprovement] = useState(settings?.analytics_improvement ?? true);
   const [personalizationData, setPersonalizationData] = useState(settings?.personalization_data ?? true);
   const [thirdPartyIntegrations, setThirdPartyIntegrations] = useState(settings?.third_party_integrations ?? false);
   const color = '#a3e635';
   
-  useEffect(() => {
-    if (settings) {
-      setAnalyticsImprovement(settings.analytics_improvement ?? true);
-      setPersonalizationData(settings.personalization_data ?? true);
-      setThirdPartyIntegrations(settings.third_party_integrations ?? false);
-    }
-  }, [settings]);
-  
-  const handleUpdateSetting = async (key: string, value: any) => {
+  const handleUpdateSetting = async (key: string, value: unknown) => {
     if (updateSettings) {
       await updateSettings.mutateAsync({ [key]: value });
     }
@@ -1441,10 +1428,13 @@ export default function SettingsPage() {
   const [active, setActive] = useState<SettingSection>('profile');
   const [search, setSearch] = useState('');
   const [mobileOpen, setMobileOpen] = useState(false);
-  const grad = isDark ? darkGradients : lightGradients;
 
-  // Fetch settings data with React Query
+  // Fetch profile and settings data with React Query
+  const { data: profile, isLoading: profileLoading, error: profileError } = useUserProfile();
   const { data: settings, isLoading: settingsLoading, error: settingsError } = useUserSettings();
+  
+  // Mutations
+  const updateProfileMutation = useUpdateProfile();
   const updateSettingsMutation = useUpdateSettings();
 
   const filtered = NAV_ITEMS.filter(n =>
@@ -1453,25 +1443,44 @@ export default function SettingsPage() {
 
   const activeItem = NAV_ITEMS.find(n => n.id === active)!;
 
-  // Show loading state while fetching settings
-  if (settingsLoading) {
+  // Show loading state while fetching data
+  if (profileLoading || settingsLoading) {
     return (
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
-        <CircularProgress />
+      <Box sx={{ 
+        position: 'relative',
+        flex: 1, 
+        display: 'flex', 
+        flexDirection: 'column', 
+        overflow: 'hidden', 
+        minHeight: 0 
+      }}>
+        <LottieLoader 
+          message="Loading your settings..."
+          submessage="Preparing your personalized experience"
+          fullPage={false}
+        />
       </Box>
     );
   }
 
-  // Show error state if settings fetch failed
-  if (settingsError) {
+  // Show error state if data fetch failed
+  if (profileError || settingsError) {
     return (
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', px: 3 }}>
+      <Box sx={{ 
+        display: 'flex', 
+        alignItems: 'center', 
+        justifyContent: 'center', 
+        height: '100vh', 
+        px: 3,
+        animation: 'fadeIn 0.3s ease-out',
+        '@keyframes fadeIn': { from: { opacity: 0 }, to: { opacity: 1 } },
+      }}>
         <Box sx={{ textAlign: 'center' }}>
           <Typography variant="h6" color="error" gutterBottom>
             Failed to load settings
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            {settingsError.message || 'Please try refreshing the page'}
+            {(profileError || settingsError)?.message || 'Please try refreshing the page'}
           </Typography>
         </Box>
       </Box>
@@ -1479,10 +1488,10 @@ export default function SettingsPage() {
   }
 
   const SECTION_MAP: Record<SettingSection, React.ReactNode> = {
-    profile:       <ProfileSection isDark={isDark} theme={theme} />,
+    profile:       <ProfileSection isDark={isDark} theme={theme} profile={profile} updateProfile={updateProfileMutation} />,
     account:       <AccountSection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
     email:         <EmailSection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
-    ai:            <AISection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
+    ai:            <AISection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} profile={profile} updateProfile={updateProfileMutation} />,
     automation:    <AutomationSection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
     notifications: <NotificationsSection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
     security:      <SecuritySection isDark={isDark} theme={theme} settings={settings} updateSettings={updateSettingsMutation} />,
@@ -1567,6 +1576,8 @@ export default function SettingsPage() {
   return (
     <Box sx={{
       flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0,
+      animation: 'fadeIn 0.5s ease-out',
+      '@keyframes fadeIn': { from: { opacity: 0, transform: 'translateY(10px)' }, to: { opacity: 1, transform: 'translateY(0)' } },
     }}>
       {/* ── Slim top bar ── */}
       <Box sx={{

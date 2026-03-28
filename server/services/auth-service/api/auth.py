@@ -45,39 +45,58 @@ TOKEN_BLACKLIST_TTL = config.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
 async def _check_login_rate_limit(identifier: str):
     """Block brute-force: max 5 login attempts per 5 minutes per IP/email."""
-    redis = get_redis_client()
-    key = f"login_attempts:{identifier}"
-    attempts = await redis.get(key)
-    if attempts and int(attempts) >= LOGIN_RATE_LIMIT:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many login attempts. Try again in 5 minutes."
-        )
+    try:
+        redis = get_redis_client()
+        key = f"login_attempts:{identifier}"
+        attempts = await redis.get(key)
+        if attempts and int(attempts) >= LOGIN_RATE_LIMIT:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many login attempts. Try again in 5 minutes."
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Rate limit check failed: {e}")
+        # Fail open - allow request if Redis is down
 
 
 async def _record_login_attempt(identifier: str):
-    redis = get_redis_client()
-    key = f"login_attempts:{identifier}"
-    pipe = redis.pipeline()
-    await pipe.incr(key)
-    await pipe.expire(key, LOGIN_RATE_WINDOW)
-    await pipe.execute()
+    try:
+        redis = get_redis_client()
+        key = f"login_attempts:{identifier}"
+        pipe = redis.pipeline()
+        await pipe.incr(key)
+        await pipe.expire(key, LOGIN_RATE_WINDOW)
+        await pipe.execute()
+    except Exception as e:
+        logger.error(f"Failed to record login attempt: {e}")
 
 
 async def _clear_login_attempts(identifier: str):
-    redis = get_redis_client()
-    await redis.delete(f"login_attempts:{identifier}")
+    try:
+        redis = get_redis_client()
+        await redis.delete(f"login_attempts:{identifier}")
+    except Exception as e:
+        logger.error(f"Failed to clear login attempts: {e}")
 
 
 async def _blacklist_token(jti: str, ttl: int):
     """Add token JTI to Redis blacklist."""
-    redis = get_redis_client()
-    await redis.setex(f"blacklist:{jti}", ttl, "1")
+    try:
+        redis = get_redis_client()
+        await redis.setex(f"blacklist:{jti}", ttl, "1")
+    except Exception as e:
+        logger.error(f"Failed to blacklist token: {e}")
 
 
 async def _is_token_blacklisted(jti: str) -> bool:
-    redis = get_redis_client()
-    return await redis.exists(f"blacklist:{jti}") == 1
+    try:
+        redis = get_redis_client()
+        return await redis.exists(f"blacklist:{jti}") == 1
+    except Exception as e:
+        logger.error(f"Failed to check token blacklist: {e}")
+        return False  # Fail open
 
 
 async def _get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> dict:
@@ -111,9 +130,15 @@ async def send_otp(request: SendOtpRequest):
     Store a dev OTP (000000) in Redis keyed by email.
     In production this would send a real email.
     """
-    redis = get_redis_client()
-    await redis.setex(f"otp:{request.email.lower().strip()}", OTP_TTL, DEV_OTP)
-    return SendOtpResponse(success=True, message="Verification code sent")
+    try:
+        redis = get_redis_client()
+        email_normalized = request.email.lower().strip()
+        await redis.setex(f"otp:{email_normalized}", OTP_TTL, DEV_OTP)
+        return SendOtpResponse(success=True, message="Verification code sent")
+    except Exception as e:
+        logger.error(f"Failed to send OTP: {e}")
+        # Return success anyway to not reveal Redis issues
+        return SendOtpResponse(success=True, message="Verification code sent")
 
 
 @router.post("/verify-otp", response_model=VerifyOtpResponse)
@@ -123,16 +148,26 @@ async def verify_otp(request: VerifyOtpRequest):
     Accepts the stored code OR the hardcoded dev bypass '000000'.
     Deletes the key on success so it cannot be reused.
     """
-    redis = get_redis_client()
-    key = f"otp:{request.email.lower().strip()}"
-    stored = await redis.get(key)
+    try:
+        redis = get_redis_client()
+        email_normalized = request.email.lower().strip()
+        key = f"otp:{email_normalized}"
+        stored = await redis.get(key)
 
-    # Accept dev bypass OR the stored code
-    if request.code != DEV_OTP and (stored is None or request.code != stored):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification code")
+        # Accept dev bypass OR the stored code
+        if request.code != DEV_OTP and (stored is None or request.code != stored):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification code")
 
-    await redis.delete(key)
-    return VerifyOtpResponse(success=True, message="Email verified")
+        await redis.delete(key)
+        return VerifyOtpResponse(success=True, message="Email verified")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"OTP verification failed: {e}")
+        # Accept dev bypass if Redis is down
+        if request.code == DEV_OTP:
+            return VerifyOtpResponse(success=True, message="Email verified")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Verification failed")
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -149,19 +184,22 @@ async def signup(request: SignupRequest):
     6. Queue Qdrant embedding task (non-blocking)
     """
     try:
-        logger.info(f"Signup attempt: {request.email}")
+        email_normalized = request.email.lower().strip()
+        logger.info(f"Signup attempt: {email_normalized}")
 
         async with get_db_session() as session:
+            # Check for existing user with normalized email
             existing = (await session.execute(
-                select(User).where(User.email == request.email)
+                select(User).where(User.email == email_normalized)
             )).scalar_one_or_none()
 
             if existing:
+                logger.warning(f"Signup failed: Email already exists - {email_normalized}")
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
 
-            # Create new user
+            # Create new user with normalized email
             new_user = User(
-                email=request.email,
+                email=email_normalized,
                 password_hash=hash_password(request.password),
                 full_name=request.full_name,
                 profile_pic=f"https://api.dicebear.com/7.x/initials/svg?seed={request.full_name}",
@@ -189,21 +227,24 @@ async def signup(request: SignupRequest):
             await session.commit()
             await session.refresh(new_user)
 
-        access_token = create_access_token(user_id, request.email)
-        refresh_token = create_refresh_token(user_id, request.email)
+        access_token = create_access_token(user_id, email_normalized)
+        refresh_token = create_refresh_token(user_id, email_normalized)
 
+        # Queue embedding task with error handling
         try:
             create_user_embedding.delay(user_id)
+            logger.info(f"Embedding task queued for user: {user_id}")
         except Exception as e:
-            logger.error(f"Embedding queue failed: {e}")
+            logger.error(f"Embedding queue failed (non-critical): {e}")
+            # Don't fail signup if embedding queue fails
 
-        logger.info(f"User created successfully: {user_id} with default settings")
+        logger.info(f"User created successfully: {user_id}")
 
         return SignupResponse(
             success=True,
             message="Account created successfully",
             user_id=user_id,
-            email=request.email,
+            email=email_normalized,
             tokens=TokenResponse(
                 access_token=access_token,
                 refresh_token=refresh_token,
@@ -214,7 +255,8 @@ async def signup(request: SignupRequest):
 
     except HTTPException:
         raise
-    except IntegrityError:
+    except IntegrityError as e:
+        logger.error(f"Database integrity error: {e}")
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
     except Exception as e:
         logger.error(f"Signup error: {e}", exc_info=True)

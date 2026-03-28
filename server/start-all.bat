@@ -40,6 +40,10 @@ echo Starting User Service (Port 8002)...
 start "User Service" cmd /k "cd services\user-service && run.bat"
 timeout /t 2 /nobreak >nul
 
+echo Starting User Celery Worker...
+start "User Celery Worker" cmd /k "cd /d %~dp0services\user-service && set PYTHONPATH=%~dp0 && celery -A celery_worker worker --loglevel=info --concurrency=2 --pool=solo -n user-worker@%%h"
+timeout /t 2 /nobreak >nul
+
 echo Starting Business Service (Port 8003)...
 start "Business Service" cmd /k "cd services\business-service && run.bat"
 timeout /t 2 /nobreak >nul

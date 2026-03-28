@@ -5,6 +5,8 @@ Handles user preferences and settings management
 
 from fastapi import APIRouter, HTTPException, status, Depends, Header
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+import asyncio
 import sys
 import os
 
@@ -106,13 +108,20 @@ async def update_user_settings(
     user_id: str = Depends(verify_token)
 ):
     """
-    Update user settings
+    Update user settings with optimized transaction handling
     Only updates fields that are provided (partial update)
+    Handles rapid updates gracefully
     """
     try:
+        # Add small delay to allow request deduplication at gateway
+        await asyncio.sleep(0.05)
+        
         async with get_db_session() as session:
+            # Use SELECT FOR UPDATE to prevent race conditions
             result = await session.execute(
-                select(UserSettings).where(UserSettings.user_id == user_id)
+                select(UserSettings)
+                .where(UserSettings.user_id == user_id)
+                .with_for_update()
             )
             settings = result.scalar_one_or_none()
             
@@ -124,13 +133,31 @@ async def update_user_settings(
             
             # Update only provided fields
             update_data = request.model_dump(exclude_unset=True)
+            
+            if not update_data:
+                # No fields to update, return current settings
+                return UserSettingsResponse.model_validate(settings)
+            
             for field, value in update_data.items():
                 setattr(settings, field, value)
             
-            await session.commit()
+            # Commit with retry on deadlock
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    await session.commit()
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1 and "deadlock" in str(e).lower():
+                        logger.warning(f"Deadlock detected, retrying... (attempt {attempt + 1})")
+                        await asyncio.sleep(0.1 * (attempt + 1))
+                        await session.rollback()
+                    else:
+                        raise
+            
             await session.refresh(settings)
             
-            logger.info(f"Settings updated for user: {user_id}")
+            logger.info(f"Settings updated for user: {user_id} - fields: {list(update_data.keys())}")
             
             return UserSettingsResponse.model_validate(settings)
     
