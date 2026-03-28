@@ -21,7 +21,11 @@ import ShieldRoundedIcon from '@mui/icons-material/ShieldRounded';
 import DnsRoundedIcon from '@mui/icons-material/DnsRounded';
 import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
 import VisibilityOffRoundedIcon from '@mui/icons-material/VisibilityOffRounded';
-import { ACCOUNTS, STATUS_CONFIG, EmailAccount, AccountStatus } from './accountsData';
+import { useAccounts } from '@/hooks/queries/useAccounts';
+import { useConnectEmail } from '@/hooks/mutations/useEmailMutations';
+import { useToggleAutomation, useSyncAccount, useDeleteAccount } from '@/hooks/mutations/useAccountMutations';
+import type { EmailAccountFull } from '@/services/endpoints/email';
+import { initiateOAuth } from '@/utils/oauth';
 
 // ── Animated counter ──────────────────────────────────────────────────────────
 function CountUp({ target, suffix = '' }: { target: number; suffix?: string }) {
@@ -66,25 +70,24 @@ function ProviderLogo({ provider, size = 20 }: { provider: string; size?: number
 }
 
 // ── Status badge ──────────────────────────────────────────────────────────────
-function StatusBadge({ status }: { status: AccountStatus }) {
-  const cfg = STATUS_CONFIG[status];
-  const Icon = status === 'connected' ? CheckCircleRoundedIcon
-    : status === 'syncing' ? SyncRoundedIcon
-    : PauseCircleRoundedIcon;
+function StatusBadge({ status }: { status: string }) {
+  const isConnected = status === 'connected';
+  const isSyncing   = status === 'syncing';
+  const color = isConnected ? '#34d399' : isSyncing ? '#60a5fa' : '#fbbf24';
+  const label = isConnected ? 'Connected' : isSyncing ? 'Syncing' : 'Paused';
+  const Icon  = isConnected ? CheckCircleRoundedIcon : isSyncing ? SyncRoundedIcon : PauseCircleRoundedIcon;
   return (
     <Box sx={{
       display: 'inline-flex', alignItems: 'center', gap: 0.45,
       px: 0.75, py: 0.25, borderRadius: '6px',
-      background: cfg.bg, border: `1px solid ${alpha(cfg.color, 0.3)}`,
+      background: `${color}1a`, border: `1px solid ${color}4d`,
     }}>
       <Icon sx={{
-        fontSize: 10, color: cfg.color,
-        animation: status === 'syncing' ? 'spin 1.5s linear infinite' : 'none',
+        fontSize: 10, color,
+        animation: isSyncing ? 'spin 1.5s linear infinite' : 'none',
         '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
       }} />
-      <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: cfg.color, letterSpacing: '0.04em' }}>
-        {cfg.label}
-      </Typography>
+      <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color, letterSpacing: '0.04em' }}>{label}</Typography>
     </Box>
   );
 }
@@ -107,11 +110,11 @@ function UsageBar({ used, limit, color, isDark }: { used: number; limit: number;
 }
 
 // ── Summary stats ─────────────────────────────────────────────────────────────
-function SummaryStats({ accounts, isDark, theme }: { accounts: EmailAccount[]; isDark: boolean; theme: Theme }) {
+function SummaryStats({ accounts, isDark, theme }: { accounts: EmailAccountFull[]; isDark: boolean; theme: Theme }) {
   const total     = accounts.length;
-  const active    = accounts.filter(a => a.status === 'connected').length;
-  const healthy   = accounts.filter(a => a.status === 'connected' || a.status === 'syncing').length;
-  const processed = accounts.reduce((s, a) => s + a.emailsProcessed, 0);
+  const active    = accounts.filter(a => a.connection_status === 'connected').length;
+  const healthy   = accounts.filter(a => a.connection_status === 'connected' || a.sync_status === 'syncing').length;
+  const processed = accounts.reduce((s, a) => s + a.daily_sent_count, 0);
 
   const stats = [
     { label: 'Total Accounts',   value: total,     suffix: '',  color: '#818cf8', darkBg: 'rgba(129,140,248,0.12)', lightBg: 'rgba(129,140,248,0.07)', Icon: EmailRoundedIcon },
@@ -148,19 +151,22 @@ function SummaryStats({ accounts, isDark, theme }: { accounts: EmailAccount[]; i
 }
 
 // ── Account card ──────────────────────────────────────────────────────────────
-function AccountCard({ account, isDark, theme, index, onToggle }: {
-  account: EmailAccount; isDark: boolean; theme: Theme; index: number;
-  onToggle: (id: string) => void;
+function AccountCard({ account, isDark, theme, index, onToggle, onSync, onDelete }: {
+  account: EmailAccountFull; isDark: boolean; theme: Theme; index: number;
+  onToggle: (id: string, enabled: boolean) => void;
+  onSync:   (id: string) => void;
+  onDelete: (id: string) => void;
 }) {
-  const statusCfg = STATUS_CONFIG[account.status];
+  const statusColor = account.connection_status === 'connected' ? '#34d399'
+    : account.connection_status === 'error' ? '#f87171' : '#fbbf24';
 
-  const InsightIcon = account.insightType === 'positive' ? TrendingUpRoundedIcon
-    : account.insightType === 'warning' ? WarningAmberRoundedIcon
-    : AutoAwesomeRoundedIcon;
+  const usagePct = account.daily_send_limit > 0
+    ? Math.min((account.daily_sent_count / account.daily_send_limit) * 100, 100) : 0;
+  const barColor = usagePct > 85 ? '#f87171' : usagePct > 60 ? '#fbbf24' : statusColor;
 
-  const insightColor = account.insightType === 'positive' ? '#34d399'
-    : account.insightType === 'warning' ? '#fbbf24'
-    : '#c084fc';
+  const lastSync = account.last_synced_at
+    ? new Date(account.last_synced_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : 'Never';
 
   return (
     <Box sx={{
@@ -172,51 +178,41 @@ function AccountCard({ account, isDark, theme, index, onToggle }: {
       '&:hover': {
         transform: 'translateY(-3px)',
         boxShadow: isDark
-          ? `0 16px 40px rgba(0,0,0,0.4), 0 0 0 1px ${alpha(statusCfg.color, 0.2)}`
-          : `0 16px 40px rgba(15,23,42,0.1), 0 0 0 1px ${alpha(statusCfg.color, 0.15)}`,
+          ? `0 16px 40px rgba(0,0,0,0.4), 0 0 0 1px ${alpha(statusColor, 0.2)}`
+          : `0 16px 40px rgba(15,23,42,0.1), 0 0 0 1px ${alpha(statusColor, 0.15)}`,
       },
       '&::before': {
         content: '""', position: 'absolute', top: 0, left: 0, right: 0, height: '2.5px',
-        background: `linear-gradient(90deg, ${statusCfg.color}, ${alpha(statusCfg.color, 0.2)})`,
+        background: `linear-gradient(90deg, ${statusColor}, ${alpha(statusColor, 0.2)})`,
       },
       animation: `cardIn 0.3s ease-out ${index * 0.07}s both`,
       '@keyframes cardIn': { from: { opacity: 0, transform: 'translateY(10px)' }, to: { opacity: 1, transform: 'translateY(0)' } },
     }}>
       <Box sx={{ p: { xs: 1.75, sm: 2 } }}>
-
         {/* Top row */}
         <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', mb: 1.5 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, minWidth: 0, flex: 1 }}>
-            <Box sx={{
-              width: 44, height: 44, borderRadius: '12px', flexShrink: 0,
-              background: isDark ? 'rgba(255,255,255,0.07)' : alpha(theme.palette.text.primary, 0.04),
-              border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : theme.palette.divider}`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}>
+            <Box sx={{ width: 44, height: 44, borderRadius: '12px', flexShrink: 0, background: isDark ? 'rgba(255,255,255,0.07)' : alpha(theme.palette.text.primary, 0.04), border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : theme.palette.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <ProviderLogo provider={account.provider} size={24} />
             </Box>
             <Box sx={{ minWidth: 0 }}>
               <Typography sx={{ fontSize: '0.88rem', fontWeight: 700, color: 'text.primary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {account.email}
+                {account.email_address}
               </Typography>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mt: 0.3 }}>
-                <StatusBadge status={account.status} />
-                <Typography sx={{ fontSize: '0.6rem', color: 'text.disabled' }}>
-                  Synced {account.lastSync}
-                </Typography>
+                <StatusBadge status={account.connection_status} />
+                <Typography sx={{ fontSize: '0.6rem', color: 'text.disabled' }}>Synced {lastSync}</Typography>
               </Box>
             </Box>
           </Box>
-
-          {/* Actions */}
           <Box sx={{ display: 'flex', gap: 0.25, flexShrink: 0, ml: 1 }}>
             <Tooltip title="Refresh sync" placement="top">
-              <IconButton size="small" sx={{ width: 28, height: 28, borderRadius: '7px', color: 'text.secondary', '&:hover': { background: isDark ? 'rgba(255,255,255,0.07)' : alpha(theme.palette.text.primary, 0.05) } }}>
+              <IconButton size="small" onClick={() => onSync(account.id)} sx={{ width: 28, height: 28, borderRadius: '7px', color: 'text.secondary', '&:hover': { background: isDark ? 'rgba(255,255,255,0.07)' : alpha(theme.palette.text.primary, 0.05) } }}>
                 <RefreshRoundedIcon sx={{ fontSize: 14 }} />
               </IconButton>
             </Tooltip>
             <Tooltip title="Remove account" placement="top">
-              <IconButton size="small" sx={{ width: 28, height: 28, borderRadius: '7px', color: 'text.secondary', '&:hover': { background: 'rgba(239,68,68,0.1)', color: '#ef4444' } }}>
+              <IconButton size="small" onClick={() => onDelete(account.id)} sx={{ width: 28, height: 28, borderRadius: '7px', color: 'text.secondary', '&:hover': { background: 'rgba(239,68,68,0.1)', color: '#ef4444' } }}>
                 <DeleteOutlineRoundedIcon sx={{ fontSize: 14 }} />
               </IconButton>
             </Tooltip>
@@ -226,17 +222,13 @@ function AccountCard({ account, isDark, theme, index, onToggle }: {
         {/* Stats row */}
         <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1, mb: 1.5 }}>
           {[
-            { label: 'Processed', value: account.emailsProcessed, color: '#818cf8' },
-            { label: 'Sent Today', value: account.emailsSentToday, color: '#22d3ee' },
-            { label: 'Reply Rate', value: account.replyRate, color: '#34d399', suffix: '%' },
+            { label: 'Daily Limit', value: account.daily_send_limit, color: '#818cf8' },
+            { label: 'Sent Today',  value: account.daily_sent_count,  color: '#22d3ee' },
+            { label: 'Warmup',      value: account.warmup_enabled ? 1 : 0, color: '#34d399', suffix: account.warmup_enabled ? ' ON' : ' OFF' },
           ].map(({ label, value, color, suffix = '' }) => (
-            <Box key={label} sx={{
-              p: 1, borderRadius: '10px', textAlign: 'center',
-              background: isDark ? 'rgba(255,255,255,0.04)' : alpha(theme.palette.text.primary, 0.03),
-              border: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : theme.palette.divider}`,
-            }}>
+            <Box key={label} sx={{ p: 1, borderRadius: '10px', textAlign: 'center', background: isDark ? 'rgba(255,255,255,0.04)' : alpha(theme.palette.text.primary, 0.03), border: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : theme.palette.divider}` }}>
               <Typography sx={{ fontSize: { xs: '0.9rem', sm: '1rem' }, fontWeight: 800, color: 'text.primary', lineHeight: 1, letterSpacing: '-0.02em' }}>
-                {value > 0 ? <CountUp target={value} suffix={suffix} /> : <span style={{ color: 'var(--mui-palette-text-disabled)' }}>—</span>}
+                {suffix ? <span style={{ color }}>{value > 0 ? 'ON' : 'OFF'}</span> : <CountUp target={value} />}
               </Typography>
               <Typography sx={{ fontSize: '0.55rem', color: 'text.disabled', mt: 0.25, fontWeight: 500 }}>{label}</Typography>
             </Box>
@@ -245,42 +237,40 @@ function AccountCard({ account, isDark, theme, index, onToggle }: {
 
         {/* Daily usage bar */}
         <Box sx={{ mb: 1.5 }}>
-          <UsageBar used={account.dailyUsed} limit={account.dailyLimit} color={statusCfg.color} isDark={isDark} />
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.4 }}>
+            <Typography sx={{ fontSize: '0.6rem', color: 'text.disabled' }}>Daily usage</Typography>
+            <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: barColor }}>{account.daily_sent_count}/{account.daily_send_limit}</Typography>
+          </Box>
+          <Box sx={{ height: 3, borderRadius: 2, background: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.07)', overflow: 'hidden' }}>
+            <Box sx={{ height: '100%', borderRadius: 2, width: `${usagePct}%`, background: barColor, transition: 'width 0.8s ease' }} />
+          </Box>
         </Box>
 
-        {/* Automation toggle + insight */}
+        {/* Automation toggle */}
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.25 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
-            <Switch
-              size="small"
-              checked={account.automationEnabled}
-              onChange={() => onToggle(account.id)}
-              sx={{
-                '& .MuiSwitch-switchBase.Mui-checked': { color: '#34d399' },
-                '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#34d399' },
-              }}
+            <Switch size="small" checked={account.automation_enabled}
+              onChange={() => onToggle(account.id, !account.automation_enabled)}
+              sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#34d399' }, '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { backgroundColor: '#34d399' } }}
             />
-            <Typography sx={{ fontSize: '0.7rem', fontWeight: 600, color: account.automationEnabled ? '#34d399' : 'text.disabled' }}>
-              Automation {account.automationEnabled ? 'ON' : 'OFF'}
+            <Typography sx={{ fontSize: '0.7rem', fontWeight: 600, color: account.automation_enabled ? '#34d399' : 'text.disabled' }}>
+              Automation {account.automation_enabled ? 'ON' : 'OFF'}
             </Typography>
           </Box>
           <Typography sx={{ fontSize: '0.6rem', color: 'text.disabled' }}>
-            Connected {account.connectedAt}
+            {account.is_primary ? '★ Primary' : account.display_name ?? account.provider}
           </Typography>
         </Box>
 
-        {/* AI Insight */}
-        <Box sx={{
-          display: 'flex', alignItems: 'flex-start', gap: 0.75,
-          px: 1, py: 0.75, borderRadius: '9px',
-          background: isDark ? alpha(insightColor, 0.07) : alpha(insightColor, 0.05),
-          border: `1px solid ${alpha(insightColor, isDark ? 0.18 : 0.15)}`,
-        }}>
-          <InsightIcon sx={{ fontSize: 12, color: insightColor, mt: 0.1, flexShrink: 0 }} />
-          <Typography sx={{ fontSize: '0.67rem', color: isDark ? alpha(insightColor, 0.9) : insightColor, lineHeight: 1.45, fontWeight: 500 }}>
-            {account.insight}
-          </Typography>
-        </Box>
+        {/* Error message if any */}
+        {account.last_error_message && (
+          <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.75, px: 1, py: 0.75, borderRadius: '9px', background: isDark ? alpha('#f87171', 0.07) : alpha('#f87171', 0.05), border: `1px solid ${alpha('#f87171', isDark ? 0.18 : 0.15)}` }}>
+            <WarningAmberRoundedIcon sx={{ fontSize: 12, color: '#f87171', mt: 0.1, flexShrink: 0 }} />
+            <Typography sx={{ fontSize: '0.67rem', color: '#f87171', lineHeight: 1.45, fontWeight: 500 }}>
+              {account.last_error_message}
+            </Typography>
+          </Box>
+        )}
       </Box>
     </Box>
   );
@@ -294,17 +284,36 @@ function ConnectModal({ open, onClose, isDark, theme }: {
   const [showPass, setShowPass] = useState(false);
   const [smtp, setSmtp] = useState({ name: '', email: '', host: '', port: '587', user: '', pass: '', encryption: 'TLS' });
 
+  const { mutate: connectEmail, isPending, isSuccess, error, reset } = useConnectEmail();
+
+  const handleOAuth = async (provider: 'gmail' | 'outlook') => {
+    try {
+      await initiateOAuth(provider);
+    } catch (err) {
+      console.error('OAuth initiation failed:', err);
+    }
+  };
+
+  const handleSmtp = () => {
+    connectEmail({
+      provider: 'smtp',
+      connection_type: 'manual',
+      email: smtp.email,
+      credentials: {
+        smtp_host: smtp.host,
+        smtp_port: parseInt(smtp.port, 10),
+        username: smtp.user,
+        password: smtp.pass,
+        smtp_use_tls: smtp.encryption === 'TLS',
+      },
+    });
+  };
+
+  const handleClose = () => { reset(); onClose(); };
+
   const oauthProviders = [
-    {
-      id: 'google', name: 'Google Gmail', desc: 'Connect via secure OAuth 2.0',
-      color: '#EA4335', bg: isDark ? 'rgba(234,67,53,0.1)' : 'rgba(234,67,53,0.06)',
-      border: isDark ? 'rgba(234,67,53,0.25)' : 'rgba(234,67,53,0.2)',
-    },
-    {
-      id: 'microsoft', name: 'Microsoft Outlook', desc: 'Connect via Microsoft OAuth',
-      color: '#0078D4', bg: isDark ? 'rgba(0,120,212,0.1)' : 'rgba(0,120,212,0.06)',
-      border: isDark ? 'rgba(0,120,212,0.25)' : 'rgba(0,120,212,0.2)',
-    },
+    { id: 'google' as const,    providerKey: 'gmail' as const,    name: 'Google Gmail',       desc: 'Connect via secure OAuth 2.0', color: '#EA4335', bg: isDark ? 'rgba(234,67,53,0.1)' : 'rgba(234,67,53,0.06)', border: isDark ? 'rgba(234,67,53,0.25)' : 'rgba(234,67,53,0.2)' },
+    { id: 'microsoft' as const, providerKey: 'outlook' as const,  name: 'Microsoft Outlook',  desc: 'Connect via Microsoft OAuth',  color: '#0078D4', bg: isDark ? 'rgba(0,120,212,0.1)' : 'rgba(0,120,212,0.06)', border: isDark ? 'rgba(0,120,212,0.25)' : 'rgba(0,120,212,0.2)' },
   ];
 
   const inputSx = {
@@ -318,7 +327,7 @@ function ConnectModal({ open, onClose, isDark, theme }: {
   };
 
   return (
-    <Modal open={open} onClose={onClose} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', p: 2 }}>
+    <Modal open={open} onClose={handleClose} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', p: 2 }}>
       <Box sx={{
         width: '100%', maxWidth: 440,
         borderRadius: '18px',
@@ -343,7 +352,7 @@ function ConnectModal({ open, onClose, isDark, theme }: {
               Choose your email provider to get started
             </Typography>
           </Box>
-          <IconButton size="small" onClick={onClose} sx={{
+          <IconButton size="small" onClick={handleClose} sx={{
             width: 28, height: 28, borderRadius: '7px', color: 'text.secondary',
             '&:hover': { background: isDark ? 'rgba(255,255,255,0.07)' : alpha(theme.palette.text.primary, 0.05) },
           }}>
@@ -378,22 +387,30 @@ function ConnectModal({ open, onClose, isDark, theme }: {
         {/* OAuth tab */}
         {tab === 'oauth' && (
           <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+            {isSuccess && (
+              <Box sx={{ px: 1.5, py: 1, borderRadius: '9px', background: 'rgba(52,211,153,0.1)', border: '1px solid rgba(52,211,153,0.25)', display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                <CheckCircleRoundedIcon sx={{ fontSize: 14, color: '#34d399' }} />
+                <Typography sx={{ fontSize: '0.72rem', color: '#34d399', fontWeight: 600 }}>Account connected successfully!</Typography>
+              </Box>
+            )}
+            {error && (
+              <Box sx={{ px: 1.5, py: 1, borderRadius: '9px', background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.25)' }}>
+                <Typography sx={{ fontSize: '0.72rem', color: '#f87171' }}>{(error as { message?: string })?.message ?? 'Connection failed. Please try again.'}</Typography>
+              </Box>
+            )}
             {oauthProviders.map((p) => (
-              <Box key={p.id} component="button" sx={{
-                display: 'flex', alignItems: 'center', gap: 1.5,
-                p: 1.5, borderRadius: '12px', border: `1.5px solid ${p.border}`,
-                background: p.bg, cursor: 'pointer', textAlign: 'left', width: '100%',
-                transition: 'all 0.18s ease',
-                '&:hover': { transform: 'translateY(-1px)', boxShadow: isDark ? '0 8px 24px rgba(0,0,0,0.3)' : '0 8px 24px rgba(15,23,42,0.08)', borderColor: p.color },
-                '&:active': { transform: 'scale(0.99)' },
-              }}>
-                <Box sx={{
-                  width: 44, height: 44, borderRadius: '11px', flexShrink: 0,
-                  background: isDark ? 'rgba(255,255,255,0.07)' : '#fff',
-                  border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(15,23,42,0.08)'}`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+              <Box key={p.id} component="button"
+                onClick={() => !isPending && !isSuccess && handleOAuth(p.providerKey)}
+                disabled={isPending || isSuccess}
+                sx={{
+                  display: 'flex', alignItems: 'center', gap: 1.5,
+                  p: 1.5, borderRadius: '12px', border: `1.5px solid ${p.border}`,
+                  background: p.bg, cursor: isPending || isSuccess ? 'not-allowed' : 'pointer',
+                  textAlign: 'left', width: '100%', opacity: isPending || isSuccess ? 0.7 : 1,
+                  transition: 'all 0.18s ease',
+                  '&:hover': !isPending && !isSuccess ? { transform: 'translateY(-1px)', boxShadow: isDark ? '0 8px 24px rgba(0,0,0,0.3)' : '0 8px 24px rgba(15,23,42,0.08)', borderColor: p.color } : {},
                 }}>
+                <Box sx={{ width: 44, height: 44, borderRadius: '11px', flexShrink: 0, background: isDark ? 'rgba(255,255,255,0.07)' : '#fff', border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(15,23,42,0.08)'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
                   <ProviderLogo provider={p.id === 'google' ? 'gmail' : 'outlook'} size={24} />
                 </Box>
                 <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -401,7 +418,7 @@ function ConnectModal({ open, onClose, isDark, theme }: {
                   <Typography sx={{ fontSize: '0.67rem', color: 'text.secondary', mt: 0.15 }}>{p.desc}</Typography>
                 </Box>
                 <Box sx={{ px: 1.25, py: 0.5, borderRadius: '8px', flexShrink: 0, background: p.color, color: '#fff', fontSize: '0.68rem', fontWeight: 700 }}>
-                  Connect
+                  {isPending ? 'Connecting…' : isSuccess ? 'Connected' : 'Connect'}
                 </Box>
               </Box>
             ))}
@@ -490,18 +507,17 @@ function ConnectModal({ open, onClose, isDark, theme }: {
             </Box>
 
             {/* Connect button */}
-            <Box component="button" sx={{
-              mt: 0.5, width: '100%', border: 'none', cursor: 'pointer',
-              py: 0.9, borderRadius: '10px',
+            <Box component="button" onClick={handleSmtp} disabled={isPending} sx={{
+              mt: 0.5, width: '100%', border: 'none', cursor: isPending ? 'not-allowed' : 'pointer',
+              py: 0.9, borderRadius: '10px', opacity: isPending ? 0.7 : 1,
               background: isDark ? 'linear-gradient(135deg, #4f46e5, #818cf8)' : 'linear-gradient(135deg, #4338ca, #6366f1)',
               color: '#fff', fontSize: '0.78rem', fontWeight: 700,
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0.75,
               transition: 'opacity 0.15s ease, transform 0.15s ease',
-              '&:hover': { opacity: 0.88, transform: 'translateY(-1px)' },
-              '&:active': { transform: 'scale(0.99)' },
+              '&:hover': { opacity: isPending ? 0.7 : 0.88, transform: isPending ? 'none' : 'translateY(-1px)' },
             }}>
               <DnsRoundedIcon sx={{ fontSize: 15 }} />
-              Connect via SMTP
+              {isPending ? 'Connecting…' : 'Connect via SMTP'}
             </Box>
           </Box>
         )}
@@ -582,27 +598,30 @@ function EmptyState({ isDark, onConnect }: { isDark: boolean; onConnect: () => v
 export default function EmailAccountsPage() {
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
-  const [accounts, setAccounts] = useState(ACCOUNTS);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | AccountStatus>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | string>('all');
   const [modalOpen, setModalOpen] = useState(false);
 
-  const filtered = accounts.filter((a) => {
-    if (statusFilter !== 'all' && a.status !== statusFilter) return false;
-    if (search && !a.email.toLowerCase().includes(search.toLowerCase()) &&
-        !a.name.toLowerCase().includes(search.toLowerCase())) return false;
+  // ── Real data via React Query ──
+  const { data: accountsData, isLoading, isError } = useAccounts();
+  const { mutate: toggleAutomation } = useToggleAutomation();
+  const { mutate: syncAccount }      = useSyncAccount();
+  const { mutate: deleteAccount }    = useDeleteAccount();
+
+  const allAccounts = accountsData?.all ?? [];
+
+  const filtered = allAccounts.filter((a) => {
+    if (statusFilter !== 'all' && a.connection_status !== statusFilter) return false;
+    if (search && !a.email_address.toLowerCase().includes(search.toLowerCase()) &&
+        !(a.display_name ?? '').toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
 
-  const handleToggle = (id: string) => {
-    setAccounts((prev) => prev.map((a) => a.id === id ? { ...a, automationEnabled: !a.automationEnabled } : a));
-  };
-
-  const STATUS_FILTERS: { id: 'all' | AccountStatus; label: string }[] = [
-    { id: 'all',       label: 'All' },
-    { id: 'connected', label: 'Connected' },
-    { id: 'syncing',   label: 'Syncing' },
-    { id: 'paused',    label: 'Paused' },
+  const STATUS_FILTERS = [
+    { id: 'all',          label: 'All' },
+    { id: 'connected',    label: 'Connected' },
+    { id: 'syncing',      label: 'Syncing' },
+    { id: 'disconnected', label: 'Paused' },
   ];
 
   return (
@@ -650,7 +669,7 @@ export default function EmailAccountsPage() {
         </Box>
 
         {/* ── Summary stats ── */}
-        <SummaryStats accounts={accounts} isDark={isDark} theme={theme} />
+        <SummaryStats accounts={allAccounts} isDark={isDark} theme={theme} />
 
         {/* ── Search + filter ── */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
@@ -676,7 +695,7 @@ export default function EmailAccountsPage() {
           <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
             {STATUS_FILTERS.map((f) => {
               const isActive = statusFilter === f.id;
-              const count = f.id === 'all' ? accounts.length : accounts.filter(a => a.status === f.id).length;
+              const count = f.id === 'all' ? allAccounts.length : allAccounts.filter(a => a.connection_status === f.id).length;
               return (
                 <Box key={f.id} component="button" onClick={() => setStatusFilter(f.id)} sx={{
                   px: 1.1, py: 0.45, borderRadius: '8px', border: 'none', cursor: 'pointer',
@@ -709,19 +728,26 @@ export default function EmailAccountsPage() {
           </Box>
         </Box>
 
-        {/* ── Account grid or empty state ── */}
-        {filtered.length === 0 && search === '' && statusFilter === 'all' ? (
+        {/* ── Account grid or empty/loading/error state ── */}
+        {isLoading ? (
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(3, 1fr)' }, gap: 2 }}>
+            {[1, 2, 3].map(i => (
+              <Box key={i} sx={{ borderRadius: '14px', height: 260, background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)', border: `1px solid ${isDark ? 'rgba(255,255,255,0.07)' : theme.palette.divider}`, animation: 'pulse 1.5s ease-in-out infinite', '@keyframes pulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.5 } } }} />
+            ))}
+          </Box>
+        ) : isError ? (
+          <Box sx={{ textAlign: 'center', py: 8 }}>
+            <WarningAmberRoundedIcon sx={{ fontSize: 36, color: '#f87171', mb: 1 }} />
+            <Typography sx={{ fontSize: '0.88rem', color: 'text.secondary' }}>Failed to load accounts. Please refresh.</Typography>
+          </Box>
+        ) : filtered.length === 0 && search === '' && statusFilter === 'all' ? (
           <EmptyState isDark={isDark} onConnect={() => setModalOpen(true)} />
         ) : filtered.length === 0 ? (
           <Box sx={{ textAlign: 'center', py: 8 }}>
             <Typography sx={{ fontSize: '0.88rem', color: 'text.secondary' }}>No accounts match your filter.</Typography>
           </Box>
         ) : (
-          <Box sx={{
-            display: 'grid',
-            gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(3, 1fr)' },
-            gap: 2,
-          }}>
+          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', xl: 'repeat(3, 1fr)' }, gap: 2 }}>
             {filtered.map((account, i) => (
               <AccountCard
                 key={account.id}
@@ -729,7 +755,9 @@ export default function EmailAccountsPage() {
                 isDark={isDark}
                 theme={theme}
                 index={i}
-                onToggle={handleToggle}
+                onToggle={(id, enabled) => toggleAutomation({ id, enabled })}
+                onSync={syncAccount}
+                onDelete={deleteAccount}
               />
             ))}
           </Box>

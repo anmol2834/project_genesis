@@ -37,6 +37,7 @@ import {
 } from './integrationsData';
 import { ACCOUNTS, STATUS_CONFIG } from '../accounts/accountsData';
 import CSVImportModal from '../shared/CSVImportModal';
+import { useAccounts } from '@/hooks/queries/useAccounts';
 
 // ── Animated counter ──────────────────────────────────────────────────────────
 function CountUp({ target, suffix = '' }: { target: number; suffix?: string }) {
@@ -511,14 +512,20 @@ function EmailProviderSection({ isDark, theme, onOpenConnect }: {
 }) {
   const cat = CATEGORIES.find(c => c.id === 'email')!;
   const color = cat.color;
-  const hasGmail   = ACCOUNTS.some(a => a.provider === 'gmail'   && a.status !== 'paused');
-  const hasOutlook = ACCOUNTS.some(a => a.provider === 'outlook' && a.status !== 'paused');
-  const gmailAccounts   = ACCOUNTS.filter(a => a.provider === 'gmail');
-  const outlookAccounts = ACCOUNTS.filter(a => a.provider === 'outlook');
+
+  // Use real account data from React Query — same source as EmailAccountsPage
+  const { data: accountsData } = useAccounts();
+  const allAccounts = accountsData?.all ?? [];
+
+  const gmailAccounts   = allAccounts.filter(a => a.provider === 'gmail');
+  const outlookAccounts = allAccounts.filter(a => a.provider === 'outlook');
+  const hasGmail   = gmailAccounts.some(a => a.connection_status === 'connected');
+  const hasOutlook = outlookAccounts.some(a => a.connection_status === 'connected');
   const connectedCount  = (hasGmail ? 1 : 0) + (hasOutlook ? 1 : 0);
+
   const providers = [
-    { id: 'gmail',   name: 'Gmail',       color: '#EA4335', bgColor: '#fef2f2', description: 'Send and receive emails via Google Workspace accounts.', connected: hasGmail,   accounts: gmailAccounts,   popular: true  },
-    { id: 'outlook', name: 'Outlook',     color: '#0078D4', bgColor: '#eff6ff', description: 'Connect Microsoft 365 and Outlook accounts for outreach.', connected: hasOutlook, accounts: outlookAccounts, popular: false },
+    { id: 'gmail',   name: 'Gmail',       color: '#EA4335', bgColor: '#fef2f2', description: 'Send and receive emails via Google Workspace accounts.', connected: hasGmail,   accounts: gmailAccounts.map(a => ({ email: a.email_address, lastSync: a.last_synced_at ?? 'Never' })),   popular: true  },
+    { id: 'outlook', name: 'Outlook',     color: '#0078D4', bgColor: '#eff6ff', description: 'Connect Microsoft 365 and Outlook accounts for outreach.', connected: hasOutlook, accounts: outlookAccounts.map(a => ({ email: a.email_address, lastSync: a.last_synced_at ?? 'Never' })), popular: false },
     { id: 'smtp',    name: 'Custom SMTP', color: '#64748b', bgColor: '#f8fafc', description: 'Connect any email provider via SMTP/IMAP credentials.',    connected: false,       accounts: [],              popular: false },
   ];
   return (

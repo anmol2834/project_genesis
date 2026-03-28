@@ -1,13 +1,13 @@
 'use client';
 
-import { useState } from 'react';
 import React from 'react';
-import { Box, Typography, Button, useTheme, alpha } from '@mui/material';
+import { Box, Typography, Button, useTheme, alpha, CircularProgress } from '@mui/material';
 import ArrowForwardRoundedIcon from '@mui/icons-material/ArrowForwardRounded';
 import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded';
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
 import { motion } from 'framer-motion';
 import { lightGradients, darkGradients } from '@/theme/palette';
+import { useConnectEmail } from '@/hooks/mutations/useEmailMutations';
 
 function GoogleIcon() {
   return (
@@ -43,26 +43,36 @@ export default function Step5Email({ onNext, onBack, onSkip }: Props) {
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const grad = isDark ? darkGradients : lightGradients;
-  const [connecting, setConnecting] = useState<'gmail' | 'outlook' | null>(null);
-  const [connected, setConnected] = useState<'gmail' | 'outlook' | null>(null);
 
-  const handleConnect = async (provider: 'gmail' | 'outlook') => {
-    setConnecting(provider);
-    await new Promise(r => setTimeout(r, 1400));
-    setConnecting(null);
-    setConnected(provider);
+  const { mutate: connectEmail, isPending, isSuccess, data: connectData, error } = useConnectEmail();
+  const connectedProvider = isSuccess ? connectData?.data?.provider : null;
+
+  const handleConnect = (provider: 'gmail' | 'outlook') => {
+    // Initiate OAuth: redirect to backend OAuth URL
+    // The backend handles the OAuth flow and redirects back with a code
+    // For now we trigger the connect mutation with oauth type
+    // In production this would open a popup or redirect to OAuth URL
+    connectEmail({
+      provider,
+      connection_type: 'oauth',
+      credentials: {},
+    });
   };
 
   const providerBtn = (provider: 'gmail' | 'outlook', label: string, Icon: () => React.ReactElement) => {
-    const isConnected = connected === provider;
-    const isConnecting = connecting === provider;
+    const isConnected = connectedProvider === provider;
+    const isConnecting = isPending;
     return (
       <Button
         variant="outlined"
         fullWidth
-        disabled={!!connecting || !!connected}
+        disabled={isPending || isSuccess}
         onClick={() => handleConnect(provider)}
-        startIcon={isConnecting ? undefined : isConnected ? <CheckRoundedIcon sx={{ fontSize: 15, color: 'success.main' }} /> : <Icon />}
+        startIcon={
+          isConnecting ? <CircularProgress size={14} color="inherit" /> :
+          isConnected   ? <CheckRoundedIcon sx={{ fontSize: 15, color: 'success.main' }} /> :
+          <Icon />
+        }
         sx={{
           minHeight: 40, fontSize: '0.82rem', fontWeight: 500, borderRadius: '8px',
           borderColor: isConnected ? theme.palette.success.main : theme.palette.divider,
@@ -97,6 +107,15 @@ export default function Step5Email({ onNext, onBack, onSkip }: Props) {
         ))}
       </Box>
 
+      {/* Error state */}
+      {error && (
+        <Box sx={{ mb: 2, px: 1.5, py: 1, borderRadius: '8px', background: alpha('#ef4444', 0.08), border: `1px solid ${alpha('#ef4444', 0.2)}` }}>
+          <Typography sx={{ fontSize: '0.75rem', color: '#ef4444' }}>
+            {(error as { message?: string })?.message ?? 'Connection failed. Please try again.'}
+          </Typography>
+        </Box>
+      )}
+
       {/* Provider buttons */}
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mb: 2.5 }}>
         {providerBtn('gmail', 'Gmail', GoogleIcon)}
@@ -107,7 +126,7 @@ export default function Step5Email({ onNext, onBack, onSkip }: Props) {
         <Button onClick={onBack} variant="outlined" sx={{ minHeight: 40, fontSize: '0.8rem', borderRadius: '8px', px: 2, borderColor: alpha(theme.palette.primary.main, 0.3), flexShrink: 0 }}>
           <ArrowBackRoundedIcon sx={{ fontSize: 16 }} />
         </Button>
-        {connected ? (
+        {isSuccess ? (
           <Button
             onClick={onNext} variant="contained" fullWidth
             endIcon={<ArrowForwardRoundedIcon sx={{ fontSize: '16px !important' }} />}

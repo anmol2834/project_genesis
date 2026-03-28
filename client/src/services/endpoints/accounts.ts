@@ -1,32 +1,25 @@
 import { get, post, patch, del } from '../apiClient';
+import type { EmailAccountFull } from './email';
 
-export type AccountStatus   = 'connected' | 'syncing' | 'paused';
-export type AccountProvider = 'gmail' | 'outlook' | 'custom';
-
-export interface EmailAccount {
-  id: string;
-  email: string;
-  name: string;
-  provider: AccountProvider;
-  status: AccountStatus;
-  automationEnabled: boolean;
-  lastSync: string;
-  emailsProcessed: number;
-  emailsSentToday: number;
-  replyRate: number;
-  dailyLimit: number;
-  dailyUsed: number;
-}
-
-export interface ConnectOAuthPayload  { provider: 'gmail' | 'outlook'; code: string; }
-export interface ConnectSmtpPayload   { name: string; email: string; host: string; port: number; username: string; password: string; encryption: 'TLS' | 'SSL' | 'None'; }
+// Re-export for backwards compat with existing hooks
+export type { EmailAccountFull as EmailAccount };
+export type AccountStatus   = 'connected' | 'disconnected' | 'error' | 'syncing';
+export type AccountProvider = 'gmail' | 'outlook' | 'smtp';
 
 export const accountsApi = {
-  list:          ()                                  => get<EmailAccount[]>('/email-accounts'),
-  get:           (id: string)                        => get<EmailAccount>(`/email-accounts/${id}`),
-  connectOAuth:  (p: ConnectOAuthPayload)            => post<EmailAccount>('/email-accounts/oauth', p),
-  connectSmtp:   (p: ConnectSmtpPayload)             => post<EmailAccount>('/email-accounts/smtp', p),
-  toggleAuto:    (id: string, enabled: boolean)      => patch<EmailAccount>(`/email-accounts/${id}`, { automationEnabled: enabled }),
-  sync:          (id: string)                        => post<void>(`/email-accounts/${id}/sync`),
-  delete:        (id: string)                        => del<void>(`/email-accounts/${id}`),
+  /** GET /email-service/email/accounts */
+  list: () => get<EmailAccountFull[]>('/email-service/email/accounts'),
+
+  /** GET /email-service/email/accounts/:id */
+  get: (id: string) => get<EmailAccountFull>(`/email-service/email/accounts/${id}`),
+
+  /** PATCH /email-service/email/accounts/:id — toggle automation, limits, etc. */
+  update: (id: string, data: Partial<Pick<EmailAccountFull, 'is_active' | 'automation_enabled' | 'daily_send_limit' | 'display_name'>>) =>
+    patch<EmailAccountFull>(`/email-service/email/accounts/${id}`, data),
+
+  /** POST /email-service/email/accounts/:id/sync */
+  sync: (id: string) => post<void>(`/email-service/email/accounts/${id}/sync`),
+
+  /** DELETE /email-service/email/accounts/:id */
+  delete: (id: string) => del<void>(`/email-service/email/accounts/${id}`),
 };

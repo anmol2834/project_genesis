@@ -1,36 +1,36 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { integrationEndpoints } from '@/services/endpoints/integrations';
+import { integrationsApi } from '@/services/endpoints/integrations';
 import { queryKeys } from '@/lib/react-query/queryKeys';
 
 export const useConnectIntegration = () => {
   const queryClient = useQueryClient();
-
   return useMutation({
-    mutationFn: integrationEndpoints.connect,
+    mutationFn: integrationsApi.connect,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.accounts.all() });
     },
   });
 };
 
 export const useDisconnectIntegration = () => {
   const queryClient = useQueryClient();
-
   return useMutation({
-    mutationFn: integrationEndpoints.disconnect,
+    mutationFn: integrationsApi.disconnect,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.accounts.all() });
     },
   });
 };
 
 export const useSyncIntegration = () => {
   const queryClient = useQueryClient();
-
   return useMutation({
-    mutationFn: integrationEndpoints.sync,
+    mutationFn: integrationsApi.sync,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.accounts.all() });
     },
   });
 };
