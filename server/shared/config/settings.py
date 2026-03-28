@@ -64,6 +64,16 @@ class GlobalConfig(BaseSettings):
     MICROSOFT_CLIENT_SECRET: Optional[str] = Field(default=None)
     MICROSOFT_TENANT_ID: Optional[str] = Field(default=None)
     MICROSOFT_REDIRECT_URI: Optional[str] = Field(default=None)
+
+    # Email-service specific OAuth (separate credentials for email connection flow)
+    GOOGLE_CLIENT_ID_EMAIL: Optional[str] = Field(default=None)
+    GOOGLE_CLIENT_SECRET_EMAIL: Optional[str] = Field(default=None)
+    GOOGLE_REDIRECT_URI_EMAIL: str = Field(default="http://localhost:3000/oauth/callback")
+    
+    MICROSOFT_CLIENT_ID_EMAIL: Optional[str] = Field(default=None)
+    MICROSOFT_CLIENT_SECRET_EMAIL: Optional[str] = Field(default=None)
+    MICROSOFT_TENANT_ID_EMAIL: Optional[str] = Field(default=None)
+    MICROSOFT_REDIRECT_URI_EMAIL: str = Field(default="http://localhost:3000/oauth/callback")
     
     # ── Celery Configuration ────────────────────────────────────────────────
     CELERY_BROKER_URL: str = Field(..., description="Celery broker URL (Redis)")

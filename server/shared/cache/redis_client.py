@@ -36,15 +36,15 @@ async def get_redis_pool() -> ConnectionPool:
                     config.REDIS_URL,
                     encoding="utf-8",
                     decode_responses=True,
-                    max_connections=5,
-                    socket_timeout=10,
-                    socket_connect_timeout=10,
+                    max_connections=2,  # Reduced for Windows
+                    socket_timeout=5,
+                    socket_connect_timeout=5,
                     socket_keepalive=True,
-                    health_check_interval=30,
-                    retry_on_timeout=True,
+                    health_check_interval=60,
+                    retry_on_timeout=False,  # Fail fast
                 )
                 
-                logger.info(f"Redis connection pool created with max_connections=5")
+                logger.info(f"Redis connection pool created with max_connections=2")
     
     return _redis_pool
 
@@ -64,12 +64,12 @@ def get_redis_client() -> redis.Redis:
             config.REDIS_URL,
             encoding="utf-8",
             decode_responses=True,
-            max_connections=5,
-            socket_timeout=10,
-            socket_connect_timeout=10,
+            max_connections=2,  # Reduced for Windows
+            socket_timeout=5,
+            socket_connect_timeout=5,
             socket_keepalive=True,
-            retry_on_timeout=True,
-            health_check_interval=30,
+            retry_on_timeout=False,  # Fail fast
+            health_check_interval=60,
         )
         
         logger.info(f"Redis client created with connection pooling")

@@ -120,6 +120,8 @@ if __name__ == "__main__":
         "main:app", 
         host="0.0.0.0", 
         port=8002, 
-        reload=config.DEBUG,
-        access_log=False  # Disable access logs (200 OK, etc.)
+        reload=False,  # Disabled to prevent Windows socket exhaustion
+        workers=1,  # Single worker for Windows
+        access_log=False,  # Disable access logs (200 OK, etc.)
+        timeout_keep_alive=5,  # Reduce keep-alive timeout
     )

@@ -125,7 +125,9 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8001,
-        reload=config.DEBUG,
+        reload=False,  # Disabled to prevent Windows socket exhaustion
+        workers=1,  # Single worker for Windows
         access_log=False,
-        log_level="warning"
+        log_level="warning",
+        timeout_keep_alive=5,  # Reduce keep-alive timeout
     )

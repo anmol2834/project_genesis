@@ -43,8 +43,8 @@ def get_engine():
         _engine = create_async_engine(
             config.DATABASE_URL,
             echo=False,  # Disable SQL query logging
-            pool_size=config.DB_POOL_SIZE,
-            max_overflow=config.DB_MAX_OVERFLOW,
+            pool_size=5,  # Reduced from 20 for Windows
+            max_overflow=3,  # Reduced from 10 for Windows
             pool_timeout=config.DB_POOL_TIMEOUT,
             pool_pre_ping=True,  # Verify connections before using
             pool_recycle=1800,   # Recycle connections after 30 minutes (AWS RDS)
@@ -52,7 +52,7 @@ def get_engine():
             connect_args=connect_args,
         )
         
-        logger.info(f"Database engine created with pool_size={config.DB_POOL_SIZE}")
+        logger.info(f"Database engine created with pool_size=5")
     
     return _engine
 
