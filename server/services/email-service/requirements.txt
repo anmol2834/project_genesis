@@ -1,2 +1,7 @@
 # Email service — all deps covered by project-genesis-base
 # (google-auth, google-auth-oauthlib, google-auth-httplib2 are in base)
+
+# Queue Layer Dependencies
+celery>=5.3.0
+redis>=5.0.0
+kombu>=5.3.0

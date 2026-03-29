@@ -41,3 +41,8 @@ def decrypt(token: str) -> str:
     raw  = base64.b64decode(token)
     nonce, ct = raw[:12], raw[12:]
     return AESGCM(key).decrypt(nonce, ct, None).decode()
+
+
+# Alias used by provider/subscribers and adapter layers
+decrypt_token = decrypt
+encrypt_token = encrypt

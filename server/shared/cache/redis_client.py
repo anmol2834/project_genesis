@@ -1,7 +1,11 @@
 """
 Redis Connection Module
-Async connection using redis-py with asyncio support
-Used for caching and Celery broker
+Async connection using redis-py with asyncio support.
+
+Architecture:
+- Single global ConnectionPool shared across the entire process
+- Single global Redis client that draws from that pool
+- Pool size tuned for concurrent async workload (webhooks + background tasks)
 """
 
 import redis.asyncio as redis
@@ -14,166 +18,138 @@ from shared.config import get_config
 
 logger = logging.getLogger(__name__)
 
-# Global Redis connection pool
-_redis_pool: Optional[ConnectionPool] = None
-_redis_client: Optional[redis.Redis] = None
-_pool_lock = asyncio.Lock()
+# ── Globals ───────────────────────────────────────────────────────────────────
+_redis_pool:   Optional[ConnectionPool] = None
+_redis_client: Optional[redis.Redis]    = None
+_init_lock = asyncio.Lock()
 
 
-async def get_redis_pool() -> ConnectionPool:
+async def _build_pool() -> ConnectionPool:
+    """Build the shared connection pool (called once at startup)."""
+    config = get_config()
+    pool = ConnectionPool.from_url(
+        config.REDIS_URL,
+        encoding="utf-8",
+        decode_responses=True,
+        max_connections=5,           # conservative — shared free-tier Redis
+        socket_timeout=10,
+        socket_connect_timeout=10,
+        socket_keepalive=True,
+        health_check_interval=30,
+        retry_on_timeout=True,
+    )
+    logger.info("Redis connection pool created (max_connections=5)")
+    return pool
+
+
+async def init_redis() -> bool:
     """
-    Get or create Redis connection pool
-    Ensures single pool instance across application
+    Initialise the shared pool and client.
+    Must be called once at application startup (lifespan).
     """
-    global _redis_pool
-    
-    if _redis_pool is None:
-        async with _pool_lock:
-            if _redis_pool is None:  # Double-check after acquiring lock
-                config = get_config()
-                
-                _redis_pool = ConnectionPool.from_url(
-                    config.REDIS_URL,
-                    encoding="utf-8",
-                    decode_responses=True,
-                    max_connections=2,  # Reduced for Windows
-                    socket_timeout=5,
-                    socket_connect_timeout=5,
-                    socket_keepalive=True,
-                    health_check_interval=60,
-                    retry_on_timeout=False,  # Fail fast
-                )
-                
-                logger.info(f"Redis connection pool created with max_connections=2")
-    
-    return _redis_pool
+    global _redis_pool, _redis_client
+
+    async with _init_lock:
+        if _redis_client is not None:
+            return True  # already initialised
+
+        try:
+            _redis_pool   = await _build_pool()
+            _redis_client = redis.Redis(connection_pool=_redis_pool)
+
+            await asyncio.wait_for(_redis_client.ping(), timeout=5.0)
+            logger.info("Redis initialised successfully")
+            return True
+
+        except asyncio.TimeoutError:
+            logger.error("Redis init timeout")
+            return False
+        except Exception as e:
+            logger.error(f"Redis init failed: {e}")
+            return False
 
 
 def get_redis_client() -> redis.Redis:
     """
-    Get or create Redis client
-    Uses shared connection pool to prevent exhaustion
+    Return the shared Redis client.
+    Raises RuntimeError if init_redis() was never called.
     """
-    global _redis_client
-    
     if _redis_client is None:
+        # Fallback: build a client on-the-fly (e.g. Celery worker process)
         config = get_config()
-        
-        # Create client without pool first (pool will be set during init)
-        _redis_client = redis.from_url(
+        return redis.from_url(
             config.REDIS_URL,
             encoding="utf-8",
             decode_responses=True,
-            max_connections=2,  # Reduced for Windows
-            socket_timeout=5,
-            socket_connect_timeout=5,
+            max_connections=5,
+            socket_timeout=10,
+            socket_connect_timeout=10,
             socket_keepalive=True,
-            retry_on_timeout=False,  # Fail fast
-            health_check_interval=60,
+            retry_on_timeout=True,
+            health_check_interval=30,
         )
-        
-        logger.info(f"Redis client created with connection pooling")
-    
     return _redis_client
 
 
-async def init_redis():
+async def get_redis() -> redis.Redis:
     """
-    Initialize Redis connection pool
-    Call this on application startup
+    Async alias used throughout the codebase: `redis = await get_redis()`.
+    Returns the shared client; initialises lazily if needed.
     """
-    try:
-        # Initialize pool first
-        pool = await get_redis_pool()
-        
-        # Get client
-        client = get_redis_client()
-        
-        # Test connection with timeout
-        try:
-            await asyncio.wait_for(client.ping(), timeout=5.0)
-            logger.info("Redis connection initialized successfully")
-            return True
-        except asyncio.TimeoutError:
-            logger.error("Redis initialization timeout")
-            return False
-    except Exception as e:
-        logger.error(f"Redis initialization failed: {e}")
-        return False
+    if _redis_client is None:
+        await init_redis()
+    return get_redis_client()
 
 
-async def close_redis():
-    """
-    Close Redis connections and pool
-    Call this on application shutdown
-    """
+async def close_redis() -> None:
+    """Close all Redis connections. Call on application shutdown."""
     global _redis_client, _redis_pool
-    
+
     try:
         if _redis_client:
-            await _redis_client.close()
+            await _redis_client.aclose()
             _redis_client = None
-        
         if _redis_pool:
-            await _redis_pool.disconnect()
+            await _redis_pool.aclose()
             _redis_pool = None
-        
         logger.info("Redis connections closed")
     except Exception as e:
-        logger.error(f"Error closing Redis connections: {e}")
+        logger.error(f"Error closing Redis: {e}")
 
 
 async def check_redis_health() -> bool:
-    """
-    Check Redis connection health with timeout
-    Used for health check endpoints
-    """
     try:
         client = get_redis_client()
         await asyncio.wait_for(client.ping(), timeout=3.0)
         return True
-    except asyncio.TimeoutError:
-        logger.error("Redis health check timeout")
-        return False
     except Exception as e:
         logger.error(f"Redis health check failed: {e}")
         return False
 
 
+# ── Simple cache helpers ──────────────────────────────────────────────────────
+
 async def get_cached(key: str) -> Optional[str]:
-    """
-    Get value from Redis cache
-    """
     try:
-        client = get_redis_client()
-        return await client.get(key)
+        return await get_redis_client().get(key)
     except Exception as e:
-        logger.error(f"Redis get error for key '{key}': {e}")
+        logger.error(f"Redis GET '{key}': {e}")
         return None
 
 
 async def set_cached(key: str, value: str, ttl: int = 300) -> bool:
-    """
-    Set value in Redis cache with TTL
-    Default TTL: 5 minutes
-    """
     try:
-        client = get_redis_client()
-        await client.setex(key, ttl, value)
+        await get_redis_client().setex(key, ttl, value)
         return True
     except Exception as e:
-        logger.error(f"Redis set error for key '{key}': {e}")
+        logger.error(f"Redis SET '{key}': {e}")
         return False
 
 
 async def delete_cached(key: str) -> bool:
-    """
-    Delete value from Redis cache
-    """
     try:
-        client = get_redis_client()
-        await client.delete(key)
+        await get_redis_client().delete(key)
         return True
     except Exception as e:
-        logger.error(f"Redis delete error for key '{key}': {e}")
+        logger.error(f"Redis DEL '{key}': {e}")
         return False

@@ -81,6 +81,14 @@ class EmailAccount(Base):
     # ── Sync tracking ────────────────────────────────────────────────────────
     last_synced_at = Column(DateTime, nullable=True)
 
+    # ── Gmail-specific: gap recovery ─────────────────────────────────────────
+    # Stores the last Gmail historyId seen — used by history_sync to recover
+    # emails missed during downtime. Updated on every Pub/Sub notification.
+    last_history_id = Column(String(64), nullable=True)
+
+    # When the Gmail watch expires (set by GmailSubscriber.subscribe)
+    watch_expiry = Column(DateTime, nullable=True)
+
     # ── Account flags ────────────────────────────────────────────────────────
     is_active  = Column(Boolean, default=True,  nullable=False)
     is_primary = Column(Boolean, default=False, nullable=False)

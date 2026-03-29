@@ -74,6 +74,24 @@ class GlobalConfig(BaseSettings):
     MICROSOFT_CLIENT_SECRET_EMAIL: Optional[str] = Field(default=None)
     MICROSOFT_TENANT_ID_EMAIL: Optional[str] = Field(default=None)
     MICROSOFT_REDIRECT_URI_EMAIL: str = Field(default="http://localhost:3000/oauth/callback")
+
+    # ── Gmail Pub/Sub Configuration ─────────────────────────────────────────
+    GMAIL_PUBSUB_TOPIC: str = Field(
+        default="projects/gmail-integration-484614/topics/gmail-notifications",
+        description="Google Cloud Pub/Sub topic for Gmail push notifications"
+    )
+    GMAIL_PUBSUB_SUBSCRIPTION: str = Field(
+        default="projects/gmail-integration-484614/subscriptions/gmail-notifications-sub",
+        description="Google Cloud Pub/Sub subscription name"
+    )
+
+    # ── Public webhook URL (for Outlook Graph subscriptions) ─────────────────
+    # In dev: set to your ngrok URL e.g. https://abc123.ngrok-free.app
+    # In prod: set to your real domain e.g. https://api.yourdomain.com
+    EMAIL_SERVICE_PUBLIC_URL: str = Field(
+        default="http://localhost:8004",
+        description="Publicly reachable URL for this service (used for webhook registration)"
+    )
     
     # ── Celery Configuration ────────────────────────────────────────────────
     CELERY_BROKER_URL: str = Field(..., description="Celery broker URL (Redis)")
@@ -129,9 +147,32 @@ class GlobalConfig(BaseSettings):
     
     @validator("CORS_ORIGINS", pre=True)
     def parse_cors_origins(cls, v):
-        """Parse CORS origins from comma-separated string"""
+        """Parse CORS origins from JSON array string or comma-separated string."""
         if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
+            v = v.strip()
+            # Handle JSON array format: ["http://localhost:3000","http://localhost:3001"]
+            if v.startswith("["):
+                import json
+                try:
+                    return json.loads(v)
+                except json.JSONDecodeError:
+                    pass
+            # Handle comma-separated format
+            return [origin.strip().strip('"').strip("'") for origin in v.split(",") if origin.strip()]
+        return v
+
+    @validator("CELERY_ACCEPT_CONTENT", pre=True)
+    def parse_celery_accept_content(cls, v):
+        """Parse CELERY_ACCEPT_CONTENT from JSON array string."""
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("["):
+                import json
+                try:
+                    return json.loads(v)
+                except json.JSONDecodeError:
+                    pass
+            return [item.strip().strip('"') for item in v.split(",") if item.strip()]
         return v
     
     class Config:

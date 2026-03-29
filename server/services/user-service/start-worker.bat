@@ -14,6 +14,15 @@ echo.
 
 cd /d "%~dp0"
 
-python -m celery -A celery_worker worker --loglevel=info --concurrency=2 --pool=solo -Q user_queue
+set PYTHONPATH=%~dp0;%~dp0\..\..;%PYTHONPATH%
+
+python -m celery -A celery_worker worker ^
+    --loglevel=info ^
+    --concurrency=1 ^
+    --pool=solo ^
+    -Q user_queue ^
+    --without-mingle ^
+    --without-gossip ^
+    --without-heartbeat
 
 pause

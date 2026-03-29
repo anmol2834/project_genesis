@@ -1,12 +1,12 @@
 """
 Email Connection API
 POST /email/connect  — unified endpoint for Gmail, Outlook, SMTP
+Automatically creates Pub/Sub watch subscription after connecting.
 """
 
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from schemas.connect import ConnectEmailRequest, ConnectEmailResponse, ConnectEmailData
 from services.email_connection_service import EmailConnectionService
@@ -32,7 +32,6 @@ async def connect_email(
 ):
     user_id: UUID = UUID(str(current_user["user_id"]))
 
-    # Build credentials dict from request
     creds = body.credentials.model_dump(exclude_none=True)
     if body.email:
         creds["email_address"] = str(body.email)
@@ -56,6 +55,12 @@ async def connect_email(
             detail="Email connection failed. Please try again.",
         )
 
+    # ── Auto-register Pub/Sub watch after successful connection ──────────────
+    # This is what makes Google actually send push notifications to our webhook.
+    # Run in background so it doesn't block the response.
+    import asyncio
+    asyncio.create_task(_register_watch_subscription(account))
+
     return ConnectEmailResponse(
         status="success",
         message="Email account connected successfully",
@@ -66,3 +71,27 @@ async def connect_email(
             account_id=account.id,
         ),
     )
+
+
+async def _register_watch_subscription(account) -> None:
+    """
+    Background task: register Gmail/Outlook watch subscription after connect.
+    Errors are logged but never bubble up to the user.
+    """
+    try:
+        from provider.manager.subscription_manager import SubscriptionManager
+        from shared.database import get_db_session
+
+        manager = SubscriptionManager()
+        async with get_db_session() as session:
+            result = await manager.ensure_subscription(account, session)
+            await session.commit()
+        logger.info(
+            f"Watch subscription {result} for {account.email_address} "
+            f"(provider={account.provider})"
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to register watch subscription for {account.email_address}: {e}",
+            exc_info=True
+        )

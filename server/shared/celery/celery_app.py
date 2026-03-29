@@ -49,33 +49,35 @@ def get_celery_app() -> Celery:
             # Worker configuration
             worker_prefetch_multiplier=1,
             worker_max_tasks_per_child=1000,
-            worker_disable_rate_limits=False,
-            
+
             # Task configuration
             task_acks_late=True,
             task_reject_on_worker_lost=True,
-            task_time_limit=300,  # 5 minutes
-            task_soft_time_limit=240,  # 4 minutes
-            
-            # Result backend — disable result tracking entirely to prevent
-            # Redis pubsub connections being opened per task (exhausts free-tier limits)
+            task_time_limit=300,
+            task_soft_time_limit=240,
+
+            # Result backend — disable result tracking to save Redis connections
             task_ignore_result=True,
             result_expires=3600,
             result_persistent=False,
             result_backend_transport_options={
                 'retry_on_timeout': True,
-                'max_connections': 2,
+                'max_connections': 1,
             },
-            
-            # Broker configuration — keep pool minimal for free-tier Redis
+
+            # Broker — minimal pool for free-tier Redis
             broker_connection_retry_on_startup=True,
             broker_connection_max_retries=10,
-            broker_pool_limit=2,
+            broker_pool_limit=1,
             broker_transport_options={
                 'visibility_timeout': 3600,
                 'max_connections': 2,
                 'socket_keepalive': True,
+                'socket_timeout': 30,
             },
+
+            # Disable rate limits — saves Redis connections
+            worker_disable_rate_limits=True,
         )
         
         logger.info("Celery application created")

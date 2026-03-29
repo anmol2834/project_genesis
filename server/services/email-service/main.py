@@ -20,9 +20,19 @@ from shared.database import init_database, close_database, check_database_health
 from shared.cache import init_redis, close_redis, check_redis_health
 
 # Register ORM models so SQLAlchemy creates tables on startup
-from models import EmailAccount, EmailProviderConfig, EmailAccountHealth, EmailSyncLog  # noqa: F401
+from models import (
+    EmailAccount,
+    EmailProviderConfig,
+    EmailAccountHealth,
+    EmailSyncLog,
+    EmailProviderSubscription
+)  # noqa: F401
 
 from api import connect_router, accounts_router, oauth_config_router
+from api.webhooks import router as webhooks_router
+from api.subscriptions import router as subscriptions_router
+from api.monitoring import router as monitoring_router
+from api.queue import router as queue_router
 
 logger = setup_logging("email-service")
 config = get_config()
@@ -38,18 +48,63 @@ async def lifespan(app: FastAPI):
     try:
         from shared.database import get_engine
         from models.email_account import Base as EmailBase
-        
+
         engine = get_engine()
         async with engine.begin() as conn:
-            # Create all tables defined in email-service models
             await conn.run_sync(EmailBase.metadata.create_all)
         logger.info("Email service database tables created/verified")
     except Exception as e:
         logger.error(f"Failed to create email service tables: {e}")
+
+    # Run column migrations for existing tables (idempotent — safe to run every startup)
+    try:
+        from shared.database import get_engine
+        from sqlalchemy import text
+
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE email_accounts "
+                "ADD COLUMN IF NOT EXISTS last_history_id VARCHAR(64) NULL"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE email_accounts "
+                "ADD COLUMN IF NOT EXISTS watch_expiry TIMESTAMP WITHOUT TIME ZONE NULL"
+            ))
+        logger.info("Email accounts column migration applied")
+    except Exception as e:
+        logger.error(f"Column migration failed: {e}")
     
+    # Start background tasks (subscription scheduler + SMTP poller)
+    try:
+        from provider.scheduler.background_tasks import get_task_manager
+        task_manager = get_task_manager()
+        await task_manager.start_all()
+        logger.info("Background tasks started")
+    except Exception as e:
+        logger.error(f"Failed to start background tasks: {e}")
+
+    # Auto-sync all connected accounts → register Gmail/Outlook watches
+    # Runs in background so startup is not blocked
+    import asyncio
+    asyncio.create_task(_startup_sync_subscriptions())
+    asyncio.create_task(_startup_history_recovery())
+
     logger.info("Email Service started successfully")
     yield
+    
+    # Shutdown
     logger.info("Email Service shutting down...")
+    
+    # Stop background tasks
+    try:
+        from provider.scheduler.background_tasks import get_task_manager
+        task_manager = get_task_manager()
+        await task_manager.stop_all()
+        logger.info("Background tasks stopped")
+    except Exception as e:
+        logger.error(f"Error stopping background tasks: {e}")
+    
     await close_database()
     await close_redis()
 
@@ -73,6 +128,42 @@ app.add_middleware(CORSMiddleware, allow_origins=config.CORS_ORIGINS, allow_cred
 app.include_router(connect_router)
 app.include_router(accounts_router)
 app.include_router(oauth_config_router)
+app.include_router(webhooks_router)
+app.include_router(subscriptions_router)
+app.include_router(monitoring_router)
+app.include_router(queue_router)
+
+
+async def _startup_sync_subscriptions() -> None:
+    """
+    On startup: register Gmail/Outlook watches for every connected account.
+    Ensures all accounts receive push notifications even after server restart.
+    """
+    import asyncio
+    await asyncio.sleep(2)
+    try:
+        from provider.manager.subscription_manager import SubscriptionManager
+        manager = SubscriptionManager()
+        stats = await manager.sync_all_subscriptions()
+        logger.info(f"Startup subscription sync complete: {stats}")
+    except Exception as e:
+        logger.error(f"Startup subscription sync failed: {e}", exc_info=True)
+
+
+async def _startup_history_recovery() -> None:
+    """
+    On startup: recover any emails missed during downtime via Gmail History API.
+    Runs after subscription sync to ensure watches are active first.
+    """
+    import asyncio
+    await asyncio.sleep(10)  # Wait for subscription sync to complete first
+    try:
+        from recovery.history_sync import get_history_sync
+        syncer = get_history_sync()
+        stats  = await syncer.run_recovery_for_all()
+        logger.info(f"Startup history recovery complete: {stats}")
+    except Exception as e:
+        logger.error(f"Startup history recovery failed: {e}", exc_info=True)
 
 
 @app.get("/health")
