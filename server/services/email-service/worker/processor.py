@@ -91,7 +91,8 @@ class EventProcessor:
             
             updated_messages = self.json_manager.update_messages(
                 existing_messages,
-                new_message
+                new_message,
+                message_id=message_id
             )
             
             # Step 6: Upsert to database
