@@ -17,7 +17,7 @@ cd /d "%~dp0"
 set PYTHONPATH=%~dp0;%~dp0\..\..;%PYTHONPATH%
 
 python -m celery -A celery_worker worker ^
-    --loglevel=info ^
+    --loglevel=warning ^
     --concurrency=1 ^
     --pool=solo ^
     -Q auth_queue ^

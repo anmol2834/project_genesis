@@ -149,13 +149,15 @@ def create_email_celery_app() -> Celery:
 
         # Broker — tight pool for free-tier Redis
         broker_connection_retry_on_startup=True,
-        broker_connection_max_retries=10,
+        broker_connection_max_retries=None,   # retry forever on disconnect
         broker_pool_limit=2,
         broker_transport_options={
             "visibility_timeout": 3600,
             "max_connections": 3,
             "socket_keepalive": True,
-            "socket_timeout": 30,
+            "socket_timeout": 120,
+            "socket_connect_timeout": 10,
+            "retry_on_timeout": True,
         },
 
         # Result backend — minimal

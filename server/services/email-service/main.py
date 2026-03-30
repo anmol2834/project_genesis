@@ -33,6 +33,7 @@ from api.webhooks import router as webhooks_router
 from api.subscriptions import router as subscriptions_router
 from api.monitoring import router as monitoring_router
 from api.queue import router as queue_router
+from api.inbox import router as inbox_router
 
 logger = setup_logging("email-service")
 config = get_config()
@@ -44,43 +45,29 @@ async def lifespan(app: FastAPI):
     await init_database()
     await init_redis()
     
-    # Create database tables for email-service models
     try:
         from shared.database import get_engine
         from models.email_account import Base as EmailBase
-
         engine = get_engine()
         async with engine.begin() as conn:
             await conn.run_sync(EmailBase.metadata.create_all)
-        logger.info("Email service database tables created/verified")
     except Exception as e:
         logger.error(f"Failed to create email service tables: {e}")
 
-    # Run column migrations for existing tables (idempotent — safe to run every startup)
     try:
         from shared.database import get_engine
         from sqlalchemy import text
-
         engine = get_engine()
         async with engine.begin() as conn:
-            await conn.execute(text(
-                "ALTER TABLE email_accounts "
-                "ADD COLUMN IF NOT EXISTS last_history_id VARCHAR(64) NULL"
-            ))
-            await conn.execute(text(
-                "ALTER TABLE email_accounts "
-                "ADD COLUMN IF NOT EXISTS watch_expiry TIMESTAMP WITHOUT TIME ZONE NULL"
-            ))
-        logger.info("Email accounts column migration applied")
+            await conn.execute(text("ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS last_history_id VARCHAR(64) NULL"))
+            await conn.execute(text("ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS watch_expiry TIMESTAMP WITHOUT TIME ZONE NULL"))
     except Exception as e:
         logger.error(f"Column migration failed: {e}")
     
-    # Start background tasks (subscription scheduler + SMTP poller)
     try:
         from provider.scheduler.background_tasks import get_task_manager
         task_manager = get_task_manager()
         await task_manager.start_all()
-        logger.info("Background tasks started")
     except Exception as e:
         logger.error(f"Failed to start background tasks: {e}")
 
@@ -132,6 +119,7 @@ app.include_router(webhooks_router)
 app.include_router(subscriptions_router)
 app.include_router(monitoring_router)
 app.include_router(queue_router)
+app.include_router(inbox_router)
 
 
 async def _startup_sync_subscriptions() -> None:
@@ -144,8 +132,7 @@ async def _startup_sync_subscriptions() -> None:
     try:
         from provider.manager.subscription_manager import SubscriptionManager
         manager = SubscriptionManager()
-        stats = await manager.sync_all_subscriptions()
-        logger.info(f"Startup subscription sync complete: {stats}")
+        await manager.sync_all_subscriptions()
     except Exception as e:
         logger.error(f"Startup subscription sync failed: {e}", exc_info=True)
 
@@ -160,8 +147,7 @@ async def _startup_history_recovery() -> None:
     try:
         from recovery.history_sync import get_history_sync
         syncer = get_history_sync()
-        stats  = await syncer.run_recovery_for_all()
-        logger.info(f"Startup history recovery complete: {stats}")
+        await syncer.run_recovery_for_all()
     except Exception as e:
         logger.error(f"Startup history recovery failed: {e}", exc_info=True)
 
@@ -193,10 +179,11 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "main:app", 
-        host="0.0.0.0", 
-        port=8004, 
-        reload=False,  # Disabled to prevent Windows socket exhaustion
-        workers=1,  # Single worker for Windows
-        timeout_keep_alive=5,  # Reduce keep-alive timeout
+        "main:app",
+        host="0.0.0.0",
+        port=8004,
+        reload=False,
+        workers=1,
+        timeout_keep_alive=5,
+        access_log=False,   # suppress "POST /webhooks/gmail 200 OK" lines
     )

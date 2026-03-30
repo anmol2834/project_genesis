@@ -81,7 +81,7 @@ class GmailReceiver:
             logger.warning(f"Pub/Sub data missing fields: {data}")
             return {"status": "error", "reason": "missing_fields"}
 
-        logger.info(f"Pub/Sub notification: email={email_address} historyId={history_id}")
+        logger.debug(f"Pub/Sub notification: email={email_address} historyId={history_id}")
 
         # Mark Pub/Sub message processed BEFORE doing any expensive work.
         try:
@@ -90,7 +90,7 @@ class GmailReceiver:
             logger.error(f"Failed to mark Pub/Sub message processed: {e}")
 
         # ── 4. Normalize ─────────────────────────────────────────────────────
-        logger.info(f"[PIPELINE] Step 1/5 — Normalizing event for {email_address}")
+        logger.debug(f"[PIPELINE] Normalizing event for {email_address}")
         raw_event = {
             "provider":      "gmail",
             "email_address": email_address,
@@ -102,32 +102,40 @@ class GmailReceiver:
         normalized_event = await self.normalizer.normalize("gmail", raw_event)
 
         if not normalized_event:
+            # Track unknown watches for cleanup — but only log once per hour per address
             if email_address:
                 try:
                     from shared.cache import get_redis
                     redis = await get_redis()
                     await redis.sadd("gmail:unknown:watches", email_address)
                     await redis.expire("gmail:unknown:watches", 86400 * 7)
+                    # Rate-limit the warning: log at most once per hour per address
+                    rate_key = f"gmail:unknown:warned:{email_address}"
+                    already_warned = await redis.exists(rate_key)
+                    if not already_warned:
+                        await redis.setex(rate_key, 3600, "1")
+                        logger.warning(
+                            f"[PIPELINE] Pub/Sub for unknown account: {email_address} "
+                            "(old watch — expires in ≤7 days). "
+                            "POST /subscriptions/stop-unknown-watch to stop immediately."
+                        )
                 except Exception:
                     pass
-            logger.warning(f"[PIPELINE] STOPPED at Step 1 — normalization returned None for {email_address} historyId={history_id}")
+            # For known accounts, None just means no new messages — silent
             return {
                 "status":     "skipped",
-                "reason":     "normalization_returned_none",
+                "reason":     "no_new_messages",
                 "history_id": history_id,
             }
 
-        logger.info(
-            f"[PIPELINE] Step 1/5 DONE — Normalized: "
+        logger.debug(
+            f"[PIPELINE] Normalized: "
             f"message_id={normalized_event.message_id} "
             f"subject='{normalized_event.subject}' "
-            f"from={normalized_event.from_email} "
-            f"to={normalized_event.to_emails} "
-            f"direction={normalized_event.direction}"
+            f"from={normalized_event.from_email}"
         )
 
         # ── 5. Filter ─────────────────────────────────────────────────────────
-        logger.info(f"[PIPELINE] Step 2/5 — Filtering: subject='{normalized_event.subject}' from={normalized_event.from_email}")
         try:
             if await self.email_filter.should_filter(
                 normalized_event.subject,
@@ -145,43 +153,26 @@ class GmailReceiver:
         except Exception as e:
             logger.error(f"Filter check failed: {e}")
 
-        logger.info(f"[PIPELINE] Step 2/5 DONE — Passed filter")
-
         # ── 6. Dedup on Gmail message_id ──────────────────────────────────────
-        logger.info(f"[PIPELINE] Step 3/5 — Dedup check for message_id={normalized_event.message_id}")
         gmail_dedup_key = f"gmail_msg_{normalized_event.message_id}"
         try:
             if await self.deduplicator.is_duplicate(gmail_dedup_key):
-                logger.info(f"[PIPELINE] STOPPED at Step 3 — DUPLICATE message_id={normalized_event.message_id}")
+                logger.debug(f"[PIPELINE] DUPLICATE message_id={normalized_event.message_id}")
                 return {"status": "duplicate", "message_id": normalized_event.message_id}
             await self.deduplicator.mark_processed(gmail_dedup_key)
         except Exception as e:
             logger.error(f"Message-level dedup failed: {e}")
 
-        logger.info(f"[PIPELINE] Step 3/5 DONE — Not a duplicate")
-
         # ── 7. Push to queue ──────────────────────────────────────────────────
-        logger.info(f"[PIPELINE] Step 4/5 — Pushing to Celery queue")
         try:
             queued = await self.queue_producer.produce(normalized_event)
         except Exception as e:
             logger.error(f"Failed to push to queue: {e}")
             queued = False
 
-        if queued:
-            logger.info(
-                f"[PIPELINE] Step 4/5 DONE — QUEUED ✓ "
-                f"message_id={normalized_event.message_id} "
-                f"user_id={normalized_event.user_id} "
-                f"subject='{normalized_event.subject}'"
-            )
-            logger.info(
-                f"[PIPELINE] Step 5/5 — Celery worker will now process and save to DB. "
-                f"Make sure start-celery-worker.bat is running!"
-            )
-        else:
+        if not queued:
             logger.error(
-                f"[PIPELINE] Step 4/5 FAILED — Could not queue event "
+                f"[PIPELINE] Could not queue event "
                 f"message_id={normalized_event.message_id}. "
                 f"Check Redis connection and Celery worker."
             )

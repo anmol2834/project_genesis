@@ -65,11 +65,20 @@ class GmailEventAdapter(BaseAdapter):
             account = result.scalar_one_or_none()
 
             if not account:
-                logger.warning(
-                    f"Pub/Sub notification for unknown account: {email_address}. "
-                    "Watch likely from a previous project — expires in ≤7 days. "
-                    "To stop immediately: POST /subscriptions/stop-unknown-watch"
-                )
+                # Rate-limit: only log once per hour per unknown address
+                try:
+                    rate_key = f"gmail:unknown:warned:{email_address}"
+                    from shared.cache import get_redis
+                    redis = await get_redis()
+                    if not await redis.exists(rate_key):
+                        await redis.setex(rate_key, 3600, "1")
+                        logger.warning(
+                            f"Pub/Sub notification for unknown account: {email_address}. "
+                            "Watch likely from a previous project — expires in ≤7 days. "
+                            "To stop immediately: POST /subscriptions/stop-unknown-watch"
+                        )
+                except Exception:
+                    pass
                 return None
 
             # Determine the correct startHistoryId:
@@ -79,18 +88,8 @@ class GmailEventAdapter(BaseAdapter):
             stored_history_id = account.last_history_id
             if stored_history_id and str(stored_history_id) != str(new_history_id):
                 start_history_id = stored_history_id
-                logger.info(
-                    f"Gmail history fetch: email={email_address} "
-                    f"start={start_history_id} → new={new_history_id}"
-                )
             else:
-                # No stored value or same as incoming — use subscription historyId
-                # as fallback, or subtract 1 from incoming as last resort
                 start_history_id = str(int(new_history_id) - 1)
-                logger.info(
-                    f"Gmail history fetch (no prior cursor): email={email_address} "
-                    f"start={start_history_id} (derived from new={new_history_id})"
-                )
 
             # Ensure fresh token before any API call
             account = await self._ensure_fresh_token(account, session)
@@ -133,7 +132,7 @@ class GmailEventAdapter(BaseAdapter):
             )
             return account
 
-        logger.info(f"Refreshing access token for {account.email_address}")
+        logger.debug(f"Refreshing access token for {account.email_address}")
 
         try:
             from shared.config import get_config
@@ -172,7 +171,7 @@ class GmailEventAdapter(BaseAdapter):
             account.token_expiry = datetime.utcnow() + timedelta(seconds=expires_in)
             await session.flush()
 
-            logger.info(f"Token refreshed for {account.email_address}")
+            logger.debug(f"Token refreshed for {account.email_address}")
 
         except Exception as e:
             logger.error(
@@ -203,8 +202,8 @@ class GmailEventAdapter(BaseAdapter):
                 }
             )
 
-        logger.info(
-            f"Gmail History API response: status={resp.status_code} "
+        logger.debug(
+            f"Gmail History API: status={resp.status_code} "
             f"account={account.email_address} startHistoryId={history_id}"
         )
 
@@ -233,15 +232,15 @@ class GmailEventAdapter(BaseAdapter):
         history_records = data.get("history", [])
         latest_id       = data.get("historyId", history_id)
 
-        logger.info(
+        logger.debug(
             f"Gmail history records: count={len(history_records)} "
             f"latestHistoryId={latest_id} account={account.email_address}"
         )
 
         if not history_records:
-            logger.info(
+            logger.debug(
                 f"No new messages for {account.email_address} "
-                f"since historyId={history_id} (latestId={latest_id})"
+                f"since historyId={history_id}"
             )
             return None
 
@@ -249,15 +248,9 @@ class GmailEventAdapter(BaseAdapter):
             msgs = record.get("messagesAdded", [])
             if msgs:
                 msg_id = msgs[0]["message"]["id"]
-                logger.info(
-                    f"Found new message: id={msg_id} "
-                    f"account={account.email_address}"
-                )
                 return await self._fetch_message_details(account, msg_id)
 
-        logger.info(
-            f"History records exist but no messagesAdded for {account.email_address}"
-        )
+        logger.debug(f"History records exist but no messagesAdded for {account.email_address}")
         return None
 
     async def _fetch_latest_inbox_message(
@@ -303,6 +296,11 @@ class GmailEventAdapter(BaseAdapter):
             logger.error(f"Gmail 401 fetching message {message_id} — token expired")
             return None
 
+        if resp.status_code == 404:
+            # Message was deleted/moved before we could fetch it — normal Gmail behavior
+            logger.debug(f"Gmail message {message_id} not found (deleted/moved) — skipping")
+            return None
+
         if resp.status_code != 200:
             logger.error(
                 f"Gmail message fetch failed ({resp.status_code}): {resp.text}"
@@ -310,6 +308,21 @@ class GmailEventAdapter(BaseAdapter):
             return None
 
         message = resp.json()
+
+        # Only process INBOX messages (incoming) and SENT messages (outgoing).
+        # Skip DRAFT (auto-saved while typing), SPAM, TRASH, and other system labels.
+        label_ids = message.get("labelIds", [])
+        if "DRAFT" in label_ids:
+            logger.debug(f"Skipping draft {message.get('id')} for {account.email_address}")
+            return None
+        if "SPAM" in label_ids or "TRASH" in label_ids:
+            logger.debug(f"Skipping spam/trash {message.get('id')} for {account.email_address}")
+            return None
+        # Must have at least INBOX or SENT to be a real message
+        if not any(lbl in label_ids for lbl in ("INBOX", "SENT")):
+            logger.debug(f"Skipping message {message.get('id')} — no INBOX/SENT label: {label_ids}")
+            return None
+
         hdrs    = {
             h["name"]: h["value"]
             for h in message.get("payload", {}).get("headers", [])

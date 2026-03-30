@@ -53,7 +53,7 @@ function MessageBubble({ msg, isDark, theme }: {
   isDark: boolean;
   theme: Theme;
 }) {
-  const isSent = msg.role === 'sent';
+  const isSent = msg.role === 'sent';  // 'sent' = outgoing (right), 'received' = incoming (left)
 
   return (
     <Box sx={{
@@ -156,11 +156,13 @@ export default function ChatView({ conversation, onBack }: Props) {
   const tagInfo = LEAD_TAG_CONFIG[conversation.leadTag];
 
   useEffect(() => {
+    // Sync messages whenever the conversation updates (SSE pushes new messages
+    // by updating the thread in React Query cache → new conversation prop)
     setMessages(conversation.messages);
     setShowTyping(false);
     setInput('');
     setDraft(conversation.draft ?? null);
-  }, [conversation.id]);
+  }, [conversation.id, conversation.messages]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });

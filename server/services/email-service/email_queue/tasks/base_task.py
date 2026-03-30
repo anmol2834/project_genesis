@@ -54,13 +54,7 @@ class BaseEmailTask(Task):
         )
     
     def on_success(self, retval, task_id, args, kwargs):
-        """
-        Called when task succeeds.
-        """
-        payload = args[0] if args else kwargs.get("payload", {})
-        message_id = payload.get("message_id", "unknown")
-        
-        logger.info(f"Task {task_id} completed successfully: message_id={message_id}")
+        pass  # success is silent — errors/warnings are the signal
     
     def _send_to_dlq(
         self,
@@ -91,7 +85,7 @@ class BaseEmailTask(Task):
                 routing_key="email.dlq"
             )
             
-            logger.info(f"Event sent to DLQ: task_id={task_id}")
+            logger.debug(f"Event sent to DLQ: task_id={task_id}")
             
         except Exception as e:
             logger.error(f"Failed to send to DLQ: {e}", exc_info=True)

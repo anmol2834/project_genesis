@@ -77,7 +77,7 @@ def process_email_event(self, payload: Dict[str, Any]):
     provider = payload.get("provider", "unknown")
     subject  = payload.get("subject", "")
 
-    logger.info(
+    logger.debug(
         f"[WORKER] Received task: message_id={message_id} "
         f"user_id={user_id} provider={provider} subject='{subject}'"
     )
@@ -87,10 +87,6 @@ def process_email_event(self, payload: Dict[str, Any]):
         success = _run_async(processor.process_event(payload))
 
         if success:
-            logger.info(
-                f"[WORKER] ✓ SAVED TO DB: message_id={message_id} "
-                f"subject='{subject}' user_id={user_id}"
-            )
             return {
                 "status": "success",
                 "message_id": message_id,
@@ -185,7 +181,7 @@ def handle_dlq_event(self, dlq_payload: Dict[str, Any]):
                 asyncio.set_event_loop(None)
 
         _store_dlq()
-        logger.info(f"DLQ event stored: {message_id}")
+        logger.debug(f"DLQ event stored: {message_id}")
         
         return {
             "status": "dlq_logged",

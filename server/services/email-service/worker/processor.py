@@ -50,11 +50,10 @@ class EventProcessor:
             thread_id = event_data.get("thread_id") or event_data["message_id"]
             message_id = event_data["message_id"]
 
-            logger.info(
+            logger.debug(
                 f"[PROCESSOR] Processing: user={user_id} "
                 f"thread={thread_id} message={message_id} "
-                f"subject='{event_data.get('subject', '')}' "
-                f"from={event_data.get('from_email', '')}"
+                f"subject='{event_data.get('subject', '')}'"
             )
             
             # Step 2: Check for duplicate message_id
@@ -63,7 +62,7 @@ class EventProcessor:
             )
             
             if existing_by_message:
-                logger.info(f"Duplicate message_id {message_id}, skipping")
+                logger.debug(f"Duplicate message_id {message_id}, skipping")
                 return True  # Not an error, just already processed
             
             # Step 3: Fetch existing conversation by thread_id
@@ -116,19 +115,13 @@ class EventProcessor:
                 logger.error(f"[PROCESSOR] ✗ DB upsert failed for thread={thread_id}")
                 return False
 
-            logger.info(
+            logger.debug(
                 f"[PROCESSOR] ✓ SAVED: thread={thread_id} "
-                f"conversation_id={conversation.id} "
                 f"messages_in_window={len(updated_messages)}"
             )
 
-            # Step 7: Trigger WebSocket notification
+            # Step 7: Trigger WebSocket notification (stub — no-op)
             await self._trigger_websocket(conversation, new_message)
-
-            logger.info(
-                f"[PROCESSOR] ✓ COMPLETE — email saved to DB and ready for inbox: "
-                f"thread={thread_id} subject='{event_data.get('subject', '')}'"
-            )
 
             return True
             
@@ -187,37 +180,6 @@ class EventProcessor:
 
         return datetime.utcnow()
     
-    async def _trigger_websocket(
-        self,
-        conversation,
-        new_message: Dict[str, Any]
-    ):
-        """
-        Trigger WebSocket notification for real-time updates.
-        
-        This will be integrated with notification service.
-        """
-        try:
-            # Prepare WebSocket payload
-            ws_payload = {
-                "type": "new_email",
-                "user_id": str(conversation.user_id),
-                "thread_id": conversation.thread_id,
-                "message_id": conversation.message_id,
-                "from": new_message["from"],
-                "subject": conversation.subject,
-                "content_preview": new_message["content"][:100],
-                "timestamp": new_message["timestamp"],
-                "is_read": conversation.is_read,
-                "conversation_status": conversation.conversation_status
-            }
-            
-            # TODO: Send to notification service via HTTP or message queue
-            # For now, just log
-            logger.info(f"WebSocket trigger: {ws_payload['type']} for user {ws_payload['user_id']}")
-            
-            # Future implementation:
-            # await notification_service.send_websocket(ws_payload)
-            
-        except Exception as e:
-            logger.error(f"Failed to trigger WebSocket: {e}", exc_info=True)
+    async def _trigger_websocket(self, conversation, new_message: dict):
+        """Stub — real-time push not implemented yet."""
+        pass

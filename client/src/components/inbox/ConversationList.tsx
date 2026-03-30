@@ -1,10 +1,12 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo, memo } from 'react';
 import { Box, Typography, useTheme, alpha, InputBase } from '@mui/material';
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded';
 import LocalFireDepartmentRoundedIcon from '@mui/icons-material/LocalFireDepartmentRounded';
-import { CONVERSATIONS, FilterTab, Conversation, LeadTag } from './inboxData';
+import type { FilterTab, Conversation, LeadTag } from './inboxData';
+
+// ── Constants (unchanged from original) ──────────────────────────────────────
 
 const FILTERS: { id: FilterTab; label: string }[] = [
   { id: 'all',    label: 'All' },
@@ -24,25 +26,40 @@ const LEAD_TAG_CONFIG: Record<LeadTag, { label: string; color: string; bg: strin
   cold: { label: 'Cold', color: '#60a5fa', bg: 'rgba(96,165,250,0.12)' },
 };
 
+// ── Props — now accepts real data ─────────────────────────────────────────────
+
 interface Props {
-  activeId: string;
-  onSelect: (c: Conversation) => void;
+  conversations: Conversation[];   // real data from InboxView
+  activeId:      string;
+  onSelect:      (c: Conversation) => void;
 }
 
-export default function ConversationList({ activeId, onSelect }: Props) {
-  const theme = useTheme();
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export default memo(function ConversationList({ conversations, activeId, onSelect }: Props) {
+  const theme  = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const [filter, setFilter] = useState<FilterTab>('all');
   const [search, setSearch] = useState('');
 
-  // CONVERSATIONS is already sorted hot→warm→cold from inboxData
-  const filtered = CONVERSATIONS.filter((c) => {
-    if (filter === 'unread' && c.unread === 0) return false;
-    if (filter === 'hot' && c.leadTag !== 'hot') return false;
-    if (search && !c.name.toLowerCase().includes(search.toLowerCase()) &&
-        !c.subject.toLowerCase().includes(search.toLowerCase())) return false;
-    return true;
-  });
+  const filtered = useMemo(() => {
+    return conversations.filter((c) => {
+      if (filter === 'unread' && c.unread === 0) return false;
+      if (filter === 'hot'    && c.leadTag !== 'hot') return false;
+      if (search) {
+        const q = search.toLowerCase();
+        if (!c.name.toLowerCase().includes(q) &&
+            !c.subject.toLowerCase().includes(q) &&
+            !c.email.toLowerCase().includes(q)) return false;
+      }
+      return true;
+    });
+  }, [conversations, filter, search]);
+
+  const totalUnread = useMemo(
+    () => conversations.reduce((a, c) => a + c.unread, 0),
+    [conversations]
+  );
 
   return (
     <Box sx={{
@@ -56,15 +73,17 @@ export default function ConversationList({ activeId, onSelect }: Props) {
           <Typography sx={{ fontSize: '1rem', fontWeight: 700, letterSpacing: '-0.02em', color: 'text.primary' }}>
             Inbox
           </Typography>
-          <Box sx={{
-            px: 0.75, py: 0.3, borderRadius: '6px',
-            background: alpha('#818cf8', isDark ? 0.2 : 0.1),
-            border: `1px solid ${alpha('#818cf8', 0.3)}`,
-          }}>
-            <Typography sx={{ fontSize: '0.62rem', fontWeight: 700, color: '#818cf8' }}>
-              {CONVERSATIONS.reduce((a, c) => a + c.unread, 0)} new
-            </Typography>
-          </Box>
+          {totalUnread > 0 && (
+            <Box sx={{
+              px: 0.75, py: 0.3, borderRadius: '6px',
+              background: alpha('#818cf8', isDark ? 0.2 : 0.1),
+              border: `1px solid ${alpha('#818cf8', 0.3)}`,
+            }}>
+              <Typography sx={{ fontSize: '0.62rem', fontWeight: 700, color: '#818cf8' }}>
+                {totalUnread} new
+              </Typography>
+            </Box>
+          )}
         </Box>
 
         {/* Search */}
@@ -145,7 +164,6 @@ export default function ConversationList({ activeId, onSelect }: Props) {
                     {conv.avatar}
                   </Typography>
                 </Box>
-                {/* Lead tag dot */}
                 <Box sx={{
                   position: 'absolute', bottom: 1, right: 1,
                   width: 8, height: 8, borderRadius: '50%',
@@ -165,7 +183,6 @@ export default function ConversationList({ activeId, onSelect }: Props) {
                     }}>
                       {conv.name}
                     </Typography>
-                    {/* Lead tag */}
                     <Box sx={{
                       flexShrink: 0, px: 0.55, py: 0.1, borderRadius: '4px',
                       background: tag.bg,
@@ -219,4 +236,4 @@ export default function ConversationList({ activeId, onSelect }: Props) {
       </Box>
     </Box>
   );
-}
+});

@@ -42,7 +42,7 @@ class SubscriptionManager:
         Each account is processed in its own DB session so one failure
         never poisons the transaction for other accounts.
         """
-        logger.info("Starting subscription sync for all accounts")
+        logger.debug("Starting subscription sync for all accounts")
 
         stats = {"processed": 0, "created": 0, "renewed": 0, "failed": 0, "skipped": 0}
 
@@ -59,7 +59,7 @@ class SubscriptionManager:
             )
             account_ids = [row[0] for row in result.all()]
 
-        logger.info(f"Found {len(account_ids)} active accounts to sync")
+        logger.debug(f"Found {len(account_ids)} active accounts to sync")
 
         for account_id in account_ids:
             stats["processed"] += 1
@@ -92,7 +92,7 @@ class SubscriptionManager:
                 logger.error(f"Failed to sync subscription for account {account_id}: {e}")
                 stats["failed"] += 1
 
-        logger.info(f"Subscription sync complete: {stats}")
+        logger.debug(f"Subscription sync complete: {stats}")
         return stats
 
     async def ensure_subscription(
@@ -143,7 +143,7 @@ class SubscriptionManager:
           OUTLOOK → Graph subscription  → Microsoft push → POST /webhooks/outlook
           SMTP    → Redis polling queue → SMTPPoller     → internal polling
         """
-        logger.info(
+        logger.debug(
             f"Creating subscription for {account.email_address} "
             f"(provider={account.provider.value})"
         )
@@ -181,15 +181,13 @@ class SubscriptionManager:
 
             await self._cache_subscription_mapping(subscription)
 
-            logger.info(
+            logger.debug(
                 f"Subscription created for {account.email_address} "
                 f"[{account.provider.value}]: id={subscription.subscription_id}"
             )
             return "created"
 
         except NotImplementedError as e:
-            # Provider not available in current environment (e.g. Outlook without public URL)
-            # Log as warning, not error — this is expected in local dev
             logger.warning(
                 f"Subscription skipped for {account.email_address} "
                 f"[{account.provider.value}]: {e}"
@@ -197,6 +195,15 @@ class SubscriptionManager:
             return "skipped"
 
         except Exception as e:
+            # Outlook 400 ValidationError (ngrok not reachable) is expected in dev
+            err_str = str(e)
+            if "ValidationError" in err_str or "400" in err_str:
+                logger.warning(
+                    f"Subscription skipped for {account.email_address} "
+                    f"[{account.provider.value}] — webhook endpoint not reachable "
+                    f"(set EMAIL_SERVICE_PUBLIC_URL to your ngrok URL): {err_str[:120]}"
+                )
+                return "skipped"
             logger.error(
                 f"Failed to create subscription for {account.email_address} "
                 f"[{account.provider.value}]: {e}"
@@ -210,7 +217,7 @@ class SubscriptionManager:
         session: AsyncSession
     ) -> str:
         """Renew an existing subscription."""
-        logger.info(f"Renewing subscription for {account.email_address}")
+        logger.debug(f"Renewing subscription for {account.email_address}")
 
         try:
             # Route to appropriate subscriber
@@ -237,7 +244,7 @@ class SubscriptionManager:
             # Update cache
             await self._cache_subscription_mapping(subscription)
 
-            logger.info(f"Subscription renewed for {account.email_address}")
+            logger.debug(f"Subscription renewed for {account.email_address}")
             return "renewed"
 
         except Exception as e:
@@ -308,7 +315,7 @@ class SubscriptionManager:
         email_account_id: str
     ) -> bool:
         """Remove subscription when account is disconnected."""
-        logger.info(f"Removing subscription for account {email_account_id}")
+        logger.debug(f"Removing subscription for account {email_account_id}")
 
         async with get_db_session() as session:
             result = await session.execute(
@@ -348,5 +355,5 @@ class SubscriptionManager:
                 await redis.delete(f"sub:id:{subscription.subscription_id}")
             await redis.delete(f"sub:account:{email_account_id}")
 
-            logger.info(f"Subscription removed for account {email_account_id}")
+            logger.debug(f"Subscription removed for account {email_account_id}")
             return True

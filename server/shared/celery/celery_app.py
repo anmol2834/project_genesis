@@ -66,14 +66,18 @@ def get_celery_app() -> Celery:
             },
 
             # Broker — minimal pool for free-tier Redis
+            # socket_keepalive_options sends TCP keepalive probes every 60s
+            # so the RedisLabs server never closes the idle BRPOP connection
             broker_connection_retry_on_startup=True,
-            broker_connection_max_retries=10,
+            broker_connection_max_retries=None,   # retry forever on disconnect
             broker_pool_limit=1,
             broker_transport_options={
                 'visibility_timeout': 3600,
                 'max_connections': 2,
                 'socket_keepalive': True,
-                'socket_timeout': 30,
+                'socket_timeout': 120,
+                'socket_connect_timeout': 10,
+                'retry_on_timeout': True,
             },
 
             # Disable rate limits — saves Redis connections

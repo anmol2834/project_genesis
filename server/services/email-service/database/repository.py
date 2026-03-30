@@ -78,7 +78,7 @@ class EmailConversationRepository:
                     await session.commit()
                     await session.refresh(existing)
                     
-                    logger.info(
+                    logger.debug(
                         f"Updated conversation: thread={thread_id}, "
                         f"messages={len(last_24h_messages)}"
                     )
@@ -110,7 +110,7 @@ class EmailConversationRepository:
                     await session.commit()
                     await session.refresh(conversation)
                     
-                    logger.info(
+                    logger.debug(
                         f"Created conversation: thread={thread_id}, "
                         f"messages={len(last_24h_messages)}"
                     )
@@ -189,7 +189,7 @@ class EmailConversationRepository:
                 await session.execute(stmt)
                 await session.commit()
                 
-                logger.info(f"Updated summary for conversation: {conversation_id}")
+                logger.debug(f"Updated summary for conversation: {conversation_id}")
                 return True
                 
         except Exception as e:

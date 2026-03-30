@@ -56,14 +56,14 @@ class EmailNormalizer:
         """
         try:
             # Step 1: Adapt provider payload
-            logger.info(f"Normalizing {provider} event for {raw_payload.get('email_address', '?')}")
+            logger.debug(f"Normalizing {provider} event for {raw_payload.get('email_address', '?')}")
             adapted_data = await AdapterFactory.parse_event(provider, raw_payload)
 
             if adapted_data is None:
-                logger.info(f"Adapter returned None for {provider} — no new messages (normal)")
+                logger.debug(f"Adapter returned None for {provider} — no new messages")
                 return None
 
-            logger.info(
+            logger.debug(
                 f"Adapter returned message: id={adapted_data.get('message_id')} "
                 f"subject='{adapted_data.get('subject')}' "
                 f"from={adapted_data.get('from_email')}"
@@ -118,7 +118,7 @@ class EmailNormalizer:
                 normalized_at=enriched_data["normalized_at"]
             )
             
-            logger.info(
+            logger.debug(
                 f"Successfully normalized {provider} event: "
                 f"message_id={normalized_event.message_id}, "
                 f"user_id={user_id}"

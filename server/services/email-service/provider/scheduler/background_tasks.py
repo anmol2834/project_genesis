@@ -24,21 +24,12 @@ class BackgroundTaskManager:
 
     async def start_all(self):
         """Start all background tasks."""
-        logger.info("Starting background tasks")
-
-        # Start subscription scheduler
         self.scheduler_task = asyncio.create_task(
             self.subscription_scheduler.start_scheduler()
         )
-        logger.info("Subscription scheduler task created")
-
-        # Start SMTP poller
         self.poller_task = asyncio.create_task(
             self.smtp_poller.start_polling()
         )
-        logger.info("SMTP poller task created")
-
-        logger.info("All background tasks started")
 
     async def stop_all(self):
         """Stop all background tasks."""

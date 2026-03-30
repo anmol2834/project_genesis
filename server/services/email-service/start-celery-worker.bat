@@ -31,7 +31,7 @@ echo [INFO] Starting worker...
 echo.
 
 python -m celery -A email_queue.config.celery_config:email_celery_app worker ^
-    --loglevel=info ^
+    --loglevel=warning ^
     --concurrency=4 ^
     --pool=solo ^
     --queues=email_events_queue,email_retry_queue,email_dlq ^

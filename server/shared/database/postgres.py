@@ -52,7 +52,7 @@ def get_engine():
             connect_args=connect_args,
         )
         
-        logger.info(f"Database engine created with pool_size=5")
+        logger.debug(f"Database engine created with pool_size=5")
     
     return _engine
 
@@ -73,7 +73,7 @@ def get_session_factory():
             autoflush=False,
         )
         
-        logger.info("Database session factory created")
+        logger.debug("Database session factory created")
     
     return _session_factory
 

@@ -42,7 +42,7 @@ class EventProducer:
         try:
             # Check if event should be skipped
             if self.router.should_skip(event):
-                logger.info(f"Skipping event {event.message_id} based on routing rules")
+                logger.debug(f"Skipping event {event.message_id} based on routing rules")
                 return True
             
             # Get routing configuration
@@ -55,13 +55,6 @@ class EventProducer:
             task_id = await self._send_to_queue(payload, routing_config)
             
             if task_id:
-                logger.info(
-                    f"Event queued successfully: "
-                    f"message_id={event.message_id}, "
-                    f"task_id={task_id}, "
-                    f"queue={routing_config['queue']}, "
-                    f"priority={routing_config['priority']}"
-                )
                 return True
             else:
                 logger.error(f"Failed to queue event {event.message_id}")

@@ -47,7 +47,7 @@ SERVICE_REGISTRY = {
     "email-service": {
         "url": config.EMAIL_SERVICE_URL or "http://localhost:8004",
         "prefix": "/email-service",
-        "timeout": 15.0,
+        "timeout": 300.0,   # 5 min — needed for SSE long-lived connections
         "retry": 1,
     },
     "inbox-service": {

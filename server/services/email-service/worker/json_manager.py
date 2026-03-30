@@ -60,7 +60,7 @@ class JSONConversationManager:
             messages = JSONConversationManager._sort_by_timestamp(messages)
             messages = JSONConversationManager._apply_24h_filter(messages)
 
-            logger.debug(f"Messages: {len(existing_messages)} → {len(messages)}")
+            logger.debug(f"Messages: {len(existing_messages)} -> {len(messages)}")
             return messages
 
         except Exception as e:
@@ -102,52 +102,49 @@ class JSONConversationManager:
         """
         Remove Gmail/Outlook quoted reply headers from email content.
 
-        Only strips the specific quote header format:
-          "On <weekday>, <month> <day>, <year> at/,  <time> <Name> <email> wrote:"
+        Strategy:
+          1. Find ALL occurrences of "On <weekday>," in the string
+          2. Check from the LAST match backwards — only cut if the tail
+             contains a 4-digit year (confirms it's a real date header)
+          3. This prevents "on mon, march" or "on monday" in the actual
+             message from being accidentally truncated
 
-        Does NOT strip messages that happen to contain the word "on"
-        (e.g. "let's meet on sunday" is kept intact).
-
-        Searches from the LAST match so earlier "on" words in the real
-        message body are never accidentally truncated.
+        A real Gmail quote header always looks like:
+          "On Mon, 30 Mar, 2026, 12:40 am Name, <email> wrote:"
+          "On Mon, Mar 29, 2026 at 9:09 PM Name <email> wrote:"
+        Both have: weekday + comma + date info containing a 4-digit year.
         """
         if not content:
             return content
 
-        # Pattern requires a DATE immediately after "On <weekday>" — this is the
-        # discriminator. Real quote headers: "On Sun, Mar 29..." or "On Mon, 31 Mar..."
-        # The weekday is ALWAYS followed by a comma in Gmail/Outlook headers.
-        # "on sunday" has no comma after "Sun" so it won't match.
-        quote_header = re.compile(
-            r'\bOn\s+'
-            r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),'   # weekday + COMMA (required)
-            r'[^<]{5,200}'
-            r'<[^>]+>'
-            r'\s+wrote\s*:',
+        # Pattern: "On" + whitespace + weekday abbreviation + comma
+        candidate = re.compile(
+            r'\bOn\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),',
             re.IGNORECASE
         )
 
-        last_match = None
-        for m in quote_header.finditer(content):
-            last_match = m
+        matches = list(candidate.finditer(content))
 
-        if last_match:
-            before = content[:last_match.start()].strip()
-            # Strip any trailing "> " quoted lines after the cut point
-            before = re.sub(r'\s*>.*$', '', before, flags=re.DOTALL).strip()
-            return before
+        # Check from the LAST match backwards
+        for m in reversed(matches):
+            tail = content[m.start():]
+            # Only treat as quote header if a 4-digit year follows
+            if re.search(r'\b20\d{2}\b', tail):
+                before = content[:m.start()].strip()
+                # Strip any trailing "> quoted" lines
+                before = re.sub(r'\s*>+.*$', '', before, flags=re.DOTALL).strip()
+                return before
 
-        # Multi-line fallback (Outlook "From:/Sent:/To:" block and "> " lines)
+        # Multi-line fallback (Outlook "From:/Sent:/To:" and "> " lines)
         lines = content.splitlines()
         clean_lines = []
         for i, line in enumerate(lines):
             stripped = line.strip()
 
-            if re.match(
-                r'^On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*.{5,200}wrote\s*:',
-                stripped, re.IGNORECASE
-            ):
-                break
+            if re.match(r'^On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),', stripped, re.IGNORECASE):
+                context = ' '.join(l.strip() for l in lines[i:i + 3])
+                if re.search(r'\b20\d{2}\b', context):
+                    break
 
             if re.match(r'^From:\s+.+', stripped, re.IGNORECASE):
                 upcoming = [l.strip() for l in lines[i:i + 5] if l.strip()]
