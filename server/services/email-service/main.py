@@ -34,6 +34,7 @@ from api.subscriptions import router as subscriptions_router
 from api.monitoring import router as monitoring_router
 from api.queue import router as queue_router
 from api.inbox import router as inbox_router
+from api.send_reply import router as send_reply_router
 
 logger = setup_logging("email-service")
 config = get_config()
@@ -120,6 +121,7 @@ app.include_router(subscriptions_router)
 app.include_router(monitoring_router)
 app.include_router(queue_router)
 app.include_router(inbox_router)
+app.include_router(send_reply_router)
 
 
 async def _startup_sync_subscriptions() -> None:
