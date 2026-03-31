@@ -1,17 +1,21 @@
 """
 Event Processor
 Core processing logic for email events from email_queue.
-Orchestrates: validation → fetch → update JSON → write DB → trigger WebSocket
+Orchestrates: validation → fetch → update JSON → write DB → trigger WebSocket → trigger AI
 """
 
 from typing import Dict, Any, Optional
 from datetime import datetime
 
+import httpx
+
 from shared.logger import get_logger
+from shared.config import get_config
 from worker.json_manager import JSONConversationManager
 from database.repository import EmailConversationRepository
 
 logger = get_logger(__name__)
+_config = get_config()
 
 
 class EventProcessor:
@@ -123,6 +127,14 @@ class EventProcessor:
             # Step 7: Trigger WebSocket notification (stub — no-op)
             await self._trigger_websocket(conversation, new_message)
 
+            # Step 8: Trigger automation-service AI pipeline (fire-and-forget)
+            # Only trigger for incoming messages — don't process our own outgoing replies
+            if event_data.get("direction") == "incoming":
+                await self._trigger_automation(
+                    conversation_id=str(conversation.id),
+                    trace_id=event_data.get("trace_id", ""),
+                )
+
             return True
             
         except Exception as e:
@@ -183,3 +195,42 @@ class EventProcessor:
     async def _trigger_websocket(self, conversation, new_message: dict):
         """Stub — real-time push not implemented yet."""
         pass
+
+    async def _trigger_automation(self, conversation_id: str, trace_id: str = "") -> None:
+        """
+        Notify automation-service to run the AI pipeline for this conversation.
+        Fire-and-forget — never blocks or fails the email ingestion pipeline.
+
+        Uses httpx async client with a short timeout so a slow automation-service
+        never delays email processing.
+        """
+        automation_url = getattr(_config, "AUTOMATION_SERVICE_URL", "http://localhost:8009")
+        endpoint = f"{automation_url}/ai/process"
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    endpoint,
+                    json={
+                        "conversation_id": conversation_id,
+                        "trace_id":        trace_id,
+                    },
+                )
+                if resp.status_code == 200:
+                    logger.info(
+                        f"[PROCESSOR] ✓ Automation triggered: conv={conversation_id[:8]} "
+                        f"status={resp.json().get('status', '?')}",
+                    )
+                else:
+                    logger.warning(
+                        f"[PROCESSOR] Automation returned {resp.status_code} for conv={conversation_id[:8]}"
+                    )
+        except httpx.TimeoutException:
+            logger.warning(
+                f"[PROCESSOR] Automation trigger timed out for conv={conversation_id[:8]} — continuing"
+            )
+        except Exception as exc:
+            # Never let automation failure break email ingestion
+            logger.error(
+                f"[PROCESSOR] Automation trigger failed for conv={conversation_id[:8]}: {exc}"
+            )

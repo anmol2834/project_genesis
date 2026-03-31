@@ -65,20 +65,12 @@ class GmailEventAdapter(BaseAdapter):
             account = result.scalar_one_or_none()
 
             if not account:
-                # Rate-limit: only log once per hour per unknown address
-                try:
-                    rate_key = f"gmail:unknown:warned:{email_address}"
-                    from shared.cache import get_redis
-                    redis = await get_redis()
-                    if not await redis.exists(rate_key):
-                        await redis.setex(rate_key, 3600, "1")
-                        logger.warning(
-                            f"Pub/Sub notification for unknown account: {email_address}. "
-                            "Watch likely from a previous project — expires in ≤7 days. "
-                            "To stop immediately: POST /subscriptions/stop-unknown-watch"
-                        )
-                except Exception:
-                    pass
+                # Log once per process lifetime per unknown address (no Redis needed)
+                logger.warning(
+                    f"Pub/Sub notification for unknown account: {email_address}. "
+                    "Watch likely from a previous project — expires in ≤7 days. "
+                    "To stop immediately: POST /subscriptions/stop-unknown-watch"
+                )
                 return None
 
             # Determine the correct startHistoryId:

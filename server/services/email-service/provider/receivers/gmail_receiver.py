@@ -135,6 +135,11 @@ class GmailReceiver:
             f"from={normalized_event.from_email}"
         )
 
+        # Attach a trace_id to the event for cross-service correlation
+        if not getattr(normalized_event, "trace_id", None):
+            import uuid as _uuid
+            normalized_event.trace_id = str(_uuid.uuid4())
+
         # ── 5. Filter ─────────────────────────────────────────────────────────
         try:
             if await self.email_filter.should_filter(

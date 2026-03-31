@@ -75,7 +75,6 @@ class JSONConversationManager:
         timestamp: datetime,
         direction: str,
         has_attachments: bool = False,
-        # Accepted for call-site compatibility but NOT stored
         message_id: str = "",
         subject: Optional[str] = None,
         cc_emails: Optional[List[str]] = None,
@@ -83,16 +82,19 @@ class JSONConversationManager:
         """
         Create a clean message object for JSONB storage.
 
-        Stored:   from, to, content (cleaned), timestamp, direction, has_attachments
-        Excluded: message_id, subject, cc
+        Stored:   message_id, from, to, content (cleaned), timestamp, direction,
+                  has_attachments, subject (optional)
+        Note: message_id IS stored — required by the AI pipeline's ConversationMessage schema.
         """
         return {
+            "message_id":      message_id,
             "from":            from_email,
             "to":              to_emails or [],
             "content":         JSONConversationManager._strip_quoted_reply(content),
             "timestamp":       timestamp.isoformat() if isinstance(timestamp, datetime) else timestamp,
             "direction":       direction,
             "has_attachments": has_attachments,
+            "subject":         subject,
         }
 
     # ── Content cleaning ──────────────────────────────────────────────────────
@@ -163,6 +165,7 @@ class JSONConversationManager:
 
     @staticmethod
     def _validate_message(message: Dict[str, Any]) -> bool:
+        # message_id is optional (legacy rows may not have it)
         for field in ["from", "to", "content", "timestamp", "direction"]:
             if field not in message:
                 logger.error(f"Message missing required field: {field}")
@@ -174,13 +177,18 @@ class JSONConversationManager:
 
     @staticmethod
     def _is_duplicate(messages: List[Dict[str, Any]], new_message: Dict[str, Any]) -> bool:
-        """Dedup by timestamp + from (message_id no longer stored in object)."""
+        """Dedup by message_id (primary) or timestamp+from (fallback for legacy rows)."""
+        new_mid  = new_message.get("message_id")
         new_ts   = new_message.get("timestamp")
         new_from = new_message.get("from")
-        return any(
-            m.get("timestamp") == new_ts and m.get("from") == new_from
-            for m in messages
-        )
+        for m in messages:
+            # Primary: message_id match
+            if new_mid and m.get("message_id") == new_mid:
+                return True
+            # Fallback: same timestamp + sender
+            if m.get("timestamp") == new_ts and m.get("from") == new_from:
+                return True
+        return False
 
     # ── Sorting ───────────────────────────────────────────────────────────────
 

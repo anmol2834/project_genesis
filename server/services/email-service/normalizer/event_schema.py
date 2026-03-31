@@ -73,6 +73,12 @@ class NormalizedEmailEvent(BaseModel):
         default_factory=datetime.utcnow,
         description="When event was normalized"
     )
+
+    # ── Traceability ─────────────────────────────────────────────────────────
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="Cross-service trace ID for log correlation"
+    )
     
     class Config:
         use_enum_values = True

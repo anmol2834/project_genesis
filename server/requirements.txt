@@ -57,8 +57,27 @@ black==24.1.1
 flake8==7.0.0
 mypy==1.8.0
 
-# ── Vector Database ─────────────────────────────────────────────────────────
+# ── LLM ─────────────────────────────────────────────────────────────────────
+openai>=1.30.0
+
+# ── Vector Database & ML ────────────────────────────────────────────────────
 qdrant-client==1.7.0
-sentence-transformers==2.2.2
+# sentence-transformers 2.2.2 is incompatible with huggingface_hub >= 0.17.0
+# (cached_download was removed). 2.7.0 is the minimum version that works with
+# huggingface_hub 0.26.x, torch 2.1.2, and transformers 4.36.2.
+sentence-transformers==2.7.0
 torch==2.1.2
 transformers==4.36.2
+# tokenizers must stay < 0.19 — transformers 4.36.2 requires tokenizers<0.19,>=0.14
+# tokenizers >= 0.16 writes tokenizer.json with list-of-lists merges format that
+# tokenizers 0.15.x cannot read. Pin to 0.15.2 which matches the cached model format.
+tokenizers==0.15.2
+# huggingface_hub must be >= 0.17.0 (cached_download removed) and compatible with
+# sentence-transformers 2.7.0 and transformers 4.36.2
+huggingface_hub>=0.20.0,<0.27.0
+# numpy must stay < 2.0 — torch 2.1.2 is not numpy 2.x compatible
+numpy>=1.24.0,<2.0.0
+# Required by sentence-transformers cosine similarity utilities
+scipy>=1.11.0
+# NLI model used by intent engine: cross-encoder/nli-distilroberta-base (190MB, cached)
+# If tokenizer.json fails with 'ModelWrapper' error, run: python server/_fix_tokenizer.py

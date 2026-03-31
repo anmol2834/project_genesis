@@ -54,42 +54,48 @@ class JSONFormatter(logging.Formatter):
 
 def setup_logging(service_name: str = "mailautomation"):
     """
-    Setup logging configuration for a service
-    
-    Args:
-        service_name: Name of the service (for logger identification)
+    Setup logging configuration for a service.
+    Configures both the named service logger AND the root logger so that
+    all module-level loggers (e.g. ai_engine.*, learning_engine.*) inherit
+    the correct level and handler.
     """
     config = get_config()
-    
-    # Create logger
-    logger = logging.getLogger(service_name)
-    logger.setLevel(getattr(logging, config.LOG_LEVEL))
-    
-    # Remove existing handlers
-    logger.handlers.clear()
-    
-    # Create console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(getattr(logging, config.LOG_LEVEL))
-    
-    # Set formatter based on environment
+    log_level = getattr(logging, config.LOG_LEVEL, logging.INFO)
+
+    # ── Formatter ─────────────────────────────────────────────────────────
     if config.ENVIRONMENT == "production":
-        # JSON formatter for production
         formatter = JSONFormatter()
     else:
-        # Human-readable formatter for development
         formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
-    
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(log_level)
     console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    
-    # Prevent propagation to root logger
-    logger.propagate = False
-    
-    return logger
+
+    # ── Named service logger (e.g. "automation-service") ──────────────────
+    service_logger = logging.getLogger(service_name)
+    service_logger.setLevel(log_level)
+    service_logger.handlers.clear()
+    service_logger.addHandler(console_handler)
+    service_logger.propagate = False
+
+    # ── Root logger — catches all module loggers (ai_engine.*, etc.) ──────
+    # IMPORTANT: Uvicorn may have already attached its own handlers to root.
+    # We must REPLACE them (not skip) so ai_engine.* logs reach our handler.
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    root.handlers.clear()
+    root.addHandler(console_handler)
+
+    # ── Silence noisy third-party loggers ─────────────────────────────────
+    for noisy in ("uvicorn.access", "httpx", "httpcore", "hpack",
+                  "huggingface_hub", "filelock", "transformers"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    return service_logger
 
 
 def get_logger(name: str) -> logging.Logger:

@@ -8,9 +8,10 @@ from .qdrant_client import (
     create_collection,
     upsert_vectors,
     search_vectors,
+    scroll_vectors,
     delete_vectors,
     get_collection_info,
-    batch_upsert_vectors
+    batch_upsert_vectors,
 )
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "create_collection",
     "upsert_vectors",
     "search_vectors",
+    "scroll_vectors",
     "delete_vectors",
     "get_collection_info",
     "batch_upsert_vectors",

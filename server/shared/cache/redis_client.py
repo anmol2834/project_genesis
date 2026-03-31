@@ -31,14 +31,14 @@ async def _build_pool() -> ConnectionPool:
         config.REDIS_URL,
         encoding="utf-8",
         decode_responses=True,
-        max_connections=5,           # conservative — shared free-tier Redis
+        max_connections=2,           # minimal — free-tier Redis has a hard client cap
         socket_timeout=10,
         socket_connect_timeout=10,
         socket_keepalive=True,
-        health_check_interval=30,
+        health_check_interval=60,
         retry_on_timeout=True,
     )
-    logger.info("Redis connection pool created (max_connections=5)")
+    logger.info("Redis connection pool created (max_connections=2)")
     return pool
 
 
@@ -46,6 +46,9 @@ async def init_redis() -> bool:
     """
     Initialise the shared pool and client.
     Must be called once at application startup (lifespan).
+
+    Returns True on success, False on failure.
+    Never raises — Redis is non-critical for the AI pipeline.
     """
     global _redis_pool, _redis_client
 
@@ -53,20 +56,31 @@ async def init_redis() -> bool:
         if _redis_client is not None:
             return True  # already initialised
 
-        try:
-            _redis_pool   = await _build_pool()
-            _redis_client = redis.Redis(connection_pool=_redis_pool)
+        for attempt in range(3):
+            try:
+                _redis_pool   = await _build_pool()
+                _redis_client = redis.Redis(connection_pool=_redis_pool)
 
-            await asyncio.wait_for(_redis_client.ping(), timeout=5.0)
-            logger.info("Redis initialised successfully")
-            return True
+                await asyncio.wait_for(_redis_client.ping(), timeout=5.0)
+                logger.info("Redis initialised successfully")
+                return True
 
-        except asyncio.TimeoutError:
-            logger.error("Redis init timeout")
-            return False
-        except Exception as e:
-            logger.error(f"Redis init failed: {e}")
-            return False
+            except asyncio.TimeoutError:
+                logger.warning("Redis init timeout (attempt %d/3)", attempt + 1)
+            except Exception as e:
+                logger.warning("Redis init failed (attempt %d/3): %s", attempt + 1, e)
+
+            if attempt < 2:
+                await asyncio.sleep(1)
+
+        logger.error(
+            "Redis unavailable after 3 attempts — service will start without Redis. "
+            "Learning engine cache and rate-limiting will be disabled."
+        )
+        # Reset so get_redis_client() falls back to on-the-fly client
+        _redis_pool   = None
+        _redis_client = None
+        return False
 
 
 def get_redis_client() -> redis.Redis:

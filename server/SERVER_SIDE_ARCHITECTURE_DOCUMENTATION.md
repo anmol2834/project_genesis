@@ -1,158 +1,140 @@
-# Mail Automation System - Server-Side Architecture Documentation
+# Mail Automation System — Server-Side Architecture Documentation
 
-## 🎯 Executive Summary
+## Executive Summary
 
-Enterprise-grade microservices platform built with **Python FastAPI** for scalable email automation and management. The system features 12 independent microservices with shared infrastructure modules and cloud-native database solutions.
+Enterprise-grade microservices platform built with **Python FastAPI** for scalable email automation and AI-powered inbox management. The system features 12 independent microservices, a fully implemented real-time email ingestion engine (Gmail Pub/Sub + Outlook Graph), gap recovery guarantees, and an AI-first conversation storage model.
 
-**Architecture**: Microservices + Event-Driven + Async-Ready  
+**Architecture**: Microservices + Event-Driven + Async-First  
 **Language**: Python 3.11+  
 **Framework**: FastAPI 0.109.0  
-**Deployment**: Docker + Docker Compose
+**Deployment**: Docker + Docker Compose (local: direct Python)
 
 ---
 
-## 🏗️ System Architecture
-
-### Technology Stack
-
-| Component | Technology | Version |
-|-----------|-----------|---------|
-| **Backend Framework** | FastAPI | 0.109.0 |
-| **Web Server** | Uvicorn | 0.27.0 |
-| **Primary Database** | PostgreSQL (Amazon RDS) | asyncpg driver |
-| **Document Store** | MongoDB Atlas | Motor 3.3.2 |
-| **Cache & Broker** | Redis Cloud | redis 5.0.1 |
-| **Task Queue** | Celery | 5.3.6 |
-| **HTTP Client** | httpx | 0.26.0 |
-| **Containerization** | Docker | docker-compose |
-
-### Architecture Pattern
+## System Architecture Overview
 
 ```
-Client → Gateway Service (8000) → Microservices (8001-8011) → Shared Modules → Databases
+Client (Next.js :3000)
+        │
+        ▼
+Gateway Service (:8000)   ← API routing, rate limiting, circuit breaker
+        │
+        ├── Auth Service (:8001)        JWT + OAuth 2.0 + Celery worker
+        ├── User Service (:8002)        Profiles, settings
+        ├── Business Service (:8003)    Business context, knowledge base
+        ├── Email Service (:8004)       Gmail/Outlook ingestion engine  ← CORE
+        ├── Inbox Service (:8005)       (stub — inbox logic in email-service)
+        ├── Campaign Service (:8006)    Email campaigns
+        ├── Leads Service (:8007)       Lead management, CSV import
+        ├── Analytics Service (:8008)   Reporting, metrics
+        ├── Automation Service (:8009)  Workflow automation, AI
+        ├── Research Service (:8010)    Data research, enrichment
+        └── Notification Service (:8011) Real-time notifications
+
+Shared Infrastructure (all services import from server/shared/)
+        ├── PostgreSQL (Amazon RDS)     Primary relational store
+        ├── MongoDB Atlas               Document store
+        ├── Redis Cloud                 Cache + Celery broker
+        └── Qdrant (:6333)             Vector database (embeddings)
 ```
-
-### Core Design Principles
-
-1. **Single Responsibility**: Each service handles one domain
-2. **Shared Infrastructure**: Common modules (config, database, cache, logging)
-3. **Async-First**: All I/O operations use async/await
-4. **Configuration as Code**: Single .env file for all services
-5. **Health Monitoring**: Every service exposes /health endpoint
-6. **Containerized**: Docker-ready with orchestration
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 server/
-├── shared/                          # Shared infrastructure (ALL services use this)
-│   ├── config/
-│   │   ├── __init__.py
-│   │   └── settings.py              # Pydantic settings, loads .env
+├── shared/                          # Shared infrastructure — ALL services use this
+│   ├── config/settings.py           # Pydantic settings, loads .env
 │   ├── database/
-│   │   ├── __init__.py
-│   │   ├── postgres.py              # Async PostgreSQL pool
-│   │   └── mongodb.py               # Async MongoDB client
-│   ├── cache/
-│   │   ├── __init__.py
-│   │   └── redis_client.py          # Async Redis with utilities
-│   ├── celery/
-│   │   ├── __init__.py
-│   │   ├── celery_app.py            # Celery configuration
-│   │   └── worker_config.py         # Worker setup
-│   ├── logger/
-│   │   ├── __init__.py
-│   │   └── logging_config.py        # JSON logging + request ID
-│   ├── utils/
-│   │   ├── __init__.py
-│   │   └── http_client.py           # Inter-service HTTP client
-│   └── __init__.py
+│   │   ├── postgres.py              # Async PostgreSQL pool (asyncpg)
+│   │   └── mongodb.py               # Async MongoDB client (Motor)
+│   ├── cache/redis_client.py        # Async Redis with get_redis() helper
+│   ├── celery/celery_app.py         # Shared Celery app (auth + user workers)
+│   ├── logger/logging_config.py     # Structured logging + request ID
+│   ├── utils/http_client.py         # Inter-service HTTP client
+│   └── vector_db/qdrant_client.py   # Qdrant vector DB client
 │
-├── services/                        # 12 Microservices
-│   ├── gateway-service/             # Port 8000
-│   ├── auth-service/                # Port 8001
-│   ├── user-service/                # Port 8002
-│   ├── business-service/            # Port 8003
-│   ├── email-service/               # Port 8004
-│   ├── inbox-service/               # Port 8005
+├── services/
+│   ├── gateway-service/             # Port 8000 — API gateway
+│   ├── auth-service/                # Port 8001 — JWT + OAuth
+│   ├── user-service/                # Port 8002 — User profiles
+│   ├── business-service/            # Port 8003 — Business context
+│   ├── email-service/               # Port 8004 — Email ingestion engine
+│   │   ├── adapter/                 # Provider-specific event parsers
+│   │   │   └── providers/
+│   │   │       ├── gmail_adapter.py     Gmail History API + token refresh
+│   │   │       ├── outlook_adapter.py   Graph API message fetch
+│   │   │       └── smtp_adapter.py      SMTP/IMAP parsing
+│   │   ├── adapters/                # OAuth connection adapters (connect flow)
+│   │   ├── api/
+│   │   │   ├── connect.py           POST /email/connect
+│   │   │   ├── accounts.py          CRUD for email accounts
+│   │   │   ├── webhooks.py          POST /webhooks/gmail + /outlook
+│   │   │   ├── subscriptions.py     Subscription management endpoints
+│   │   │   ├── inbox.py             GET /email/inbox/threads (polling)
+│   │   │   ├── monitoring.py        Health + stats
+│   │   │   └── queue.py             Queue stats + DLQ viewer
+│   │   ├── database/repository.py   EmailConversation CRUD
+│   │   ├── email_queue/             Celery queue (renamed from 'queue')
+│   │   │   ├── config/celery_config.py  Celery app + Beat schedule
+│   │   │   ├── tasks/
+│   │   │   │   ├── email_tasks.py       process/retry/dlq tasks
+│   │   │   │   ├── scheduled_tasks.py   subscription_refresh, history_sync, cleanup
+│   │   │   │   └── base_task.py         BaseEmailTask with DLQ on failure
+│   │   │   ├── producer/event_producer.py  Push to queue
+│   │   │   └── monitoring/queue_monitor.py Queue stats
+│   │   ├── models/
+│   │   │   ├── email_account.py         EmailAccount ORM
+│   │   │   ├── email_conversation.py    EmailConversation ORM (AI-first)
+│   │   │   └── email_provider_subscription.py  Watch/subscription tracking
+│   │   ├── normalizer/
+│   │   │   ├── normalizer.py            EmailNormalizer orchestrator
+│   │   │   ├── event_schema.py          NormalizedEmailEvent Pydantic model
+│   │   │   └── enrichers/               user_mapper, account_mapper, metadata
+│   │   ├── provider/
+│   │   │   ├── deduplicator/            Redis-based event deduplication
+│   │   │   ├── filters/email_filter.py  Spam/OTP/no-reply filter
+│   │   │   ├── manager/subscription_manager.py  Watch lifecycle
+│   │   │   ├── receivers/               gmail_receiver, outlook_receiver, smtp_receiver
+│   │   │   ├── scheduler/               subscription_scheduler, smtp_poller, background_tasks
+│   │   │   └── subscribers/             gmail_subscriber, outlook_subscriber, smtp_subscriber
+│   │   ├── recovery/
+│   │   │   ├── history_sync.py          Gmail History API gap recovery
+│   │   │   └── watch_cleanup.py         Stop unknown/stale Gmail watches
+│   │   ├── services/email_connection_service.py  Connect + save account
+│   │   ├── utils/encryption.py          AES-256-GCM token encryption
+│   │   └── worker/
+│   │       ├── processor.py             EventProcessor (validate→store)
+│   │       ├── json_manager.py          24h sliding window + quote stripping
+│   │       └── consumer.py              Legacy consumer (superseded by email_tasks)
+│   ├── inbox-service/               # Port 8005 — stub
 │   ├── campaign-service/            # Port 8006
 │   ├── leads-service/               # Port 8007
 │   ├── analytics-service/           # Port 8008
 │   ├── automation-service/          # Port 8009
 │   ├── research-service/            # Port 8010
-│   ├── notification-service/        # Port 8011
-│   └── base-requirements.txt
+│   └── notification-service/        # Port 8011
 │
-├── docker/
-│   └── Dockerfile
-├── logs/
-│   └── README.md
-├── .env                             # Single config file
-├── docker-compose.yml               # Orchestration
-├── Dockerfile                       # Base image
-├── requirements.txt                 # Global dependencies
-└── [utility scripts]                # start-all.bat, docker-*.bat
+├── .env                             # Single config file for ALL services
+├── docker-compose.yml               # 12 services + Qdrant + auth-celery-worker
+└── SERVER_SIDE_ARCHITECTURE_DOCUMENTATION.md
 ```
 
 ---
 
-## 🛠️ Shared Infrastructure Layer
+## Shared Infrastructure Layer
 
 ### 1. Configuration (`shared/config/settings.py`)
 
-**Single source of truth** for all configuration.
+Single source of truth loaded from `server/.env`.
 
-**Key Features**:
-- Pydantic Settings with type validation
-- Loads from `.env` file (2 levels up from shared/config/)
-- Auto-converts DATABASE_URL to async format
-- Global config instance
+Key additions vs original:
+- `GMAIL_PUBSUB_TOPIC` / `GMAIL_PUBSUB_SUBSCRIPTION` — Google Cloud Pub/Sub
+- `EMAIL_SERVICE_PUBLIC_URL` — public ngrok/domain URL for Outlook webhook validation
+- `GOOGLE_CLIENT_ID_EMAIL` / `GOOGLE_CLIENT_SECRET_EMAIL` — separate OAuth credentials for email connection flow
+- `CORS_ORIGINS` and `CELERY_ACCEPT_CONTENT` parse both JSON array and comma-separated formats
 
-**Configuration Structure**:
-```python
-class GlobalConfig(BaseSettings):
-    # Databases
-    DATABASE_URL: str                    # PostgreSQL
-    MONGODB_URL: str                     # MongoDB
-    REDIS_URL: str                       # Redis
-    
-    # Service URLs (12 services)
-    GATEWAY_SERVICE_URL: str
-    AUTH_SERVICE_URL: str
-    # ... all 12 services
-    
-    # JWT
-    JWT_SECRET_KEY: str
-    JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 43200
-    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 60
-    
-    # OAuth
-    GOOGLE_CLIENT_ID: Optional[str]
-    GOOGLE_CLIENT_SECRET: Optional[str]
-    MICROSOFT_CLIENT_ID: Optional[str]
-    MICROSOFT_CLIENT_SECRET: Optional[str]
-    
-    # Celery
-    CELERY_BROKER_URL: str
-    CELERY_RESULT_BACKEND: str
-    
-    # Application
-    ENVIRONMENT: str = "development"
-    DEBUG: bool = True
-    LOG_LEVEL: str = "INFO"
-    CORS_ORIGINS: List[str]
-    
-    # Performance
-    DB_POOL_SIZE: int = 20
-    DB_MAX_OVERFLOW: int = 10
-    REDIS_MAX_CONNECTIONS: int = 50
-    WORKER_CONCURRENCY: int = 4
-```
-
-**Usage**:
 ```python
 from shared.config import get_config
 config = get_config()
@@ -160,549 +142,407 @@ config = get_config()
 
 ### 2. Database (`shared/database/`)
 
-#### PostgreSQL (`postgres.py`)
+**PostgreSQL** — async via SQLAlchemy + asyncpg. Pool: 5 connections, 3 overflow (tuned for Windows dev). AWS RDS SSL enforced. Engine globals reset per Celery task to avoid "event loop closed" errors.
 
-**Async connection pool** using SQLAlchemy + asyncpg.
-
-**Features**:
-- Async engine with connection pooling (20 connections, 10 overflow)
-- Session management via async context manager
-- AWS RDS SSL support
-- Pool pre-ping and recycling (3600s)
+**MongoDB** — async via Motor. Used for document storage.
 
 **Usage**:
 ```python
-from shared.database import get_db_session, init_database, close_database
-
-# Initialize on startup
-await init_database()
-
-# Use session
 async with get_db_session() as session:
     result = await session.execute(query)
     await session.commit()
-
-# Close on shutdown
-await close_database()
-```
-
-#### MongoDB (`mongodb.py`)
-
-**Async MongoDB** using Motor driver.
-
-**Features**:
-- Motor async client
-- Connection pooling (50 max, 10 min)
-- MongoDB Atlas optimized
-- Retry logic
-
-**Usage**:
-```python
-from shared.database import get_mongo_database, init_mongodb
-
-await init_mongodb()
-db = get_mongo_database()
-collection = db["users"]
-doc = await collection.find_one({"email": "user@example.com"})
 ```
 
 ### 3. Cache (`shared/cache/redis_client.py`)
 
-**Async Redis** for caching and sessions.
+Single shared async Redis client. Pool: 5 connections (free-tier Redis budget).
 
-**Features**:
-- redis-py with asyncio
-- Connection pooling (50 max)
-- Auto-retry on timeout
-- UTF-8 encoding
-
-**Usage**:
-```python
-from shared.cache import get_cached, set_cached, init_redis
-
-await init_redis()
-value = await get_cached("key")
-await set_cached("key", "value", ttl=300)  # 5 min TTL
-```
-
-### 4. Celery (`shared/celery/`)
-
-**Task queue** with Redis broker.
-
-**Configuration**:
-- Task serialization: JSON
-- Worker prefetch: 1
-- Task time limit: 300s (5 min)
-- Result expires: 3600s (1 hour)
-
-**Usage**:
-```python
-from shared.celery import get_celery_app, init_celery
-
-init_celery()
-app = get_celery_app()
-```
-
-### 5. Logger (`shared/logger/logging_config.py`)
-
-**Structured logging** with request ID tracking.
-
-**Features**:
-- JSON logging (production) or human-readable (dev)
-- Request ID context variable
-- Thread-safe
-- Configurable log levels
-
-**Usage**:
-```python
-from shared.logger import setup_logging, get_logger, set_request_id
-
-logger = setup_logging("service-name")
-logger = get_logger(__name__)
-logger.info("Message", extra={"user_id": "123"})
-
-request_id = set_request_id()  # Auto-generate UUID
-```
-
-### 6. Utils (`shared/utils/http_client.py`)
-
-**HTTP client** for inter-service communication.
-
-**Features**:
-- httpx async client
-- Connection pooling (100 max, 20 keepalive)
-- 30s timeout
-- Service discovery
-
-**Usage**:
-```python
-from shared.utils import get_service_client
-
-auth_client = get_service_client("auth")
-response = await auth_client.get("/users/me", headers={...})
-
-email_client = get_service_client("email")
-await email_client.post("/send", json_data={...})
-```
-
----
-
-## 💻 Microservices Portfolio
-
-| Service | Port | Responsibility |
-|---------|------|----------------|
-| **gateway-service** | 8000 | API Gateway, routing |
-| **auth-service** | 8001 | JWT auth, OAuth (Google/Microsoft) |
-| **user-service** | 8002 | User profiles, settings |
-| **business-service** | 8003 | Business logic, knowledge base |
-| **email-service** | 8004 | Gmail/Outlook integration |
-| **inbox-service** | 8005 | Inbox, conversation threading |
-| **campaign-service** | 8006 | Email campaigns |
-| **leads-service** | 8007 | Lead management, CSV import |
-| **analytics-service** | 8008 | Reporting, metrics |
-| **automation-service** | 8009 | Workflow automation, AI |
-| **research-service** | 8010 | Data research, enrichment |
-| **notification-service** | 8011 | Real-time notifications |
-
-### Common Service Structure
-
-All services follow this template:
+`get_redis()` is an async function — always `await get_redis()`.
 
 ```python
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-import sys, os
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-
-from shared.config import get_config
-from shared.logger import setup_logging, set_request_id, clear_request_id
-from shared.database import init_database, close_database, check_database_health
-from shared.cache import init_redis, close_redis, check_redis_health
-from shared.utils import close_http_client
-
-logger = setup_logging("service-name")
-config = get_config()
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    logger.info("Service starting...")
-    await init_database()
-    await init_redis()
-    logger.info("Service started")
-    yield
-    # Shutdown
-    logger.info("Service shutting down...")
-    await close_database()
-    await close_redis()
-    await close_http_client()
-    logger.info("Service stopped")
-
-app = FastAPI(title="Service", version="1.0.0", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=config.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    request_id = set_request_id()
-    try:
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
-    finally:
-        clear_request_id()
-
-@app.get("/health")
-async def health_check():
-    db_healthy = await check_database_health()
-    redis_healthy = await check_redis_health()
-    return {
-        "status": "healthy" if (db_healthy and redis_healthy) else "unhealthy",
-        "service": "service-name",
-        "checks": {
-            "database": "healthy" if db_healthy else "unhealthy",
-            "redis": "healthy" if redis_healthy else "unhealthy"
-        }
-    }
-
-@app.get("/")
-async def root():
-    return {"service": "service-name", "version": "1.0.0", "status": "running"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=config.DEBUG)
+from shared.cache import get_redis
+redis = await get_redis()
+await redis.setex("key", 3600, "value")
 ```
 
-### Service Lifecycle
+### 4. Celery — Two Separate Apps
 
-**Startup**:
-1. Load .env configuration
-2. Setup logging
-3. Initialize PostgreSQL connection
-4. Initialize MongoDB connection
-5. Initialize Redis connection
-6. Register routes/middleware
-7. Start accepting requests
+**Shared Celery** (`shared/celery/celery_app.py`): Used by auth-service and user-service workers.
+- Queues: `auth_queue`, `user_queue`
+- Tasks: `auth.create_user_embedding`, `user.update_user_embedding`
+- Broker pool: 1 connection, retry forever on disconnect
 
-**Shutdown**:
-1. Stop accepting requests
-2. Complete in-flight requests
-3. Close HTTP client
-4. Close Redis
-5. Close databases
-6. Flush logs
+**Email Celery** (`email-service/email_queue/config/celery_config.py`): Dedicated to email-service.
+- Queues: `email_events_queue`, `email_retry_queue`, `email_dlq`
+- Includes: `email_queue.tasks.email_tasks`, `email_queue.tasks.scheduled_tasks`
+- Beat schedule: subscription refresh (1h), history sync (30m), watch cleanup (24h)
+- Broker pool: 2 connections, `socket_keepalive: True`, retry forever
+
+### 5. Logger (`shared/logger/`)
+
+Structured logging with request ID context. All verbose pipeline logs are `logger.debug()` — only errors and warnings appear at default `INFO` level.
 
 ---
 
-## 🔐 Environment Configuration
+## Email Service — Deep Architecture
 
-### .env File Structure
+The email-service is the most complex service. It implements a complete, fault-tolerant email ingestion engine.
 
-```env
-# Database
-DATABASE_URL=postgresql://user:pass@host:5432/db
-MONGODB_URL=mongodb+srv://user:pass@cluster/db
-REDIS_URL=redis://default:pass@host:port
+### Email Ingestion Pipeline (Real-Time)
 
-# Service URLs (Internal)
-GATEWAY_SERVICE_URL=http://gateway-service:8000
-AUTH_SERVICE_URL=http://auth-service:8000
-# ... all 12 services
-
-# JWT
-JWT_SECRET_KEY=your-secret-key
-JWT_ALGORITHM=HS256
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES=43200
-JWT_REFRESH_TOKEN_EXPIRE_DAYS=60
-
-# Encryption
-ENCRYPTION_KEY=base64-encoded-key
-
-# OAuth
-GOOGLE_CLIENT_ID=your-google-client-id
-GOOGLE_CLIENT_SECRET=your-google-secret
-MICROSOFT_CLIENT_ID=your-microsoft-client-id
-MICROSOFT_CLIENT_SECRET=your-microsoft-secret
-
-# Celery
-CELERY_BROKER_URL=redis://host:port/1
-CELERY_RESULT_BACKEND=redis://host:port/2
-
-# Application
-ENVIRONMENT=development
-DEBUG=true
-LOG_LEVEL=INFO
-CORS_ORIGINS=["http://localhost:3000"]
-
-# Performance
-DB_POOL_SIZE=20
-DB_MAX_OVERFLOW=10
-REDIS_MAX_CONNECTIONS=50
-WORKER_CONCURRENCY=4
-
-# Rate Limiting
-RATE_LIMIT_PER_MINUTE=60
-RATE_LIMIT_BURST=10
+```
+Gmail sends email
+      │
+      ▼
+Google Cloud Pub/Sub
+(topic: projects/gmail-integration-484614/topics/gmail-notifications)
+      │  HTTP POST push notification
+      ▼
+POST /webhooks/gmail
+GmailReceiver.receive_notification()
+      │
+      ├─ 1. Parse Pub/Sub envelope (messageId, emailAddress, historyId)
+      ├─ 2. Dedup on Pub/Sub messageId (Redis, 24h TTL) — stops retry storms
+      ├─ 3. Mark processed BEFORE expensive work
+      ├─ 4. Normalize:
+      │       GmailEventAdapter.parse()
+      │         ├─ Look up account by emailAddress in DB
+      │         │   └─ Unknown accounts: rate-limited warning (once/hour), return None
+      │         ├─ Determine startHistoryId:
+      │         │   ├─ Use account.last_history_id (previous cursor) if available
+      │         │   └─ Fall back to (new_historyId - 1)
+      │         ├─ Refresh access token if expired (auto, saves to DB)
+      │         ├─ GET /gmail/v1/users/me/history?startHistoryId=X
+      │         │   ├─ 401 → error (re-connect needed)
+      │         │   ├─ 404 → historyId expired, fall back to latest inbox message
+      │         │   └─ Empty history → return None (no new messages, silent)
+      │         ├─ GET /gmail/v1/users/me/messages/{id}?format=full
+      │         │   ├─ Skip DRAFT, SPAM, TRASH labels
+      │         │   ├─ Only process INBOX or SENT
+      │         │   └─ 404 → message deleted before fetch, debug log only
+      │         └─ Advance account.last_history_id to new value
+      │
+      ├─ 5. Filter (EmailFilter): spam keywords, OTP, no-reply patterns
+      ├─ 6. Dedup on Gmail message_id (Redis, 24h TTL)
+      └─ 7. Push to Celery queue (email_events_queue, priority 1-10)
+                │
+                ▼
+      Celery Worker (start-celery-worker.bat)
+      process_email_event task
+                │
+                ├─ Reset async DB engine (new event loop per task)
+                ├─ EventProcessor.process_event()
+                │   ├─ Validate required fields
+                │   ├─ Dedup by message_id in DB
+                │   ├─ Fetch existing conversation by thread_id
+                │   ├─ JSONConversationManager.create_message_object()
+                │   │   └─ _strip_quoted_reply(): removes "On Mon, 30 Mar, 2026..."
+                │   ├─ update_messages(): append + sort + 24h filter
+                │   └─ EmailConversationRepository.upsert_conversation()
+                │       ├─ UPDATE if thread exists
+                │       └─ INSERT if new thread
+                └─ Return success (DLQ on 3 retries exhausted)
 ```
 
----
+### Gap Recovery System (Zero Data Loss)
 
-## 🐳 Docker Deployment
+Pub/Sub is the fast path. Gmail History API is the safety net.
 
-### docker-compose.yml
+```
+On startup (after 10s delay):
+  GmailHistorySync.run_recovery_for_all()
+    │
+    For each active Gmail account (batches of 50):
+      ├─ Skip if no last_history_id stored
+      ├─ Skip if last_synced_at < 60s ago
+      ├─ GET /gmail/v1/users/me/history?startHistoryId=<last_history_id>
+      │   ├─ Handles pagination (nextPageToken)
+      │   ├─ Exponential backoff on 429 rate limits
+      │   └─ 404 → historyId expired (>7 days), skip
+      ├─ For each missed message: normalize → filter → dedup → queue
+      └─ Advance last_history_id + update last_synced_at
 
-All 12 services defined with:
-- Shared network: `mailautomation-network`
-- Volume mounting for hot-reload
-- Environment injection
-- Restart policy: `unless-stopped`
-
-**Service Template**:
-```yaml
-service-name:
-  build:
-    context: .
-    dockerfile: Dockerfile
-  container_name: service-name
-  working_dir: /app/services/service-name
-  command: uvicorn main:app --host 0.0.0.0 --port 8000
-  ports:
-    - "8000:8000"
-  volumes:
-    - ./services/service-name:/app/services/service-name
-    - ./shared:/app/shared
-    - ./.env:/app/.env
-  environment:
-    - PYTHONPATH=/app
-  networks:
-    - microservices-network
-  restart: unless-stopped
+Also runs every 30 minutes via Celery Beat (history_sync_task).
 ```
 
-### Commands
+### Subscription Lifecycle
 
-```bash
-# Start all services
-docker-compose up --build
+```
+Account connected (POST /email/connect)
+      │
+      └─ asyncio.create_task(_register_watch_subscription(account))
+              │
+              ▼
+      SubscriptionManager.ensure_subscription()
+              │
+              ├─ GMAIL:   GmailSubscriber.subscribe()
+              │             POST /gmail/v1/users/me/watch
+              │             → stores historyId as last_history_id
+              │             → expires in 6 days (renewed 1 day early)
+              │
+              ├─ OUTLOOK: OutlookSubscriber.subscribe()
+              │             POST /graph.microsoft.com/v1.0/subscriptions
+              │             → requires EMAIL_SERVICE_PUBLIC_URL (ngrok in dev)
+              │             → expires in 2.5 days
+              │
+              └─ SMTP:    SMTPSubscriber.subscribe()
+                            Registers in Redis for SMTPPoller
 
-# Start specific services
-docker-compose up gateway-service auth-service
+Auto-renewal (every 1 hour via Celery Beat — subscription_refresh_task):
+  SubscriptionManager.sync_all_subscriptions()
+    → renews subscriptions expiring within 24h
 
-# View logs
-docker-compose logs -f service-name
-
-# Stop all
-docker-compose down
-
-# Health check
-docker-compose ps
+Unknown watch cleanup (every 24h via Celery Beat — cleanup_task):
+  WatchCleanup.cleanup_all_unknown_watches()
+    → stops Gmail watches for addresses not in DB
+    → POST /subscriptions/stop-unknown-watch for manual stop
 ```
 
-### Local Development
+### Message Storage Schema
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+`last_24h_messages` JSONB field stores a clean, AI-ready message array:
 
-# Run service
-cd services/gateway-service
-python main.py
-
-# Or use scripts
-./run.sh  # Linux/Mac
-run.bat   # Windows
-```
-
----
-
-## 🗄️ Database Architecture
-
-### PostgreSQL (Amazon RDS)
-
-**Connection**: `projectgenesis-db.cl2yi6oegppw.ap-south-1.rds.amazonaws.com:5432`
-
-**Pool Configuration**:
-- Pool size: 20
-- Max overflow: 10
-- Timeout: 30s
-- Pre-ping: Enabled
-- Recycle: 3600s
-
-**Usage**: User accounts, business data, campaigns, leads, transactional data
-
-### MongoDB Atlas
-
-**Connection**: `cluster0.fxqyx2s.mongodb.net/mailautomation`
-
-**Pool Configuration**:
-- Max pool: 50
-- Min pool: 10
-- Idle timeout: 45s
-
-**Usage**: Email content, attachments, analytics events, notifications
-
-### Redis Cloud
-
-**Connection**: `redis-10831.crce206.ap-south-1-1.ec2.cloud.redislabs.com:10831`
-
-**Pool Configuration**:
-- Max connections: 50
-- Socket timeout: 5s
-
-**Usage**:
-- DB 0: General caching
-- DB 1: Celery broker
-- DB 2: Celery results
-
----
-
-## 🔄 Inter-Service Communication
-
-### Patterns
-
-1. **HTTP REST** (Synchronous): Service-to-service via httpx
-2. **Shared Database** (Consistency): All services access PostgreSQL
-3. **Celery Tasks** (Asynchronous): Background jobs via Redis
-
-### Service Discovery
-
-Configuration-based URLs in .env:
-```python
-from shared.utils import get_service_client
-
-client = get_service_client("auth")  # Resolves to AUTH_SERVICE_URL
-response = await client.get("/endpoint")
-```
-
-### Request Tracing
-
-- Request ID generated at entry point
-- Stored in context variable
-- Added to all logs
-- Returned in `X-Request-ID` header
-- Passed to downstream services
-
----
-
-## 🔒 Security
-
-### Authentication
-
-**JWT**:
-- Algorithm: HS256
-- Access token: 30 days
-- Refresh token: 60 days
-
-**OAuth 2.0**:
-- Google: Gmail integration
-- Microsoft: Outlook integration
-- Tokens encrypted (AES-256) in PostgreSQL
-
-### Encryption
-
-**At Rest**:
-- OAuth tokens: AES-256
-- Database: RDS encryption
-
-**In Transit**:
-- HTTPS for APIs
-- TLS for databases
-- SSL for RDS
-
-### Protection
-
-- CORS: Configured origins
-- Rate limiting: 60 req/min
-- Input validation: Pydantic
-- SQL injection: SQLAlchemy ORM
-
----
-
-## 📦 Dependencies
-
-### Global (requirements.txt)
-
-**Framework**:
-- fastapi==0.109.0
-- uvicorn[standard]==0.27.0
-- pydantic==2.5.3
-- pydantic-settings==2.1.0
-
-**Databases**:
-- sqlalchemy==2.0.25
-- asyncpg==0.29.0
-- motor==3.3.2
-- pymongo==4.6.1
-
-**Cache/Queue**:
-- redis==5.0.1
-- celery==5.3.6
-
-**HTTP**:
-- httpx==0.26.0
-
-**Security**:
-- python-jose[cryptography]==3.3.0
-- passlib[bcrypt]==1.7.4
-- cryptography==42.0.0
-
-**Utils**:
-- python-dotenv==1.0.0
-- structlog==24.1.0
-
----
-
-## 📊 Monitoring
-
-### Health Checks
-
-Every service: `GET /health`
-
-Response:
 ```json
-{
-  "status": "healthy",
-  "service": "service-name",
-  "timestamp": "2024-03-24T10:30:00Z",
-  "checks": {
-    "database": "healthy",
-    "redis": "healthy"
+[
+  {
+    "from":            "sender@example.com",
+    "to":              ["recipient@example.com"],
+    "content":         "Actual message text only — quoted replies stripped",
+    "timestamp":       "2026-03-29T13:31:54",
+    "direction":       "incoming",
+    "has_attachments": false
   }
-}
+]
 ```
 
-### Metrics
+Fields intentionally excluded from the JSONB object:
+- `message_id` → stored as `EmailConversation.message_id` (dedup key)
+- `subject` → stored as `EmailConversation.subject`
+- `cc` → not needed for AI context
 
-- Message processing latency
-- Database query performance
-- API response times
-- Queue depth
-- Token refresh rates
+Quote stripping logic (`_strip_quoted_reply`):
+- Finds the LAST `"On <weekday>,"` pattern in the string
+- Only cuts if a 4-digit year follows (prevents false positives on "on monday")
+- Handles both inline and multi-line Gmail/Outlook quote formats
+
+### Inbox API (Polling — No SSE/WebSocket)
+
+SSE/WebSocket was removed to avoid exhausting the free-tier Redis connection limit. The client polls every 30 seconds.
+
+```
+GET  /email/inbox/threads          List all active conversations
+GET  /email/inbox/threads/{id}     Get single thread with messages
+POST /email/inbox/threads/{id}/read  Mark as read
+```
+
+### Key API Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/email/connect` | Connect Gmail/Outlook/SMTP account |
+| GET | `/email/accounts` | List connected accounts |
+| POST | `/webhooks/gmail` | Gmail Pub/Sub push endpoint |
+| GET | `/webhooks/gmail` | GET probe (Google validation) |
+| POST | `/webhooks/outlook` | Outlook Graph push + validation handshake |
+| GET | `/webhooks/outlook` | GET probe (Microsoft validation) |
+| POST | `/webhooks/gmail/test` | Simulate Pub/Sub push for testing |
+| GET | `/webhooks/debug/account/{email}` | Check if account is in DB |
+| GET | `/email/inbox/threads` | List inbox threads (polling) |
+| POST | `/subscriptions/sync` | Force sync all watches |
+| POST | `/subscriptions/stop-unknown-watch` | Stop stale Gmail watch |
+| GET | `/subscriptions/unknown-watches` | List unknown watch addresses |
+| GET | `/subscriptions/status` | All subscriptions with status |
+| GET | `/queue/health` | Queue + worker health |
+| GET | `/queue/dlq` | View failed events |
 
 ---
 
-## 🎯 Summary
+## Gateway Service
 
-**Architecture**: 12 microservices + shared infrastructure  
-**Pattern**: Async-first with event-driven capabilities  
-**Deployment**: Docker containerized  
-**Databases**: PostgreSQL (primary), MongoDB (documents), Redis (cache/queue)  
-**Security**: JWT + OAuth 2.0 + AES-256 encryption  
-**Monitoring**: Health checks + structured logging  
+Catch-all reverse proxy that forwards every request to the appropriate microservice based on URL prefix.
 
-**Key Strengths**:
-- ✅ Clean separation of concerns
-- ✅ Shared infrastructure reduces duplication
-- ✅ Async/await throughout
-- ✅ Type-safe configuration
-- ✅ Production-ready with Docker
-- ✅ Comprehensive health monitoring
+```python
+@app.api_route("/{path:path}", methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"])
+async def gateway_router(request: Request):
+    return await route_request(request)
+```
+
+Features: circuit breaker, rate limiting (60 req/min), request ID propagation, connection pooling.
+
+---
+
+## Auth Service
+
+JWT authentication + OAuth 2.0 (Google + Microsoft).
+
+**Startup**: Creates DB tables, initializes connections.
+
+**Celery Worker** (`start-worker.bat`):
+- Queue: `auth_queue`
+- Task: `auth.create_user_embedding` — generates Qdrant vector embeddings on user registration
+- Pool: solo (Windows-safe), 1 concurrency
+
+**Key flows**:
+- Sign up → create user → queue embedding task → return JWT
+- Sign in → validate credentials → return JWT + refresh token
+- OAuth → exchange code → fetch user info → upsert user → return JWT
+
+---
+
+## User Service
+
+User profile management and settings.
+
+**Celery Worker** (`start-worker.bat`):
+- Queue: `user_queue`
+- Task: `user.update_user_embedding` — partial vector update when AI context fields change
+- Smart: only regenerates affected vector chunks (business_core, audience, tone, etc.)
+
+---
+
+## Database Architecture
+
+### PostgreSQL (Amazon RDS — ap-south-1)
+
+Primary relational store. All services share one instance.
+
+Key tables:
+- `users` — auth-service
+- `email_accounts` — email-service (with `last_history_id`, `watch_expiry` columns added via migration)
+- `email_conversations` — email-service (AI-first, JSONB message history)
+- `email_provider_subscriptions` — watch/subscription tracking
+
+**Datetime rule**: All timestamps stored as `TIMESTAMP WITHOUT TIME ZONE` (naive UTC). asyncpg rejects timezone-aware datetimes for naive columns — always use `datetime.utcnow()` not `datetime.now(timezone.utc)` when writing to DB.
+
+### Redis Cloud (ap-south-1)
+
+Free-tier instance with ~30 connection limit. Connection budget:
+- FastAPI async pool: 5 connections
+- Email Celery worker broker: 3 connections
+- Email Celery worker result: 2 connections
+- Auth/User Celery workers: 2+1 connections
+- Total: ~13 (well within limit)
+
+Redis key namespaces:
+```
+dedup:event:{key}           Pub/Sub + message dedup (24h TTL)
+gmail:unknown:watches       Set of unknown emailAddresses
+gmail:unknown:warned:{email} Rate-limit key for unknown watch warnings (1h TTL)
+sub:id:{subscription_id}    subscription_id → email_account_id (24h TTL)
+sub:account:{account_id}    account_id → "sub_id|user_id" (24h TTL)
+email:dlq:events            List of DLQ events (last 1000)
+smtp:polling:accounts       Set of SMTP account IDs for polling
+```
+
+### Qdrant (Vector DB)
+
+Used by auth-service and user-service for business context embeddings.
+- Collection: `business_context`
+- Model: `all-MiniLM-L6-v2` (384 dimensions)
+- Distance: Cosine
+
+---
+
+## Running Locally
+
+### Startup Order
+
+```
+1. PostgreSQL (Amazon RDS — always available)
+2. Redis (RedisLabs — always available)
+3. Qdrant: start-qdrant.bat
+4. Auth Service:    cd services/auth-service && run.bat
+5. Auth Worker:     cd services/auth-service && start-worker.bat
+6. User Service:    cd services/user-service && run.bat
+7. User Worker:     cd services/user-service && start-worker.bat
+8. Email Service:   cd services/email-service && run.bat
+9. Email Worker:    cd services/email-service && start-celery-worker.bat
+10. Email Beat:     cd services/email-service && start-celery-beat.bat
+11. Gateway:        cd services/gateway-service && python main.py
+```
+
+Or use `start.bat` in email-service to launch FastAPI + worker + beat together.
+
+### PYTHONPATH
+
+Every service requires:
+```bat
+set PYTHONPATH=%cd%;%cd%\..\..
+```
+This puts both the service root and `server/` on the path so `from shared.X import Y` works.
+
+### Gmail Pub/Sub (Local Dev)
+
+1. Run ngrok: `ngrok http 8004`
+2. Copy the `https://` URL (no port)
+3. Set in Google Cloud Console → Pub/Sub → subscription → endpoint URL:
+   `https://<subdomain>.ngrok-free.app/webhooks/gmail`
+4. The system auto-registers Gmail watches on startup
+
+### Outlook Webhooks (Local Dev)
+
+Set `EMAIL_SERVICE_PUBLIC_URL` in `server/.env` to your ngrok URL:
+```env
+EMAIL_SERVICE_PUBLIC_URL=https://your-subdomain.ngrok-free.app
+```
+Microsoft validates the endpoint before creating the subscription.
+
+---
+
+## Security
+
+### Token Encryption
+
+All OAuth tokens stored encrypted with AES-256-GCM:
+```python
+from utils.encryption import encrypt_token, decrypt_token
+stored = encrypt_token(raw_token)   # base64(nonce + ciphertext)
+raw    = decrypt_token(stored)
+```
+
+### JWT
+
+- Algorithm: HS256
+- Access token: 30 days (259,200 minutes)
+- Refresh token: 180 days
+
+### CORS
+
+Configured per environment via `CORS_ORIGINS` in `.env`. Supports both JSON array and comma-separated formats.
+
+---
+
+## Docker Deployment
+
+All 12 services + Qdrant + auth-celery-worker defined in `docker-compose.yml`.
+
+```bash
+docker-compose up --build          # Start everything
+docker-compose up email-service    # Start specific service
+docker-compose logs -f email-service
+docker-compose down
+```
+
+Each service:
+- Shares `./shared` volume (read-only)
+- Shares `./.env` volume (read-only)
+- `PYTHONPATH=/app`
+- Network: `mailautomation-network`
+- Restart: `unless-stopped`
+- Health check: `GET /health` every 30s
+
+---
+
+## Key Design Decisions
+
+**Why `email_queue` not `queue`?** Python's stdlib has a `queue` module. Naming the folder `queue` caused `concurrent.futures` to fail at import time. Renamed to `email_queue`.
+
+**Why no SSE/WebSocket for inbox?** Free-tier Redis has ~30 connection limit. Each SSE connection opens a Redis pubsub connection. With multiple browser tabs this exhausts the pool. Client polls every 30s instead.
+
+**Why reset DB engine per Celery task?** SQLAlchemy's async engine holds connections tied to the event loop. Celery creates a new event loop per task. Resetting `_engine = None` before each task forces a fresh engine on the new loop, preventing "Event loop is closed" errors on retries.
+
+**Why naive UTC datetimes?** PostgreSQL columns are `TIMESTAMP WITHOUT TIME ZONE`. asyncpg rejects timezone-aware datetimes for these columns. All timestamps use `datetime.utcnow()` and strip tzinfo before DB writes.
+
+**Why two-layer dedup?** Pub/Sub can deliver the same message multiple times. Layer 1 (Pub/Sub messageId) stops retry storms before any expensive API calls. Layer 2 (Gmail message_id) catches duplicates that slip through after normalization.
+
+**Why `last_history_id` on EmailAccount?** Gmail Pub/Sub sends the NEW historyId (current watermark), not the previous one. To fetch what changed, we need `startHistoryId = previous_value`. Storing it on the account enables both correct real-time processing and gap recovery.

@@ -125,6 +125,12 @@ class GlobalConfig(BaseSettings):
     QDRANT_COLLECTION: str = Field(default="business_context")
     QDRANT_VECTOR_SIZE: int = Field(default=384)
     QDRANT_DISTANCE_METRIC: str = Field(default="Cosine")
+
+    # ── LLM Configuration ──────────────────────────────────────────────────
+    OPENAI_API_KEY: str = Field(default="", description="OpenAI API key — set in .env")
+    OPENAI_MODEL: str = Field(default="gpt-4o-mini")
+    OPENAI_TIMEOUT_SECONDS: int = Field(default=30)
+    OPENAI_MAX_RETRIES: int = Field(default=2)
     
     # ── Health Check Configuration ──────────────────────────────────────────
     HEALTH_CHECK_INTERVAL: int = Field(default=30)

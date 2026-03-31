@@ -84,7 +84,9 @@ class UserSettings(Base):
     @classmethod
     def create_default_settings(cls, user_id: str):
         """
-        Factory method to create default settings for a new user
-        All defaults are set via Column definitions above
+        Factory method to create default settings for a new user.
+        Accepts user_id as str or UUID — always stores as uuid.UUID.
         """
-        return cls(user_id=user_id)
+        import uuid as _uuid
+        uid = user_id if isinstance(user_id, _uuid.UUID) else _uuid.UUID(str(user_id))
+        return cls(user_id=uid)

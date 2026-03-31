@@ -109,7 +109,10 @@ class EventProducer:
             # Processing metadata
             "received_at": event.received_at.isoformat(),
             "normalized_at": event.normalized_at.isoformat(),
-            "queued_at": datetime.utcnow().isoformat()
+            "queued_at": datetime.utcnow().isoformat(),
+
+            # Trace ID for cross-service log correlation
+            "trace_id": getattr(event, "trace_id", "") or str(__import__("uuid").uuid4()),
         }
         
         return payload
