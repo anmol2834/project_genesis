@@ -17,13 +17,17 @@ celery_app = get_celery_app()
 
 # Import tasks to register them
 from tasks import embedding_tasks
+from tasks import ingestion_tasks
 
 print("\n" + "="*60)
 print("  USER SERVICE - CELERY WORKER")
 print("="*60)
 print(f"  Queue: user_queue")
-print(f"  Task: user.update_user_embedding")
-print(f"  Purpose: Partial embedding updates (AI fields only)")
+print(f"  Tasks:")
+print(f"    - user.update_user_embedding")
+print(f"    - user.process_file_upload")
+print(f"    - user.process_sheets_webhook")
+print(f"    - user.delete_source_data")
 print("="*60 + "\n")
 
 logger.info("User service Celery worker initialized")

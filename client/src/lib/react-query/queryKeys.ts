@@ -82,4 +82,22 @@ export const queryKeys = {
     all: () => ['settings'] as const,
   },
 
+  // ── My Data ────────────────────────────────────────────────────────────────
+  data: {
+    // Aggregate stats (header counters)
+    stats:   ()                                    => ['data', 'stats']                    as const,
+    // All sources list
+    sources: ()                                    => ['data', 'sources']                  as const,
+    // All entries (no filter)
+    entries: ()                                    => ['data', 'entries']                  as const,
+    // Entries filtered by category
+    byCategory: (category: string)                 => ['data', 'entries', category]        as const,
+    // Entries filtered by source
+    bySource: (sourceId: string)                   => ['data', 'entries', 'source', sourceId] as const,
+    // Paginated entries with full params
+    list: (params: Record<string, unknown>)        => ['data', 'entries', 'list', params]  as const,
+    // Single entry detail
+    entry: (id: string)                            => ['data', 'entries', id]              as const,
+  },
+
 } as const;

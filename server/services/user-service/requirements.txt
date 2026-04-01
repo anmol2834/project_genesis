@@ -1,1 +1,19 @@
-# User service — all deps covered by project-genesis-base
+# User service — all core deps covered by project-genesis-base
+#
+# Base image already provides:
+#   fastapi, uvicorn, pydantic, pydantic-settings, python-dotenv
+#   sqlalchemy, asyncpg, psycopg2-binary
+#   motor, pymongo
+#   redis, hiredis
+#   celery, kombu
+#   httpx, aiohttp
+#   python-jose[cryptography], passlib[bcrypt], cryptography
+#   structlog, python-dateutil, pyyaml
+#   openai
+#   qdrant-client, sentence-transformers, torch, transformers
+#   tokenizers, huggingface_hub, numpy, scipy
+#
+# ── User-service-specific extras ────────────────────────────────────────────
+
+# Excel file parsing (.xlsx / .xls) — used by services/ingestion/file_parser.py
+openpyxl==3.1.2

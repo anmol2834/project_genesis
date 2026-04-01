@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useMemo, memo } from 'react';
-import { Box, Typography, useTheme, alpha, InputBase } from '@mui/material';
+import { useState, useMemo, memo, useRef, useEffect, useCallback } from 'react';
+import { Box, Typography, useTheme, alpha, InputBase, CircularProgress } from '@mui/material';
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded';
 import LocalFireDepartmentRoundedIcon from '@mui/icons-material/LocalFireDepartmentRounded';
 import type { FilterTab, Conversation, LeadTag } from './inboxData';
 
-// ── Constants (unchanged from original) ──────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const FILTERS: { id: FilterTab; label: string }[] = [
   { id: 'all',    label: 'All' },
@@ -26,17 +26,123 @@ const LEAD_TAG_CONFIG: Record<LeadTag, { label: string; color: string; bg: strin
   cold: { label: 'Cold', color: '#60a5fa', bg: 'rgba(96,165,250,0.12)' },
 };
 
-// ── Props — now accepts real data ─────────────────────────────────────────────
+// ── Props ─────────────────────────────────────────────────────────────────────
 
 interface Props {
-  conversations: Conversation[];   // real data from InboxView
-  activeId:      string;
-  onSelect:      (c: Conversation) => void;
+  conversations:      Conversation[];
+  activeId:           string;
+  onSelect:           (c: Conversation) => void;
+  // Infinite scroll props
+  hasNextPage?:       boolean;
+  isFetchingNextPage?: boolean;
+  fetchNextPage?:     () => void;
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+// ── Sentinel loader (bottom of list) ─────────────────────────────────────────
 
-export default memo(function ConversationList({ conversations, activeId, onSelect }: Props) {
+const LoadMoreSentinel = memo(function LoadMoreSentinel({
+  isDark,
+  isFetchingNextPage,
+  hasNextPage,
+  onFetchNext,
+}: {
+  isDark: boolean;
+  isFetchingNextPage: boolean;
+  hasNextPage: boolean;
+  onFetchNext: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    // IntersectionObserver handles the scroll-triggered case
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          onFetchNext();
+        }
+      },
+      { rootMargin: '0px 0px 120px 0px', threshold: 0 }
+    );
+
+    observer.observe(el);
+
+    // Eagerly check: if the sentinel is already visible in the viewport
+    // (happens when 10 items don't fill the panel height), trigger immediately.
+    // Use a microtask so the browser has painted the layout first.
+    const checkVisible = () => {
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const inView = rect.top < window.innerHeight + 120;
+      if (inView && hasNextPage && !isFetchingNextPage) {
+        onFetchNext();
+      }
+    };
+
+    // Run after paint so layout is complete
+    const raf = requestAnimationFrame(() => {
+      setTimeout(checkVisible, 0);
+    });
+
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, [hasNextPage, isFetchingNextPage, onFetchNext]);
+
+  return (
+    <Box
+      ref={ref}
+      sx={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        py: 2,
+        minHeight: 48,
+      }}
+    >
+      {isFetchingNextPage && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <CircularProgress
+            size={14}
+            thickness={4}
+            sx={{ color: isDark ? '#818cf8' : 'primary.main' }}
+          />
+          <Typography sx={{ fontSize: '0.68rem', color: 'text.disabled' }}>
+            Loading more...
+          </Typography>
+        </Box>
+      )}
+    </Box>
+  );
+});
+
+// ── End-of-list indicator ─────────────────────────────────────────────────────
+
+const EndOfList = memo(function EndOfList({ isDark }: { isDark: boolean }) {
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, px: 2, py: 1.5 }}>
+      <Box sx={{ flex: 1, height: '1px', background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.07)' }} />
+      <Typography sx={{ fontSize: '0.6rem', color: 'text.disabled', whiteSpace: 'nowrap' }}>
+        All caught up
+      </Typography>
+      <Box sx={{ flex: 1, height: '1px', background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.07)' }} />
+    </Box>
+  );
+});
+
+// ── Main component ────────────────────────────────────────────────────────────
+
+export default memo(function ConversationList({
+  conversations,
+  activeId,
+  onSelect,
+  hasNextPage = false,
+  isFetchingNextPage = false,
+  fetchNextPage,
+}: Props) {
   const theme  = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const [filter, setFilter] = useState<FilterTab>('all');
@@ -61,13 +167,20 @@ export default memo(function ConversationList({ conversations, activeId, onSelec
     [conversations]
   );
 
+  // Stable fetch callback — passed to sentinel
+  const handleFetchNext = useCallback(() => {
+    if (hasNextPage && !isFetchingNextPage && fetchNextPage) {
+      fetchNextPage();
+    }
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
   return (
     <Box sx={{
       display: 'flex', flexDirection: 'column', height: '100%',
       background: isDark ? 'rgba(15,10,40,0.6)' : theme.palette.background.paper,
       borderRight: `1px solid ${theme.palette.divider}`,
     }}>
-      {/* Header */}
+      {/* ── Header ── */}
       <Box sx={{ px: 2, pt: 2, pb: 1.5, flexShrink: 0 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
           <Typography sx={{ fontSize: '1rem', fontWeight: 700, letterSpacing: '-0.02em', color: 'text.primary' }}>
@@ -127,8 +240,10 @@ export default memo(function ConversationList({ conversations, activeId, onSelec
         </Box>
       </Box>
 
-      {/* List */}
-      <Box sx={{ flex: 1, overflowY: 'auto',
+      {/* ── Scrollable list ── */}
+      <Box sx={{
+        flex: 1,
+        overflowY: 'auto',
         '&::-webkit-scrollbar': { width: 3 },
         '&::-webkit-scrollbar-thumb': { background: alpha(theme.palette.text.disabled, 0.2), borderRadius: 2 },
       }}>
@@ -233,6 +348,18 @@ export default memo(function ConversationList({ conversations, activeId, onSelec
             </Box>
           );
         })}
+
+        {/* ── Infinite scroll sentinel ── */}
+        {hasNextPage ? (
+          <LoadMoreSentinel
+            isDark={isDark}
+            isFetchingNextPage={isFetchingNextPage}
+            hasNextPage={hasNextPage}
+            onFetchNext={handleFetchNext}
+          />
+        ) : (
+          conversations.length > 0 && <EndOfList isDark={isDark} />
+        )}
       </Box>
     </Box>
   );

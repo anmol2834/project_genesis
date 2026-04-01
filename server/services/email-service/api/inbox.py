@@ -41,13 +41,25 @@ def _format_thread(conv: EmailConversation) -> dict:
 
 @router.get("/threads")
 async def list_threads(
-    limit:  int = Query(default=50, le=200),
+    limit:  int = Query(default=10, le=100),
     offset: int = Query(default=0, ge=0),
     current_user: dict = Depends(get_current_user),
 ):
     user_id = UUID(str(current_user["user_id"]))
     try:
         async with get_db_session() as db:
+            from sqlalchemy import func as sa_func
+            # Get total count for pagination
+            count_result = await db.execute(
+                select(sa_func.count(EmailConversation.id))
+                .where(and_(
+                    EmailConversation.user_id == user_id,
+                    EmailConversation.conversation_status == "active",
+                ))
+            )
+            total = count_result.scalar() or 0
+
+            # Get paginated rows
             result = await db.execute(
                 select(EmailConversation)
                 .where(and_(
@@ -59,7 +71,7 @@ async def list_threads(
                 .offset(offset)
             )
             conversations = result.scalars().all()
-        return {"threads": [_format_thread(c) for c in conversations], "total": len(conversations)}
+        return {"threads": [_format_thread(c) for c in conversations], "total": total}
     except Exception as exc:
         logger.error(f"Failed to list threads for user {user_id}: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve inbox threads")

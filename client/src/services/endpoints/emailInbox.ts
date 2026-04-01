@@ -55,8 +55,8 @@ export interface InboxSSEEvent {
 const BASE = '/email-service/email/inbox';
 
 export const emailInboxApi = {
-  /** Fetch all threads (initial load) */
-  threads: (limit = 50, offset = 0) =>
+  /** Fetch threads with pagination */
+  threads: (limit = 10, offset = 0) =>
     get<ThreadsResponse>(`${BASE}/threads`, { params: { limit, offset } }),
 
   /** Fetch a single thread */

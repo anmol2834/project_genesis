@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Box, Typography, useTheme, alpha, InputBase,
   IconButton, Tooltip, Button, Modal, type Theme,
+  CircularProgress, Snackbar, Alert,
 } from '@mui/material';
 import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded';
@@ -24,30 +25,43 @@ import ExpandMoreRoundedIcon from '@mui/icons-material/ExpandMoreRounded';
 import InventoryRoundedIcon from '@mui/icons-material/InventoryRounded';
 import PaymentsRoundedIcon from '@mui/icons-material/PaymentsRounded';
 import LocalOfferRoundedIcon from '@mui/icons-material/LocalOfferRounded';
-import ScheduleRoundedIcon from '@mui/icons-material/ScheduleRounded';
-import EventRoundedIcon from '@mui/icons-material/EventRounded';
+import LocalShippingRoundedIcon from '@mui/icons-material/LocalShippingRounded';
 import PeopleRoundedIcon from '@mui/icons-material/PeopleRounded';
 import BusinessRoundedIcon from '@mui/icons-material/BusinessRounded';
-import TuneRoundedIcon from '@mui/icons-material/TuneRounded';
+import GavelRoundedIcon from '@mui/icons-material/GavelRounded';
+import SchoolRoundedIcon from '@mui/icons-material/SchoolRounded';
 import SpeedRoundedIcon from '@mui/icons-material/SpeedRounded';
 import OpenInNewRoundedIcon from '@mui/icons-material/OpenInNewRounded';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import { lightGradients, darkGradients } from '@/theme/palette';
 import {
-  DATA_SOURCES, DATA_ENTRIES, CATEGORY_CONFIG, SOURCE_TYPE_CONFIG,
+  CATEGORY_CONFIG, SOURCE_TYPE_CONFIG,
   SOURCE_STATUS_CONFIG, QUALITY_CONFIG, AI_RELEVANCE_CONFIG,
-  getQualityLevel, DataEntry, DataCategory, DataSource,
+  getQualityLevel, type DataCategory,
 } from './myDataData';
+// React Query hooks
+import {
+  useDataStats, useDataSources, useDataEntries, useDataEntriesByCategory,
+} from '@/hooks/queries/useData';
+import {
+  useUploadFile, useCreateManualEntry, useConnectGoogleSheet,
+  useDeleteSource, useSyncSource, useDeleteEntry, useUpdateEntry,
+} from '@/hooks/mutations/useDataMutations';
+// API types
+import type {
+  DataEntry, DataSource,
+} from '@/services/endpoints/data';
 
 // ── Category icon map ─────────────────────────────────────────────────────────
 const CATEGORY_ICONS: Record<DataCategory, React.ElementType> = {
-  products:       InventoryRoundedIcon,
-  pricing:        PaymentsRoundedIcon,
-  offers:         LocalOfferRoundedIcon,
-  business_hours: ScheduleRoundedIcon,
-  meetings:       EventRoundedIcon,
-  contacts:       PeopleRoundedIcon,
-  company_info:   BusinessRoundedIcon,
-  custom:         TuneRoundedIcon,
+  product_service:     InventoryRoundedIcon,
+  pricing_payment:     PaymentsRoundedIcon,
+  contact_support:     PeopleRoundedIcon,
+  offers_promotions:   LocalOfferRoundedIcon,
+  delivery_shipping:   LocalShippingRoundedIcon,
+  company_info:        BusinessRoundedIcon,
+  policies_legal:      GavelRoundedIcon,
+  educational_content: SchoolRoundedIcon,
 };
 
 // ── Animated counter ──────────────────────────────────────────────────────────
@@ -128,11 +142,12 @@ function QualityStrip({ score, isDark }: { score: number; isDark: boolean }) {
 
 // ── Left nav panel ────────────────────────────────────────────────────────────
 function LeftNav({
-  entries, activeCategory, onSelect, isDark, theme, search, onSearch,
+  entries, activeCategory, onSelect, isDark, theme, search, onSearch, sourcesCount,
 }: {
   entries: DataEntry[]; activeCategory: DataCategory | 'all' | 'sources';
   onSelect: (c: DataCategory | 'all' | 'sources') => void;
   isDark: boolean; theme: Theme; search: string; onSearch: (v: string) => void;
+  sourcesCount: number;
 }) {
   const categories = Object.keys(CATEGORY_CONFIG) as DataCategory[];
   const countByCategory = useMemo(() => {
@@ -142,7 +157,7 @@ function LeftNav({
   }, [entries]);
 
   const totalEntries = entries.length;
-  const totalSources = DATA_SOURCES.length;
+  const totalSources = sourcesCount;
 
   return (
     <Box sx={{
@@ -289,9 +304,23 @@ function NavItem({ label, count, active, onClick, color, isDark, theme, icon }: 
 function EntryPanel({ entry, isDark, theme, onClose }: {
   entry: DataEntry; isDark: boolean; theme: Theme; onClose: () => void;
 }) {
-  const catCfg = CATEGORY_CONFIG[entry.category];
-  const level = getQualityLevel(entry.qualityScore);
+  const catCfg  = CATEGORY_CONFIG[entry.category as DataCategory] ?? CATEGORY_CONFIG.product_service;
+  const level   = getQualityLevel(entry.quality_score);
   const qualCfg = QUALITY_CONFIG[level];
+  const accentColor = catCfg.color;
+
+  // Convert structured_data record into display rows
+  const fieldRows = Object.entries(entry.structured_data ?? {}).map(([key, value]) => ({
+    key,
+    label: key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+    value: String(value ?? ''),
+    isUrl: /^https?:\/\//.test(String(value ?? '')),
+  }));
+
+  const missingFields = entry.missing_fields ?? [];
+  const updatedAt = entry.updated_at
+    ? new Date(entry.updated_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+    : '—';
 
   return (
     <Box sx={{
@@ -314,17 +343,17 @@ function EntryPanel({ entry, isDark, theme, onClose }: {
         <Box sx={{
           px: 2.5, pt: 2.25, pb: 1.75,
           borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.07)' : theme.palette.divider}`,
-          background: isDark ? alpha(entry.accentColor, 0.05) : alpha(entry.accentColor, 0.03),
+          background: isDark ? alpha(accentColor, 0.05) : alpha(accentColor, 0.03),
         }}>
           <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, minWidth: 0 }}>
               <Box sx={{
                 width: 36, height: 36, borderRadius: '10px', flexShrink: 0,
-                background: alpha(entry.accentColor, isDark ? 0.2 : 0.12),
-                border: `1.5px solid ${alpha(entry.accentColor, 0.3)}`,
+                background: alpha(accentColor, isDark ? 0.2 : 0.12),
+                border: `1.5px solid ${alpha(accentColor, 0.3)}`,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}>
-                {(() => { const Icon = CATEGORY_ICONS[entry.category]; return <Icon sx={{ fontSize: 17, color: entry.accentColor }} />; })()}
+                {(() => { const Icon = CATEGORY_ICONS[entry.category as DataCategory] ?? InventoryRoundedIcon; return <Icon sx={{ fontSize: 17, color: accentColor }} />; })()}
               </Box>
               <Box sx={{ minWidth: 0 }}>
                 <Typography sx={{ fontSize: '1rem', fontWeight: 800, color: 'text.primary', letterSpacing: '-0.02em', lineHeight: 1.2 }}>
@@ -334,8 +363,12 @@ function EntryPanel({ entry, isDark, theme, onClose }: {
                   <Box sx={{ px: 0.65, py: 0.15, borderRadius: '5px', background: alpha(catCfg.color, isDark ? 0.15 : 0.1), border: `1px solid ${alpha(catCfg.color, 0.25)}` }}>
                     <Typography sx={{ fontSize: '0.55rem', fontWeight: 700, color: catCfg.color }}>{catCfg.label}</Typography>
                   </Box>
-                  <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled' }}>via {entry.sourceName}</Typography>
-                  <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled' }}>· {entry.updatedAt}</Typography>
+                  {entry.subtype && (
+                    <Box sx={{ px: 0.65, py: 0.15, borderRadius: '5px', background: isDark ? 'rgba(255,255,255,0.06)' : alpha(theme.palette.text.primary, 0.04), border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : theme.palette.divider}` }}>
+                      <Typography sx={{ fontSize: '0.55rem', fontWeight: 600, color: 'text.secondary' }}>{entry.subtype}</Typography>
+                    </Box>
+                  )}
+                  <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled' }}>· {updatedAt}</Typography>
                 </Box>
               </Box>
             </Box>
@@ -343,24 +376,16 @@ function EntryPanel({ entry, isDark, theme, onClose }: {
               <CloseRoundedIcon sx={{ fontSize: 15 }} />
             </IconButton>
           </Box>
-          {/* Quality + used in */}
+          {/* Quality */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 1.5 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
               <SpeedRoundedIcon sx={{ fontSize: 11, color: 'text.disabled' }} />
               <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled' }}>Quality</Typography>
-              <QualityStrip score={entry.qualityScore} isDark={isDark} />
+              <QualityStrip score={entry.quality_score} isDark={isDark} />
               <Box sx={{ px: 0.55, py: 0.1, borderRadius: '5px', background: isDark ? qualCfg.darkBg : qualCfg.bg, border: `1px solid ${alpha(qualCfg.color, 0.3)}` }}>
                 <Typography sx={{ fontSize: '0.52rem', fontWeight: 700, color: qualCfg.color }}>{qualCfg.label}</Typography>
               </Box>
             </Box>
-            {entry.usedIn.length > 0 && (
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.4 }}>
-                <LinkRoundedIcon sx={{ fontSize: 11, color: isDark ? '#818cf8' : theme.palette.primary.main }} />
-                <Typography sx={{ fontSize: '0.62rem', fontWeight: 600, color: isDark ? '#818cf8' : theme.palette.primary.main }}>
-                  {entry.usedIn.length} campaign{entry.usedIn.length > 1 ? 's' : ''}
-                </Typography>
-              </Box>
-            )}
           </Box>
         </Box>
 
@@ -369,7 +394,7 @@ function EntryPanel({ entry, isDark, theme, onClose }: {
           '&::-webkit-scrollbar': { width: 4 },
           '&::-webkit-scrollbar-thumb': { background: alpha(theme.palette.text.disabled, 0.2), borderRadius: 2 },
         }}>
-          {entry.missingFields.length > 0 && (
+          {missingFields.length > 0 && (
             <Box sx={{
               display: 'flex', alignItems: 'flex-start', gap: 0.75, mb: 1.75,
               px: 1.25, py: 0.9, borderRadius: '10px',
@@ -378,59 +403,61 @@ function EntryPanel({ entry, isDark, theme, onClose }: {
             }}>
               <WarningAmberRoundedIcon sx={{ fontSize: 13, color: '#fbbf24', mt: 0.1, flexShrink: 0 }} />
               <Typography sx={{ fontSize: '0.7rem', color: isDark ? alpha('#fbbf24', 0.9) : '#b45309', lineHeight: 1.5 }}>
-                Missing fields: {entry.missingFields.join(', ')} — adding these will improve AI accuracy.
+                Missing fields: {missingFields.join(', ')} — adding these will improve AI accuracy.
               </Typography>
             </Box>
           )}
 
-          {/* Field rows */}
+          {/* Field rows from structured_data */}
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-            {entry.fields.map((field, i) => (
+            {fieldRows.map((field, i) => (
               <Box key={field.key} sx={{
-                display: 'grid', gridTemplateColumns: '28px 140px 1fr',
+                display: 'grid', gridTemplateColumns: '160px 1fr',
                 alignItems: 'flex-start', gap: 1,
                 py: 0.9, px: 0.5,
-                borderBottom: i < entry.fields.length - 1
+                borderBottom: i < fieldRows.length - 1
                   ? `1px solid ${isDark ? 'rgba(255,255,255,0.05)' : theme.palette.divider}`
                   : 'none',
                 '&:hover': { background: isDark ? 'rgba(255,255,255,0.02)' : alpha(theme.palette.text.primary, 0.015), borderRadius: '6px' },
                 transition: 'background 0.12s ease',
               }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', pt: 0.2 }}>
-                  <RelevanceDot level={field.aiRelevance} />
-                </Box>
                 <Typography sx={{ fontSize: '0.72rem', fontWeight: 600, color: 'text.secondary', pt: 0.1 }}>
                   {field.label}
                 </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5 }}>
-                  {field.type === 'url' ? (
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.4 }}>
-                      <Typography sx={{ fontSize: '0.75rem', color: isDark ? '#818cf8' : theme.palette.primary.main, fontWeight: 500, wordBreak: 'break-all' }}>
-                        {field.value}
-                      </Typography>
-                      <OpenInNewRoundedIcon sx={{ fontSize: 11, color: isDark ? '#818cf8' : theme.palette.primary.main, flexShrink: 0 }} />
-                    </Box>
-                  ) : field.type === 'list' ? (
-                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.4 }}>
-                      {field.value.split(',').map(v => (
-                        <Box key={v.trim()} sx={{
-                          px: 0.65, py: 0.15, borderRadius: '5px',
-                          background: isDark ? 'rgba(255,255,255,0.07)' : alpha(theme.palette.text.primary, 0.05),
-                          border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : theme.palette.divider}`,
-                        }}>
-                          <Typography sx={{ fontSize: '0.65rem', color: 'text.secondary' }}>{v.trim()}</Typography>
-                        </Box>
-                      ))}
-                    </Box>
-                  ) : (
-                    <Typography sx={{ fontSize: '0.75rem', color: 'text.primary', fontWeight: 500, lineHeight: 1.5 }}>
+                {field.isUrl ? (
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.4 }}>
+                    <Typography sx={{ fontSize: '0.75rem', color: isDark ? '#818cf8' : theme.palette.primary.main, fontWeight: 500, wordBreak: 'break-all' }}>
                       {field.value}
                     </Typography>
-                  )}
-                </Box>
+                    <OpenInNewRoundedIcon sx={{ fontSize: 11, color: isDark ? '#818cf8' : theme.palette.primary.main, flexShrink: 0 }} />
+                  </Box>
+                ) : (
+                  <Typography sx={{ fontSize: '0.75rem', color: 'text.primary', fontWeight: 500, lineHeight: 1.5 }}>
+                    {field.value}
+                  </Typography>
+                )}
               </Box>
             ))}
+            {fieldRows.length === 0 && (
+              <Typography sx={{ fontSize: '0.72rem', color: 'text.disabled', py: 2, textAlign: 'center' }}>
+                No structured data available.
+              </Typography>
+            )}
           </Box>
+
+          {/* AI tags */}
+          {(entry.ai_tags ?? []).length > 0 && (
+            <Box sx={{ mt: 1.5, pt: 1.5, borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : theme.palette.divider}` }}>
+              <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: 'text.disabled', textTransform: 'uppercase', letterSpacing: '0.08em', mb: 0.75 }}>AI Tags</Typography>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                {(entry.ai_tags ?? []).map(tag => (
+                  <Box key={tag} sx={{ px: 0.75, py: 0.25, borderRadius: '6px', background: isDark ? 'rgba(129,140,248,0.1)' : alpha('#818cf8', 0.07), border: `1px solid ${alpha('#818cf8', 0.2)}` }}>
+                    <Typography sx={{ fontSize: '0.6rem', fontWeight: 600, color: '#818cf8' }}>{tag}</Typography>
+                  </Box>
+                ))}
+              </Box>
+            </Box>
+          )}
         </Box>
 
         {/* Footer actions */}
@@ -439,12 +466,6 @@ function EntryPanel({ entry, isDark, theme, onClose }: {
           borderTop: `1px solid ${isDark ? 'rgba(255,255,255,0.07)' : theme.palette.divider}`,
           display: 'flex', gap: 0.75, justifyContent: 'flex-end',
         }}>
-          <Button size="small" startIcon={<EditRoundedIcon sx={{ fontSize: '13px !important' }} />} sx={{
-            fontSize: '0.72rem', fontWeight: 600, px: 1.5, py: 0.6, borderRadius: '8px', textTransform: 'none',
-            border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : theme.palette.divider}`,
-            color: 'text.primary', background: 'transparent',
-            '&:hover': { background: isDark ? 'rgba(255,255,255,0.06)' : alpha(theme.palette.text.primary, 0.04) },
-          }}>Edit</Button>
           <Button size="small" startIcon={<DeleteOutlineRoundedIcon sx={{ fontSize: '13px !important' }} />} sx={{
             fontSize: '0.72rem', fontWeight: 600, px: 1.5, py: 0.6, borderRadius: '8px', textTransform: 'none',
             border: `1px solid rgba(239,68,68,0.25)`, color: '#ef4444', background: 'transparent',
@@ -460,10 +481,14 @@ function EntryPanel({ entry, isDark, theme, onClose }: {
 function EntryRow({ entry, isDark, theme, index, onClick }: {
   entry: DataEntry; isDark: boolean; theme: Theme; index: number; onClick: () => void;
 }) {
-  const catCfg = CATEGORY_CONFIG[entry.category];
-  const level = getQualityLevel(entry.qualityScore);
+  const catCfg    = CATEGORY_CONFIG[entry.category as DataCategory] ?? CATEGORY_CONFIG.product_service;
+  const level     = getQualityLevel(entry.quality_score);
   const qualColor = QUALITY_CONFIG[level].color;
-  const Icon = CATEGORY_ICONS[entry.category];
+  const Icon      = CATEGORY_ICONS[entry.category as DataCategory] ?? InventoryRoundedIcon;
+  const preview   = Object.values(entry.structured_data ?? {}).find(v => v) ?? '—';
+  const updatedAt = entry.updated_at
+    ? new Date(entry.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : '—';
 
   return (
     <Box component="button" onClick={onClick} sx={{
@@ -475,13 +500,10 @@ function EntryRow({ entry, isDark, theme, index, onClick }: {
       borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.04)' : theme.palette.divider}`,
       background: 'transparent',
       transition: 'background 0.12s ease',
-      '&:hover': {
-        background: isDark ? 'rgba(255,255,255,0.025)' : alpha(theme.palette.text.primary, 0.02),
-      },
+      '&:hover': { background: isDark ? 'rgba(255,255,255,0.025)' : alpha(theme.palette.text.primary, 0.02) },
       animation: `rowIn 0.22s ease-out ${index * 0.04}s both`,
       '@keyframes rowIn': { from: { opacity: 0, transform: 'translateX(-4px)' }, to: { opacity: 1, transform: 'translateX(0)' } },
     }}>
-      {/* Category icon */}
       <Box sx={{
         width: 26, height: 26, borderRadius: '7px', flexShrink: 0,
         background: alpha(catCfg.color, isDark ? 0.15 : 0.1),
@@ -490,44 +512,25 @@ function EntryRow({ entry, isDark, theme, index, onClick }: {
       }}>
         <Icon sx={{ fontSize: 13, color: catCfg.color }} />
       </Box>
-
-      {/* Title + preview */}
       <Box sx={{ minWidth: 0 }}>
         <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.primary', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: 1.3 }}>
           {entry.title}
         </Typography>
         <Typography sx={{ fontSize: '0.65rem', color: 'text.disabled', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', mt: 0.15 }}>
-          {entry.fields[0]?.value || '—'}
+          {preview}
         </Typography>
       </Box>
-
-      {/* Category */}
       <Box sx={{ px: 0.65, py: 0.2, borderRadius: '5px', background: alpha(catCfg.color, isDark ? 0.12 : 0.08), border: `1px solid ${alpha(catCfg.color, 0.2)}`, display: 'inline-flex', alignSelf: 'center' }}>
         <Typography sx={{ fontSize: '0.58rem', fontWeight: 700, color: catCfg.color }}>{catCfg.label}</Typography>
       </Box>
-
-      {/* Quality */}
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
         <Box sx={{ width: 32, height: 3, borderRadius: 2, background: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.07)', overflow: 'hidden' }}>
-          <Box sx={{ height: '100%', borderRadius: 2, width: `${entry.qualityScore}%`, background: qualColor }} />
+          <Box sx={{ height: '100%', borderRadius: 2, width: `${entry.quality_score}%`, background: qualColor }} />
         </Box>
-        <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: qualColor }}>{entry.qualityScore}%</Typography>
+        <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: qualColor }}>{entry.quality_score}%</Typography>
       </Box>
-
-      {/* Used in */}
-      <Box>
-        {entry.usedIn.length > 0 ? (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.3 }}>
-            <LinkRoundedIcon sx={{ fontSize: 10, color: isDark ? '#818cf8' : theme.palette.primary.main }} />
-            <Typography sx={{ fontSize: '0.62rem', fontWeight: 600, color: isDark ? '#818cf8' : theme.palette.primary.main }}>{entry.usedIn.length}</Typography>
-          </Box>
-        ) : (
-          <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled' }}>—</Typography>
-        )}
-      </Box>
-
-      {/* Updated */}
-      <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled', textAlign: 'right' }}>{entry.updatedAt}</Typography>
+      <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled' }}>—</Typography>
+      <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled', textAlign: 'right' }}>{updatedAt}</Typography>
     </Box>
   );
 }
@@ -540,7 +543,7 @@ function CategorySection({ category, entries, isDark, theme, onEntryClick }: {
   const [collapsed, setCollapsed] = useState(false);
   const cfg = CATEGORY_CONFIG[category];
   const Icon = CATEGORY_ICONS[category];
-  const avgQuality = Math.round(entries.reduce((s, e) => s + e.qualityScore, 0) / entries.length);
+  const avgQuality = Math.round(entries.reduce((s, e) => s + e.quality_score, 0) / entries.length);
   const qualColor = avgQuality >= 75 ? '#34d399' : avgQuality >= 45 ? '#fbbf24' : '#f87171';
 
   return (
@@ -625,7 +628,15 @@ function CategorySection({ category, entries, isDark, theme, onEntryClick }: {
 
 // ── Sources view ──────────────────────────────────────────────────────────────
 function SourcesView({ isDark, theme }: { isDark: boolean; theme: Theme }) {
-  const totalRecords = DATA_SOURCES.reduce((s, src) => s + src.records, 0);
+  const { data: sourcesData, isLoading } = useDataSources();
+  const deleteSource = useDeleteSource();
+  const syncSource   = useSyncSource();
+
+  const sources      = sourcesData?.sources ?? [];
+  const totalRecords = sourcesData?.total_records ?? 0;
+
+  const handleSync = (id: string) => syncSource.mutate(id);
+  const handleDelete = (id: string) => deleteSource.mutate(id);
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
@@ -640,7 +651,7 @@ function SourcesView({ isDark, theme }: { isDark: boolean; theme: Theme }) {
           <LinkRoundedIcon sx={{ fontSize: 14, color: '#22d3ee' }} />
           <Typography sx={{ fontSize: '0.82rem', fontWeight: 700, color: 'text.primary' }}>Data Sources</Typography>
           <Box sx={{ px: 0.65, py: 0.15, borderRadius: '5px', background: alpha('#22d3ee', 0.15), border: `1px solid ${alpha('#22d3ee', 0.25)}` }}>
-            <Typography sx={{ fontSize: '0.55rem', fontWeight: 700, color: '#22d3ee' }}>{DATA_SOURCES.length} connected</Typography>
+            <Typography sx={{ fontSize: '0.55rem', fontWeight: 700, color: '#22d3ee' }}>{sources.length} connected</Typography>
           </Box>
         </Box>
         <Typography sx={{ fontSize: '0.68rem', color: 'text.secondary' }}>{totalRecords.toLocaleString()} total records</Typography>
@@ -654,277 +665,697 @@ function SourcesView({ isDark, theme }: { isDark: boolean; theme: Theme }) {
       }}>
         {/* Table header */}
         <Box sx={{
-          display: 'grid', gridTemplateColumns: '1fr 100px 80px 90px 80px',
+          display: 'grid', gridTemplateColumns: '1fr 100px 80px 90px 80px 96px',
           alignItems: 'center', gap: 1.5, px: 1.75, py: 0.75,
           background: isDark ? 'rgba(255,255,255,0.03)' : alpha(theme.palette.text.primary, 0.02),
           borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : theme.palette.divider}`,
         }}>
-          {['Source', 'Type', 'Records', 'AI-Ready', 'Status'].map(h => (
+          {['Source', 'Type', 'Records', 'AI-Ready', 'Status', 'Actions'].map(h => (
             <Typography key={h} sx={{ fontSize: '0.58rem', fontWeight: 700, color: 'text.disabled', textTransform: 'uppercase', letterSpacing: '0.07em' }}>
               {h}
             </Typography>
           ))}
         </Box>
 
-        {DATA_SOURCES.map((src, i) => {
-          const typeCfg = SOURCE_TYPE_CONFIG[src.type];
-          const aiColor = src.aiReadyPct >= 75 ? '#34d399' : src.aiReadyPct >= 50 ? '#fbbf24' : '#f87171';
+        {sources.map((src, i) => {
+          const typeCfg = SOURCE_TYPE_CONFIG[src.source_type as keyof typeof SOURCE_TYPE_CONFIG] ?? { label: src.source_type, color: '#818cf8' };
+          const aiPct   = src.total_records > 0 ? Math.round((src.ai_ready_count / src.total_records) * 100) : 0;
+          const aiColor = aiPct >= 75 ? '#34d399' : aiPct >= 50 ? '#fbbf24' : '#f87171';
+          const isSyncing = src.status === 'syncing' || syncSource.isPending;
+          const isDeleting = deleteSource.isPending && deleteSource.variables === src.id;
+          const lastSync = src.last_sync_at
+            ? new Date(src.last_sync_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : 'Never';
           return (
             <Box key={src.id} sx={{
-              display: 'grid', gridTemplateColumns: '1fr 100px 80px 90px 80px',
+              display: 'grid', gridTemplateColumns: '1fr 100px 80px 90px 80px 96px',
               alignItems: 'center', gap: 1.5, px: 1.75, py: 1.1,
-              borderBottom: i < DATA_SOURCES.length - 1 ? `1px solid ${isDark ? 'rgba(255,255,255,0.04)' : theme.palette.divider}` : 'none',
-              transition: 'background 0.12s ease',
+              borderBottom: i < sources.length - 1 ? `1px solid ${isDark ? 'rgba(255,255,255,0.04)' : theme.palette.divider}` : 'none',
+              transition: 'all 0.25s ease',
+              opacity: isDeleting ? 0 : 1,
+              transform: isDeleting ? 'translateX(12px)' : 'none',
               '&:hover': { background: isDark ? 'rgba(255,255,255,0.025)' : alpha(theme.palette.text.primary, 0.02) },
               animation: `rowIn 0.22s ease-out ${i * 0.05}s both`,
               '@keyframes rowIn': { from: { opacity: 0, transform: 'translateX(-4px)' }, to: { opacity: 1, transform: 'translateX(0)' } },
             }}>
               <Box>
                 <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.primary' }}>{src.name}</Typography>
-                <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled', mt: 0.1 }}>Last sync: {src.lastSync}</Typography>
+                <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled', mt: 0.1 }}>Last sync: {lastSync}</Typography>
               </Box>
               <Box sx={{ px: 0.65, py: 0.2, borderRadius: '5px', background: alpha(typeCfg.color, isDark ? 0.12 : 0.08), border: `1px solid ${alpha(typeCfg.color, 0.2)}`, display: 'inline-flex', alignSelf: 'center' }}>
                 <Typography sx={{ fontSize: '0.58rem', fontWeight: 700, color: typeCfg.color }}>{typeCfg.label}</Typography>
               </Box>
-              <Typography sx={{ fontSize: '0.78rem', fontWeight: 700, color: 'text.primary' }}>{src.records.toLocaleString()}</Typography>
+              <Typography sx={{ fontSize: '0.78rem', fontWeight: 700, color: 'text.primary' }}>{src.total_records.toLocaleString()}</Typography>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
                 <Box sx={{ flex: 1, height: 3, borderRadius: 2, background: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.07)', overflow: 'hidden' }}>
-                  <Box sx={{ height: '100%', borderRadius: 2, width: `${src.aiReadyPct}%`, background: aiColor, transition: 'width 0.9s ease' }} />
+                  <Box sx={{ height: '100%', borderRadius: 2, width: `${aiPct}%`, background: aiColor, transition: 'width 0.9s ease' }} />
                 </Box>
-                <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: aiColor, minWidth: 26 }}>{src.aiReadyPct}%</Typography>
+                <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: aiColor, minWidth: 26 }}>{aiPct}%</Typography>
               </Box>
-              <SourcePill status={src.status} />
+              <SourcePill status={src.status === 'active' ? 'connected' : src.status === 'syncing' ? 'syncing' : 'paused'} />
+              {/* Action buttons */}
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.4 }}>
+                <Tooltip title="Sync now" placement="top">
+                  <IconButton
+                    size="small"
+                    onClick={() => handleSync(src.id)}
+                    disabled={isSyncing || src.status === 'paused'}
+                    sx={{
+                      width: 26, height: 26, borderRadius: '7px',
+                      color: '#60a5fa',
+                      border: `1px solid ${alpha('#60a5fa', 0.25)}`,
+                      background: alpha('#60a5fa', isDark ? 0.08 : 0.05),
+                      '&:hover': { background: alpha('#60a5fa', 0.15) },
+                      '&:disabled': { opacity: 0.4 },
+                    }}
+                  >
+                    <SyncRoundedIcon sx={{
+                      fontSize: 13,
+                      animation: isSyncing ? 'spin 1.5s linear infinite' : 'none',
+                      '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
+                    }} />
+                  </IconButton>
+                </Tooltip>
+                <Tooltip title="Remove source" placement="top">
+                  <IconButton
+                    size="small"
+                    onClick={() => handleDelete(src.id)}
+                    disabled={deleteSource.isPending}
+                    sx={{
+                      width: 26, height: 26, borderRadius: '7px',
+                      color: '#f87171',
+                      border: `1px solid ${alpha('#f87171', 0.25)}`,
+                      background: alpha('#f87171', isDark ? 0.08 : 0.05),
+                      '&:hover': { background: alpha('#f87171', 0.15) },
+                    }}
+                  >
+                    <DeleteOutlineRoundedIcon sx={{ fontSize: 13 }} />
+                  </IconButton>
+                </Tooltip>
+              </Box>
             </Box>
           );
         })}
-      </Box>
 
-      {/* Used in breakdown */}
-      <Box sx={{
-        borderRadius: '14px', overflow: 'hidden',
-        border: `1px solid ${isDark ? 'rgba(255,255,255,0.07)' : theme.palette.divider}`,
-        background: isDark ? 'rgba(255,255,255,0.02)' : theme.palette.background.paper,
-      }}>
-        <Box sx={{ px: 1.75, py: 1.1, borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : theme.palette.divider}`, display: 'flex', alignItems: 'center', gap: 0.75 }}>
-          <AutoAwesomeRoundedIcon sx={{ fontSize: 13, color: '#c084fc' }} />
-          <Typography sx={{ fontSize: '0.78rem', fontWeight: 700, color: 'text.primary' }}>Campaign Usage</Typography>
-        </Box>
-        <Box sx={{ p: 1.75, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
-          {DATA_SOURCES.filter(s => s.usedIn.length > 0).map(src => (
-            <Box key={src.id} sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
-              <Typography sx={{ fontSize: '0.72rem', fontWeight: 600, color: 'text.secondary', minWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {src.name}
-              </Typography>
-              <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-                {src.usedIn.map(name => (
-                  <Box key={name} sx={{
-                    px: 0.65, py: 0.15, borderRadius: '5px',
-                    background: isDark ? 'rgba(129,140,248,0.1)' : alpha(theme.palette.primary.main, 0.07),
-                    border: `1px solid ${isDark ? 'rgba(129,140,248,0.2)' : alpha(theme.palette.primary.main, 0.15)}`,
-                  }}>
-                    <Typography sx={{ fontSize: '0.58rem', fontWeight: 600, color: isDark ? '#818cf8' : theme.palette.primary.main }}>{name}</Typography>
-                  </Box>
-                ))}
-              </Box>
-            </Box>
-          ))}
-        </Box>
+        {sources.length === 0 && (
+          <Box sx={{ px: 1.75, py: 3, textAlign: 'center' }}>
+            <Typography sx={{ fontSize: '0.75rem', color: 'text.disabled' }}>No sources connected. Add one using the "Add Data" button.</Typography>
+          </Box>
+        )}
       </Box>
     </Box>
   );
 }
 
 // ── Add data modal ────────────────────────────────────────────────────────────
+// Flow: category (mandatory) → method (csv/manual/sheets/api) → form
+// REDESIGNED: no right column, guide appears as smooth hover tooltip on each card
 function AddDataModal({ open, onClose, isDark, theme }: {
   open: boolean; onClose: () => void; isDark: boolean; theme: Theme;
 }) {
-  const [step, setStep] = useState<'choose' | 'csv' | 'manual' | 'sheets' | 'api'>('choose');
+  type Step = 'category' | 'method' | 'csv' | 'manual' | 'sheets' | 'api';
+  const [step, setStep] = useState<Step>('category');
+  const [selectedCategory, setSelectedCategory] = useState<DataCategory | null>(null);
+  const [hoveredCat, setHoveredCat] = useState<DataCategory | null>(null);
+  const [tooltipAnchor, setTooltipAnchor] = useState<{ top: number; left: number; width: number; flipUp: boolean } | null>(null);
+  const cardRefs = useRef<Partial<Record<DataCategory, HTMLElement>>>({});
 
-  const options = [
-    { id: 'csv' as const,    icon: UploadFileRoundedIcon,  label: 'Upload CSV',       desc: 'Import from a CSV file',              color: '#34d399' },
-    { id: 'manual' as const, icon: EditRoundedIcon,        label: 'Manual Entry',     desc: 'Add data fields manually',            color: '#c084fc' },
-    { id: 'sheets' as const, icon: TableChartRoundedIcon,  label: 'Google Sheets',    desc: 'Sync from a spreadsheet',             color: '#60a5fa' },
-    { id: 'api' as const,    icon: ApiRoundedIcon,         label: 'API / Webhook',    desc: 'Connect via REST API',                color: '#22d3ee' },
+  // Form state
+  const [csvFile, setCsvFile]           = useState<File | null>(null);
+  const [sourceName, setSourceName]     = useState('');
+  const [manualTitle, setManualTitle]   = useState('');
+  const [manualContent, setManualContent] = useState('');
+  const [sheetUrl, setSheetUrl]         = useState('');
+  const [sheetName, setSheetName]       = useState('');
+  const [sheetSourceName, setSheetSourceName] = useState('');
+
+  // Mutations
+  const uploadFile      = useUploadFile();
+  const createManual    = useCreateManualEntry();
+  const connectSheet    = useConnectGoogleSheet();
+
+  const isSubmitting = uploadFile.isPending || createManual.isPending || connectSheet.isPending;
+
+  const allCategories = Object.keys(CATEGORY_CONFIG) as DataCategory[];
+
+  const methods = [
+    { id: 'csv' as const,    icon: UploadFileRoundedIcon, label: 'Upload CSV / Excel', desc: 'Import rows from a file',       color: '#34d399' },
+    { id: 'manual' as const, icon: EditRoundedIcon,       label: 'Manual Entry',       desc: 'Type data fields directly',    color: '#c084fc' },
+    { id: 'sheets' as const, icon: TableChartRoundedIcon, label: 'Google Sheets',      desc: 'Sync live from a spreadsheet', color: '#60a5fa' },
+    { id: 'api' as const,    icon: ApiRoundedIcon,        label: 'API / Webhook',      desc: 'Connect via REST endpoint',    color: '#22d3ee' },
   ];
 
   const inputSx = {
-    px: 1.25, py: 0.85, borderRadius: '9px', fontSize: '0.8rem',
-    color: 'text.primary', flex: 1,
+    px: 1.5, py: 1, borderRadius: '10px', fontSize: '0.82rem',
+    color: 'text.primary',
     background: isDark ? 'rgba(255,255,255,0.04)' : alpha(theme.palette.text.primary, 0.03),
     border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : theme.palette.divider}`,
     '& input::placeholder': { color: theme.palette.text.disabled, opacity: 1 },
-    '&:focus-within': { borderColor: isDark ? 'rgba(129,140,248,0.5)' : alpha(theme.palette.primary.main, 0.5) },
-    transition: 'border-color 0.15s ease',
+    '&:focus-within': { borderColor: isDark ? 'rgba(129,140,248,0.6)' : alpha(theme.palette.primary.main, 0.5), boxShadow: isDark ? '0 0 0 3px rgba(129,140,248,0.1)' : `0 0 0 3px ${alpha(theme.palette.primary.main, 0.08)}` },
+    transition: 'border-color 0.18s ease, box-shadow 0.18s ease',
   };
 
-  const categories = Object.keys(CATEGORY_CONFIG) as DataCategory[];
+  const handleClose = () => {
+    onClose();
+    setStep('category');
+    setSelectedCategory(null);
+    setHoveredCat(null);
+    setTooltipAnchor(null);
+    setCsvFile(null);
+    setSourceName('');
+    setManualTitle('');
+    setManualContent('');
+    setSheetUrl('');
+    setSheetName('');
+    setSheetSourceName('');
+  };
+
+  const handleBack = () => {
+    if (step === 'method') { setStep('category'); setSelectedCategory(null); }
+    else if (['csv', 'manual', 'sheets', 'api'].includes(step)) setStep('method');
+  };
+
+  const headerTitle: Record<Step, string> = {
+    category: 'Add Business Data',
+    method:   'How do you want to add data?',
+    csv:      'Upload CSV / Excel',
+    manual:   'Manual Entry',
+    sheets:   'Connect Google Sheets',
+    api:      'API / Webhook',
+  };
 
   return (
-    <Modal open={open} onClose={() => { onClose(); setStep('choose'); }} sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', p: 2 }}>
+    <Modal
+      open={open}
+      onClose={handleClose}
+      sx={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        p: { xs: 1.5, sm: 2 },
+      }}
+    >
       <Box sx={{
-        width: '100%', maxWidth: 480,
-        borderRadius: '18px',
-        background: isDark ? '#0f172a' : '#fff',
-        border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : theme.palette.divider}`,
-        boxShadow: isDark ? '0 32px 80px rgba(0,0,0,0.6)' : '0 32px 80px rgba(15,23,42,0.15)',
+        width: '100%',
+        maxWidth: 520,
+        borderRadius: '20px',
+        background: isDark ? '#0d1526' : '#ffffff',
+        border: `1px solid ${isDark ? 'rgba(255,255,255,0.09)' : 'rgba(0,0,0,0.08)'}`,
+        boxShadow: isDark
+          ? '0 40px 100px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04)'
+          : '0 40px 100px rgba(15,23,42,0.18), 0 0 0 1px rgba(0,0,0,0.04)',
         overflow: 'hidden',
-        animation: 'modalIn 0.22s ease-out',
-        '@keyframes modalIn': { from: { opacity: 0, transform: 'scale(0.96) translateY(8px)' }, to: { opacity: 1, transform: 'scale(1) translateY(0)' } },
+        outline: 'none',
+        animation: 'modalSlideIn 0.24s cubic-bezier(0.34,1.56,0.64,1)',
+        '@keyframes modalSlideIn': {
+          from: { opacity: 0, transform: 'scale(0.94) translateY(12px)' },
+          to:   { opacity: 1, transform: 'scale(1) translateY(0)' },
+        },
       }}>
-        {/* Header */}
+
+        {/* ── Header ── */}
         <Box sx={{
-          px: 2.5, pt: 2.25, pb: 1.75,
-          borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.07)' : theme.palette.divider}`,
-          display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
+          px: 3, pt: 2.5, pb: 2,
+          borderBottom: `1px solid ${isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'}`,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1,
         }}>
-          <Box>
-            <Typography sx={{ fontSize: '1rem', fontWeight: 800, color: 'text.primary', letterSpacing: '-0.02em' }}>
-              {step === 'choose' ? 'Add Business Data' : step === 'csv' ? 'Upload CSV' : step === 'manual' ? 'Manual Entry' : step === 'sheets' ? 'Connect Google Sheets' : 'API / Webhook'}
-            </Typography>
-            <Typography sx={{ fontSize: '0.72rem', color: 'text.secondary', mt: 0.3 }}>
-              {step === 'choose' ? 'Choose how to add data for your AI' : 'Fill in the details below'}
-            </Typography>
-          </Box>
-          <Box sx={{ display: 'flex', gap: 0.5 }}>
-            {step !== 'choose' && (
-              <IconButton size="small" onClick={() => setStep('choose')} sx={{ width: 28, height: 28, borderRadius: '7px', color: 'text.secondary', '&:hover': { background: isDark ? 'rgba(255,255,255,0.07)' : alpha(theme.palette.text.primary, 0.05) } }}>
-                <Typography sx={{ fontSize: '0.65rem', fontWeight: 700 }}>←</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, minWidth: 0 }}>
+            {step !== 'category' && (
+              <IconButton
+                size="small"
+                onClick={handleBack}
+                sx={{
+                  width: 30, height: 30, borderRadius: '8px', flexShrink: 0,
+                  color: 'text.secondary',
+                  background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)',
+                  '&:hover': { background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: 'text.primary' },
+                  transition: 'all 0.15s ease',
+                }}
+              >
+                <Typography sx={{ fontSize: '0.75rem', fontWeight: 700, lineHeight: 1 }}>←</Typography>
               </IconButton>
             )}
-            <IconButton size="small" onClick={() => { onClose(); setStep('choose'); }} sx={{ width: 28, height: 28, borderRadius: '7px', color: 'text.secondary', '&:hover': { background: isDark ? 'rgba(255,255,255,0.07)' : alpha(theme.palette.text.primary, 0.05) } }}>
-              <CloseRoundedIcon sx={{ fontSize: 15 }} />
-            </IconButton>
+            <Box sx={{ minWidth: 0 }}>
+              <Typography sx={{ fontSize: '1rem', fontWeight: 800, color: 'text.primary', letterSpacing: '-0.025em', lineHeight: 1.2 }}>
+                {headerTitle[step]}
+              </Typography>
+              <Typography sx={{ fontSize: '0.72rem', color: 'text.secondary', mt: 0.25, lineHeight: 1.4 }}>
+                {step === 'category'
+                  ? 'Choose a category — required before adding any data'
+                  : selectedCategory
+                    ? `${CATEGORY_CONFIG[selectedCategory].emoji} ${CATEGORY_CONFIG[selectedCategory].label}`
+                    : 'Fill in the details below'}
+              </Typography>
+            </Box>
           </Box>
+          <IconButton
+            size="small"
+            onClick={handleClose}
+            sx={{
+              width: 30, height: 30, borderRadius: '8px', flexShrink: 0,
+              color: 'text.secondary',
+              background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)',
+              '&:hover': { background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)', color: 'text.primary' },
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <CloseRoundedIcon sx={{ fontSize: 15 }} />
+          </IconButton>
         </Box>
 
-        {/* Choose step */}
-        {step === 'choose' && (
-          <Box sx={{ p: 2, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.25 }}>
-            {options.map(opt => (
-              <Box key={opt.id} component="button" onClick={() => setStep(opt.id)} sx={{
-                display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 0.75,
-                p: 1.5, borderRadius: '12px', cursor: 'pointer', textAlign: 'left',
-                background: isDark ? alpha(opt.color, 0.07) : alpha(opt.color, 0.05),
-                border: `1.5px solid ${alpha(opt.color, isDark ? 0.2 : 0.15)}`,
-                transition: 'all 0.18s ease',
-                '&:hover': { transform: 'translateY(-2px)', boxShadow: isDark ? '0 8px 24px rgba(0,0,0,0.3)' : '0 8px 24px rgba(15,23,42,0.08)', borderColor: opt.color },
-                '&:active': { transform: 'scale(0.99)' },
-              }}>
-                <Box sx={{ width: 34, height: 34, borderRadius: '9px', background: alpha(opt.color, 0.15), border: `1px solid ${alpha(opt.color, 0.25)}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <opt.icon sx={{ fontSize: 17, color: opt.color }} />
+        {/* ── Step: Category selection ── */}
+        {step === 'category' && (
+          <Box sx={{ p: { xs: 1.75, sm: 2.5 }, display: 'flex', flexDirection: 'column', gap: { xs: 1.5, sm: 2 } }}>
+            {/* Required label */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+              <Box sx={{ width: 6, height: 6, borderRadius: '50%', background: '#ef4444', flexShrink: 0 }} />
+              <Typography sx={{ fontSize: '0.62rem', fontWeight: 700, color: 'text.disabled', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+                Required — select one
+              </Typography>
+            </Box>
+
+            {/* Category grid — 2 equal columns, fixed-height cards so all are uniform */}
+            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1, position: 'relative' }}>
+              {allCategories.map(cat => {
+                const cfg = CATEGORY_CONFIG[cat];
+                const Icon = CATEGORY_ICONS[cat];
+                const isSelected = selectedCategory === cat;
+                const isHovered = hoveredCat === cat;
+                return (
+                  <Box key={cat} sx={{ position: 'relative' }}>
+                    {/* Card — fixed height, vertical layout: icon top-left, label bottom */}
+                    <Box
+                      component="button"
+                      ref={(el: HTMLElement | null) => { if (el) cardRefs.current[cat] = el; }}
+                      onClick={() => setSelectedCategory(cat)}
+                      onMouseEnter={() => {
+                        const el = cardRefs.current[cat];
+                        if (el) {
+                          const rect = el.getBoundingClientRect();
+                          const TOOLTIP_HEIGHT = 200; // estimated max tooltip height
+                          const spaceBelow = window.innerHeight - rect.bottom;
+                          const flipUp = spaceBelow < TOOLTIP_HEIGHT + 20;
+                          setTooltipAnchor({
+                            top: flipUp ? rect.top - TOOLTIP_HEIGHT - 10 : rect.bottom + 10,
+                            left: rect.left + rect.width / 2,
+                            width: rect.width,
+                            flipUp,
+                          });
+                        }
+                        setHoveredCat(cat);
+                      }}
+                      onMouseLeave={() => { setHoveredCat(null); setTooltipAnchor(null); }}
+                      sx={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'flex-start',
+                        justifyContent: 'space-between',
+                        px: 1.25,
+                        py: 1.1,
+                        // fixed height — every card identical regardless of label length
+                        height: 76,
+                        borderRadius: '12px',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        width: '100%',
+                        background: isSelected
+                          ? isDark ? alpha(cfg.color, 0.16) : alpha(cfg.color, 0.09)
+                          : isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.025)',
+                        border: `1.5px solid ${isSelected
+                          ? cfg.color
+                          : isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`,
+                        transition: 'all 0.18s cubic-bezier(0.4,0,0.2,1)',
+                        '&:hover': {
+                          background: isDark ? alpha(cfg.color, 0.13) : alpha(cfg.color, 0.08),
+                          borderColor: alpha(cfg.color, 0.65),
+                          transform: 'translateY(-1px)',
+                          boxShadow: isDark
+                            ? `0 6px 20px ${alpha(cfg.color, 0.18)}`
+                            : `0 6px 20px ${alpha(cfg.color, 0.14)}`,
+                        },
+                        '&:active': { transform: 'translateY(0)' },
+                      }}
+                    >
+                      {/* Top row: icon + optional checkmark */}
+                      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                        <Box sx={{
+                          width: 28, height: 28, borderRadius: '8px', flexShrink: 0,
+                          background: alpha(cfg.color, isDark ? 0.2 : 0.13),
+                          border: `1px solid ${alpha(cfg.color, 0.28)}`,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          <Icon sx={{ fontSize: 14, color: cfg.color }} />
+                        </Box>
+                        {isSelected && (
+                          <CheckCircleRoundedIcon sx={{ fontSize: 14, color: cfg.color }} />
+                        )}
+                      </Box>
+
+                      {/* Label — hard-clamped to 2 lines, never causes height growth */}
+                      <Typography sx={{
+                        fontSize: '0.68rem',
+                        fontWeight: isSelected ? 700 : 600,
+                        color: isSelected ? cfg.color : 'text.primary',
+                        lineHeight: 1.3,
+                        width: '100%',
+                        textAlign: 'left',
+                        transition: 'color 0.15s ease',
+                        display: '-webkit-box',
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden',
+                      }}>
+                        {cfg.emoji} {cfg.label}
+                      </Typography>
+                    </Box>
+
+                    {/* Guide tooltip — fixed position, flips above card when near bottom of viewport */}
+                    {isHovered && tooltipAnchor && (
+                      <Box sx={{
+                        position: 'fixed',
+                        top: tooltipAnchor.top,
+                        left: tooltipAnchor.left,
+                        transform: 'translateX(-50%)',
+                        width: 260,
+                        zIndex: 99999,
+                        borderRadius: '14px',
+                        background: isDark ? '#1a2540' : '#ffffff',
+                        border: `1.5px solid ${alpha(cfg.color, 0.5)}`,
+                        boxShadow: isDark
+                          ? `0 20px 50px rgba(0,0,0,0.75), 0 0 0 1px ${alpha(cfg.color, 0.2)}`
+                          : `0 20px 50px rgba(15,23,42,0.2), 0 0 0 1px ${alpha(cfg.color, 0.12)}`,
+                        p: 1.75,
+                        animation: 'guideIn 0.2s cubic-bezier(0.34,1.56,0.64,1)',
+                        '@keyframes guideIn': {
+                          from: { opacity: 0, transform: `translateX(-50%) translateY(${tooltipAnchor.flipUp ? '-6px' : '6px'}) scale(0.95)` },
+                          to:   { opacity: 1, transform: 'translateX(-50%) translateY(0) scale(1)' },
+                        },
+                        // arrow — points down when flipped up, points up when below
+                        '&::before': {
+                          content: '""',
+                          position: 'absolute',
+                          ...(tooltipAnchor.flipUp
+                            ? {
+                                bottom: -7,
+                                top: 'auto',
+                                left: '50%',
+                                transform: 'translateX(-50%) rotate(225deg)',
+                              }
+                            : {
+                                top: -7,
+                                left: '50%',
+                                transform: 'translateX(-50%) rotate(45deg)',
+                              }
+                          ),
+                          width: 12,
+                          height: 12,
+                          background: isDark ? '#1a2540' : '#ffffff',
+                          border: `1.5px solid ${alpha(cfg.color, 0.5)}`,
+                          borderRight: 'none',
+                          borderBottom: 'none',
+                        },
+                      }}>
+                        {/* Guide header */}
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 1 }}>
+                          <Box sx={{
+                            width: 24, height: 24, borderRadius: '7px', flexShrink: 0,
+                            background: alpha(cfg.color, isDark ? 0.22 : 0.14),
+                            border: `1px solid ${alpha(cfg.color, 0.3)}`,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          }}>
+                            <Icon sx={{ fontSize: 13, color: cfg.color }} />
+                          </Box>
+                          <Typography sx={{ fontSize: '0.7rem', fontWeight: 800, color: cfg.color, lineHeight: 1.2 }}>
+                            {cfg.emoji} {cfg.label}
+                          </Typography>
+                        </Box>
+
+                        {/* Guide text */}
+                        <Typography sx={{
+                          fontSize: '0.64rem',
+                          color: isDark ? 'rgba(203,213,225,0.85)' : 'rgba(30,41,59,0.75)',
+                          lineHeight: 1.65,
+                          mb: 1.1,
+                        }}>
+                          {cfg.guide}
+                        </Typography>
+
+                        {/* Example column tags */}
+                        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                          {cfg.exampleColumns.slice(0, 5).map(col => (
+                            <Box key={col} sx={{
+                              px: 0.8, py: 0.3, borderRadius: '6px',
+                              background: alpha(cfg.color, isDark ? 0.18 : 0.1),
+                              border: `1px solid ${alpha(cfg.color, 0.32)}`,
+                            }}>
+                              <Typography sx={{ fontSize: '0.58rem', fontWeight: 600, color: cfg.color, lineHeight: 1.4 }}>
+                                {col}
+                              </Typography>
+                            </Box>
+                          ))}
+                        </Box>
+                      </Box>
+                    )}
+                  </Box>
+                );
+              })}
+            </Box>
+
+            {/* Continue button */}
+            <Box
+              component="button"
+              onClick={() => { if (selectedCategory) setStep('method'); }}
+              disabled={!selectedCategory}
+              sx={{
+                width: '100%',
+                border: 'none',
+                cursor: selectedCategory ? 'pointer' : 'not-allowed',
+                py: 1.15,
+                borderRadius: '12px',
+                fontWeight: 700,
+                fontSize: '0.82rem',
+                letterSpacing: '-0.01em',
+                background: selectedCategory
+                  ? `linear-gradient(135deg, ${CATEGORY_CONFIG[selectedCategory].color} 0%, ${alpha(CATEGORY_CONFIG[selectedCategory].color, 0.72)} 100%)`
+                  : isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)',
+                color: selectedCategory ? '#fff' : isDark ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.22)',
+                transition: 'all 0.2s cubic-bezier(0.4,0,0.2,1)',
+                boxShadow: selectedCategory
+                  ? `0 4px 18px ${alpha(CATEGORY_CONFIG[selectedCategory].color, 0.38)}`
+                  : 'none',
+                '&:hover': {
+                  opacity: selectedCategory ? 0.9 : 1,
+                  transform: selectedCategory ? 'translateY(-1px)' : 'none',
+                  boxShadow: selectedCategory
+                    ? `0 8px 26px ${alpha(CATEGORY_CONFIG[selectedCategory].color, 0.44)}`
+                    : 'none',
+                },
+                '&:active': { transform: 'translateY(0)' },
+              }}
+            >
+              {selectedCategory
+                ? `Continue with ${CATEGORY_CONFIG[selectedCategory].emoji} ${CATEGORY_CONFIG[selectedCategory].label}`
+                : 'Select a category to continue'}
+            </Box>
+          </Box>
+        )}
+
+        {/* ── Step: Method selection ── */}
+        {step === 'method' && (
+          <Box sx={{ p: 2.5, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.25 }}>
+            {methods.map(m => (
+              <Box
+                key={m.id}
+                component="button"
+                onClick={() => setStep(m.id)}
+                sx={{
+                  display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1,
+                  p: 1.75, borderRadius: '14px', cursor: 'pointer', textAlign: 'left',
+                  background: isDark ? alpha(m.color, 0.07) : alpha(m.color, 0.05),
+                  border: `1.5px solid ${alpha(m.color, isDark ? 0.18 : 0.13)}`,
+                  transition: 'all 0.2s cubic-bezier(0.4,0,0.2,1)',
+                  '&:hover': {
+                    transform: 'translateY(-2px)',
+                    background: isDark ? alpha(m.color, 0.13) : alpha(m.color, 0.09),
+                    borderColor: alpha(m.color, 0.7),
+                    boxShadow: isDark ? `0 8px 28px ${alpha(m.color, 0.2)}` : `0 8px 28px ${alpha(m.color, 0.15)}`,
+                  },
+                  '&:active': { transform: 'translateY(0)', transition: 'transform 0.08s ease' },
+                }}
+              >
+                <Box sx={{
+                  width: 36, height: 36, borderRadius: '10px',
+                  background: alpha(m.color, 0.15),
+                  border: `1px solid ${alpha(m.color, 0.25)}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  <m.icon sx={{ fontSize: 18, color: m.color }} />
                 </Box>
                 <Box>
-                  <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.primary' }}>{opt.label}</Typography>
-                  <Typography sx={{ fontSize: '0.63rem', color: 'text.secondary', mt: 0.15, lineHeight: 1.4 }}>{opt.desc}</Typography>
+                  <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.primary', lineHeight: 1.2 }}>{m.label}</Typography>
+                  <Typography sx={{ fontSize: '0.65rem', color: 'text.secondary', mt: 0.3, lineHeight: 1.4 }}>{m.desc}</Typography>
                 </Box>
               </Box>
             ))}
           </Box>
         )}
 
-        {/* CSV step */}
-        {step === 'csv' && (
-          <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-            <Box sx={{
-              border: `2px dashed ${isDark ? 'rgba(52,211,153,0.3)' : 'rgba(52,211,153,0.4)'}`,
-              borderRadius: '12px', p: 3, textAlign: 'center', cursor: 'pointer',
-              background: isDark ? 'rgba(52,211,153,0.05)' : 'rgba(52,211,153,0.03)',
-              '&:hover': { background: isDark ? 'rgba(52,211,153,0.09)' : 'rgba(52,211,153,0.06)', borderColor: '#34d399' },
-              transition: 'all 0.18s ease',
-            }}>
-              <UploadFileRoundedIcon sx={{ fontSize: 30, color: '#34d399', mb: 0.75 }} />
-              <Typography sx={{ fontSize: '0.82rem', fontWeight: 700, color: 'text.primary', mb: 0.3 }}>Drop CSV file here</Typography>
-              <Typography sx={{ fontSize: '0.67rem', color: 'text.secondary' }}>or click to browse · Max 10MB</Typography>
+        {/* ── Step: CSV upload ── */}
+        {step === 'csv' && selectedCategory && (
+          <Box sx={{ p: 2.5, display: 'flex', flexDirection: 'column', gap: 1.75 }}>
+            <CategoryBadge cat={selectedCategory} isDark={isDark} theme={theme} />
+            <Box
+              component="label"
+              sx={{
+                border: `2px dashed ${csvFile ? '#34d399' : isDark ? 'rgba(52,211,153,0.35)' : 'rgba(52,211,153,0.45)'}`,
+                borderRadius: '14px', p: 3.5, textAlign: 'center', cursor: 'pointer',
+                background: isDark ? 'rgba(52,211,153,0.04)' : 'rgba(52,211,153,0.03)',
+                transition: 'all 0.2s ease',
+                '&:hover': { background: isDark ? 'rgba(52,211,153,0.09)' : 'rgba(52,211,153,0.07)', borderColor: '#34d399' },
+              }}
+            >
+              <input type="file" accept=".csv,.xlsx,.xls" hidden onChange={e => { const f = e.target.files?.[0]; if (f) { setCsvFile(f); setSourceName(prev => prev || f.name.replace(/\.[^.]+$/, '')); } }} />
+              <UploadFileRoundedIcon sx={{ fontSize: 32, color: '#34d399', mb: 1 }} />
+              <Typography sx={{ fontSize: '0.85rem', fontWeight: 700, color: 'text.primary', mb: 0.4 }}>
+                {csvFile ? csvFile.name : 'Drop CSV or Excel file here'}
+              </Typography>
+              <Typography sx={{ fontSize: '0.68rem', color: 'text.secondary' }}>
+                {csvFile ? `${(csvFile.size / 1024).toFixed(1)} KB` : 'or click to browse · Max 10 MB'}
+              </Typography>
             </Box>
-            <Box component="button" sx={{ width: '100%', border: 'none', cursor: 'pointer', py: 0.9, borderRadius: '10px', background: 'linear-gradient(135deg, #34d399, #22d3ee)', color: '#fff', fontSize: '0.78rem', fontWeight: 700, transition: 'opacity 0.15s ease', '&:hover': { opacity: 0.88 } }}>
-              Upload & Import
+            <Box>
+              <Typography sx={{ fontSize: '0.68rem', fontWeight: 600, color: 'text.secondary', mb: 0.6 }}>Source Name</Typography>
+              <InputBase value={sourceName} onChange={e => setSourceName(e.target.value)} placeholder="e.g. Product Catalog Q4" sx={inputSx} fullWidth />
+            </Box>
+            <Box sx={{ px: 1.5, py: 1.1, borderRadius: '10px', background: isDark ? 'rgba(52,211,153,0.06)' : 'rgba(52,211,153,0.04)', border: `1px solid ${alpha('#34d399', 0.2)}` }}>
+              <Typography sx={{ fontSize: '0.63rem', color: isDark ? '#34d399' : '#059669', fontWeight: 600, mb: 0.35 }}>Suggested columns for this category</Typography>
+              <Typography sx={{ fontSize: '0.61rem', color: 'text.secondary', lineHeight: 1.55 }}>
+                {CATEGORY_CONFIG[selectedCategory].exampleColumns.join(' · ')}
+              </Typography>
+            </Box>
+            <Box
+              component="button"
+              disabled={!csvFile || isSubmitting}
+              onClick={() => {
+                if (!csvFile || !selectedCategory) return;
+                uploadFile.mutate(
+                  { file: csvFile, sourceName: sourceName || csvFile.name, category: selectedCategory },
+                  { onSuccess: handleClose },
+                );
+              }}
+              sx={{ width: '100%', border: 'none', cursor: csvFile ? 'pointer' : 'not-allowed', py: 1.1, borderRadius: '12px', background: csvFile ? 'linear-gradient(135deg, #34d399, #22d3ee)' : isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', color: csvFile ? '#fff' : 'text.disabled', fontSize: '0.82rem', fontWeight: 700, transition: 'all 0.18s ease', boxShadow: csvFile ? '0 4px 16px rgba(52,211,153,0.3)' : 'none', '&:hover': { opacity: csvFile ? 0.9 : 1 }, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}
+            >
+              {isSubmitting ? <CircularProgress size={14} sx={{ color: '#fff' }} /> : null}
+              {isSubmitting ? 'Uploading…' : 'Upload & Import'}
             </Box>
           </Box>
         )}
 
-        {/* Manual entry step */}
-        {step === 'manual' && (
-          <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1.1 }}>
+        {/* ── Step: Manual entry ── */}
+        {step === 'manual' && selectedCategory && (
+          <Box sx={{ p: 2.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+            <CategoryBadge cat={selectedCategory} isDark={isDark} theme={theme} />
             <Box>
-              <Typography sx={{ fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', mb: 0.5 }}>Data Category</Typography>
-              <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 0.5 }}>
-                {categories.slice(0, 8).map(cat => {
-                  const cfg = CATEGORY_CONFIG[cat];
-                  const Icon = CATEGORY_ICONS[cat];
-                  return (
-                    <Box key={cat} component="button" sx={{
-                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.4,
-                      p: 0.75, borderRadius: '8px', cursor: 'pointer', border: 'none',
-                      background: isDark ? alpha(cfg.color, 0.08) : alpha(cfg.color, 0.06),
-                      border: `1px solid ${alpha(cfg.color, 0.2)}`,
-                      transition: 'all 0.15s ease',
-                      '&:hover': { background: isDark ? alpha(cfg.color, 0.15) : alpha(cfg.color, 0.1) },
-                    }}>
-                      <Icon sx={{ fontSize: 14, color: cfg.color }} />
-                      <Typography sx={{ fontSize: '0.52rem', fontWeight: 600, color: cfg.color, textAlign: 'center', lineHeight: 1.2 }}>{cfg.label}</Typography>
-                    </Box>
-                  );
-                })}
-              </Box>
+              <Typography sx={{ fontSize: '0.68rem', fontWeight: 600, color: 'text.secondary', mb: 0.6 }}>Entry Title</Typography>
+              <InputBase value={manualTitle} onChange={e => setManualTitle(e.target.value)} placeholder={`e.g. ${CATEGORY_CONFIG[selectedCategory].exampleColumns[0] ?? 'Entry name'}...`} sx={inputSx} fullWidth />
             </Box>
             <Box>
-              <Typography sx={{ fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', mb: 0.5 }}>Entry Title</Typography>
-              <InputBase placeholder="e.g. Pro Plan Pricing, Business Hours..." sx={inputSx} fullWidth />
-            </Box>
-            <Box>
-              <Typography sx={{ fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', mb: 0.5 }}>Data Content</Typography>
+              <Typography sx={{ fontSize: '0.68rem', fontWeight: 600, color: 'text.secondary', mb: 0.6 }}>Data Content</Typography>
               <InputBase
-                placeholder="Describe the data in detail — the more complete, the better AI output..."
-                multiline rows={3}
+                value={manualContent}
+                onChange={e => setManualContent(e.target.value)}
+                placeholder={`Describe the data — e.g. ${CATEGORY_CONFIG[selectedCategory].exampleEntry}`}
+                multiline rows={4}
                 sx={{ ...inputSx, alignItems: 'flex-start', '& textarea': { resize: 'none' } }}
                 fullWidth
               />
             </Box>
-            <Box component="button" sx={{ width: '100%', border: 'none', cursor: 'pointer', py: 0.9, borderRadius: '10px', background: 'linear-gradient(135deg, #c084fc, #818cf8)', color: '#fff', fontSize: '0.78rem', fontWeight: 700, mt: 0.25, transition: 'opacity 0.15s ease', '&:hover': { opacity: 0.88 } }}>
-              Save Entry
-            </Box>
-          </Box>
-        )}
-
-        {/* Google Sheets step */}
-        {step === 'sheets' && (
-          <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1.25 }}>
-            <Box>
-              <Typography sx={{ fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', mb: 0.5 }}>Google Sheets URL</Typography>
-              <InputBase placeholder="https://docs.google.com/spreadsheets/d/..." sx={inputSx} fullWidth />
-            </Box>
-            <Box>
-              <Typography sx={{ fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', mb: 0.5 }}>Sheet Name (optional)</Typography>
-              <InputBase placeholder="Sheet1" sx={inputSx} fullWidth />
-            </Box>
-            <Box sx={{ px: 1.25, py: 1, borderRadius: '9px', background: isDark ? 'rgba(96,165,250,0.07)' : 'rgba(96,165,250,0.05)', border: `1px solid ${alpha('#60a5fa', 0.2)}` }}>
-              <Typography sx={{ fontSize: '0.65rem', color: isDark ? '#60a5fa' : '#0891b2', fontWeight: 500, lineHeight: 1.5 }}>
-                Share the sheet with "Anyone with the link" before connecting.
+            <Box sx={{ px: 1.5, py: 1, borderRadius: '10px', background: isDark ? alpha(CATEGORY_CONFIG[selectedCategory].color, 0.06) : alpha(CATEGORY_CONFIG[selectedCategory].color, 0.04), border: `1px solid ${alpha(CATEGORY_CONFIG[selectedCategory].color, 0.2)}` }}>
+              <Typography sx={{ fontSize: '0.63rem', color: CATEGORY_CONFIG[selectedCategory].color, fontWeight: 600, mb: 0.3 }}>Suggested fields</Typography>
+              <Typography sx={{ fontSize: '0.61rem', color: 'text.secondary', lineHeight: 1.55 }}>
+                {CATEGORY_CONFIG[selectedCategory].exampleColumns.join(' · ')}
               </Typography>
             </Box>
-            <Box component="button" sx={{ width: '100%', border: 'none', cursor: 'pointer', py: 0.9, borderRadius: '10px', background: 'linear-gradient(135deg, #60a5fa, #22d3ee)', color: '#fff', fontSize: '0.78rem', fontWeight: 700, transition: 'opacity 0.15s ease', '&:hover': { opacity: 0.88 } }}>
-              Connect Sheet
+            <Box
+              component="button"
+              disabled={!manualTitle.trim() || !manualContent.trim() || isSubmitting}
+              onClick={() => {
+                if (!manualTitle.trim() || !selectedCategory) return;
+                createManual.mutate(
+                  {
+                    title:    manualTitle.trim(),
+                    category: selectedCategory,
+                    fields:   [{ key: 'content', label: 'Content', value: manualContent.trim() }],
+                  },
+                  { onSuccess: handleClose },
+                );
+              }}
+              sx={{ width: '100%', border: 'none', cursor: manualTitle.trim() ? 'pointer' : 'not-allowed', py: 1.1, borderRadius: '12px', background: manualTitle.trim() ? 'linear-gradient(135deg, #c084fc, #818cf8)' : isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', color: manualTitle.trim() ? '#fff' : 'text.disabled', fontSize: '0.82rem', fontWeight: 700, transition: 'all 0.18s ease', boxShadow: manualTitle.trim() ? '0 4px 16px rgba(192,132,252,0.3)' : 'none', '&:hover': { opacity: manualTitle.trim() ? 0.9 : 1 }, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}
+            >
+              {isSubmitting ? <CircularProgress size={14} sx={{ color: '#fff' }} /> : null}
+              {isSubmitting ? 'Saving…' : 'Save Entry'}
             </Box>
           </Box>
         )}
 
-        {/* API step */}
-        {step === 'api' && (
-          <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+        {/* ── Step: Google Sheets ── */}
+        {step === 'sheets' && selectedCategory && (
+          <Box sx={{ p: 2.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+            <CategoryBadge cat={selectedCategory} isDark={isDark} theme={theme} />
             <Box>
-              <Typography sx={{ fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', mb: 0.5 }}>Source Name</Typography>
-              <InputBase placeholder="e.g. Pricing API" sx={inputSx} fullWidth />
+              <Typography sx={{ fontSize: '0.68rem', fontWeight: 600, color: 'text.secondary', mb: 0.6 }}>Source Name</Typography>
+              <InputBase value={sheetSourceName} onChange={e => setSheetSourceName(e.target.value)} placeholder="e.g. Product Sheet" sx={inputSx} fullWidth />
             </Box>
             <Box>
-              <Typography sx={{ fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', mb: 0.5 }}>Endpoint URL</Typography>
+              <Typography sx={{ fontSize: '0.68rem', fontWeight: 600, color: 'text.secondary', mb: 0.6 }}>Google Sheets URL</Typography>
+              <InputBase value={sheetUrl} onChange={e => setSheetUrl(e.target.value)} placeholder="https://docs.google.com/spreadsheets/d/..." sx={inputSx} fullWidth />
+            </Box>
+            <Box>
+              <Typography sx={{ fontSize: '0.68rem', fontWeight: 600, color: 'text.secondary', mb: 0.6 }}>Sheet Name (optional)</Typography>
+              <InputBase value={sheetName} onChange={e => setSheetName(e.target.value)} placeholder="Sheet1" sx={inputSx} fullWidth />
+            </Box>
+            <Box sx={{ px: 1.5, py: 1, borderRadius: '10px', background: isDark ? 'rgba(96,165,250,0.07)' : 'rgba(96,165,250,0.05)', border: `1px solid ${alpha('#60a5fa', 0.2)}` }}>
+              <Typography sx={{ fontSize: '0.63rem', color: isDark ? '#60a5fa' : '#0891b2', fontWeight: 600, mb: 0.3 }}>Suggested columns for this category</Typography>
+              <Typography sx={{ fontSize: '0.61rem', color: 'text.secondary', lineHeight: 1.55 }}>
+                {CATEGORY_CONFIG[selectedCategory].exampleColumns.join(' · ')}
+              </Typography>
+            </Box>
+            <Box
+              component="button"
+              disabled={!sheetUrl.trim() || !sheetSourceName.trim() || isSubmitting}
+              onClick={() => {
+                if (!sheetUrl.trim() || !sheetSourceName.trim() || !selectedCategory) return;
+                connectSheet.mutate(
+                  { name: sheetSourceName.trim(), sheet_url: sheetUrl.trim(), sheet_name: sheetName.trim() || undefined, category: selectedCategory },
+                  { onSuccess: handleClose },
+                );
+              }}
+              sx={{ width: '100%', border: 'none', cursor: sheetUrl.trim() ? 'pointer' : 'not-allowed', py: 1.1, borderRadius: '12px', background: sheetUrl.trim() ? 'linear-gradient(135deg, #60a5fa, #22d3ee)' : isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', color: sheetUrl.trim() ? '#fff' : 'text.disabled', fontSize: '0.82rem', fontWeight: 700, transition: 'all 0.18s ease', boxShadow: sheetUrl.trim() ? '0 4px 16px rgba(96,165,250,0.3)' : 'none', '&:hover': { opacity: sheetUrl.trim() ? 0.9 : 1 }, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}
+            >
+              {isSubmitting ? <CircularProgress size={14} sx={{ color: '#fff' }} /> : null}
+              {isSubmitting ? 'Connecting…' : 'Connect Sheet'}
+            </Box>
+          </Box>
+        )}
+
+        {/* ── Step: API / Webhook ── */}
+        {step === 'api' && selectedCategory && (
+          <Box sx={{ p: 2.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+            <CategoryBadge cat={selectedCategory} isDark={isDark} theme={theme} />
+            <Box>
+              <Typography sx={{ fontSize: '0.68rem', fontWeight: 600, color: 'text.secondary', mb: 0.6 }}>Source Name</Typography>
+              <InputBase placeholder={`e.g. ${CATEGORY_CONFIG[selectedCategory].label} API`} sx={inputSx} fullWidth />
+            </Box>
+            <Box>
+              <Typography sx={{ fontSize: '0.68rem', fontWeight: 600, color: 'text.secondary', mb: 0.6 }}>Endpoint URL</Typography>
               <InputBase placeholder="https://api.yoursource.com/data" sx={inputSx} fullWidth />
             </Box>
-            <Box sx={{ px: 1.25, py: 1, borderRadius: '9px', background: isDark ? 'rgba(34,211,238,0.07)' : 'rgba(34,211,238,0.05)', border: `1px solid ${alpha('#22d3ee', 0.2)}` }}>
-              <Typography sx={{ fontSize: '0.65rem', color: isDark ? '#22d3ee' : '#0891b2', fontWeight: 500, lineHeight: 1.5 }}>
-                We'll poll this endpoint every 15 minutes. Expected: JSON object or array.
+            <Box sx={{ px: 1.5, py: 1, borderRadius: '10px', background: isDark ? 'rgba(34,211,238,0.07)' : 'rgba(34,211,238,0.05)', border: `1px solid ${alpha('#22d3ee', 0.2)}` }}>
+              <Typography sx={{ fontSize: '0.68rem', color: isDark ? '#22d3ee' : '#0891b2', fontWeight: 500, lineHeight: 1.55 }}>
+                We will poll this endpoint every 15 minutes. Expected: JSON object or array.
               </Typography>
             </Box>
-            <Box component="button" sx={{ width: '100%', border: 'none', cursor: 'pointer', py: 0.9, borderRadius: '10px', background: 'linear-gradient(135deg, #22d3ee, #818cf8)', color: '#fff', fontSize: '0.78rem', fontWeight: 700, transition: 'opacity 0.15s ease', '&:hover': { opacity: 0.88 } }}>
+            <Box component="button" sx={{ width: '100%', border: 'none', cursor: 'pointer', py: 1.1, borderRadius: '12px', background: 'linear-gradient(135deg, #22d3ee, #818cf8)', color: '#fff', fontSize: '0.82rem', fontWeight: 700, transition: 'all 0.18s ease', boxShadow: '0 4px 16px rgba(34,211,238,0.3)', '&:hover': { opacity: 0.9, transform: 'translateY(-1px)' } }}>
               Connect API
             </Box>
           </Box>
@@ -934,7 +1365,27 @@ function AddDataModal({ open, onClose, isDark, theme }: {
   );
 }
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+
+// ── Category badge shown at top of each form step ─────────────────────────────
+function CategoryBadge({ cat, isDark, theme }: { cat: DataCategory; isDark: boolean; theme: Theme }) {
+  const cfg = CATEGORY_CONFIG[cat];
+  const Icon = CATEGORY_ICONS[cat];
+  return (
+    <Box sx={{
+      display: 'inline-flex', alignItems: 'center', gap: 0.75,
+      px: 1.25, py: 0.6, borderRadius: '10px',
+      background: isDark ? alpha(cfg.color, 0.14) : alpha(cfg.color, 0.09),
+      border: `1px solid ${alpha(cfg.color, 0.3)}`,
+      alignSelf: 'flex-start',
+    }}>
+      <Icon sx={{ fontSize: 14, color: cfg.color }} />
+      <Typography sx={{ fontSize: '0.7rem', fontWeight: 700, color: cfg.color, letterSpacing: '-0.01em' }}>
+        {cfg.emoji} {cfg.label}
+      </Typography>
+    </Box>
+  );
+}
+
 export default function MyDataPage() {
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
@@ -944,35 +1395,40 @@ export default function MyDataPage() {
   const [search, setSearch] = useState('');
   const [selectedEntry, setSelectedEntry] = useState<DataEntry | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [toast, setToast] = useState<{ msg: string; severity: 'success' | 'error' } | null>(null);
+
+  // ── Real API data ──────────────────────────────────────────────────────────
+  const { data: statsData }   = useDataStats();
+  const { data: entriesData, isLoading: entriesLoading } = useDataEntriesByCategory(
+    activeCategory === 'sources' ? 'all' : activeCategory,
+  );
+
+  const apiEntries = entriesData?.entries ?? [];
 
   const filteredEntries = useMemo(() => {
-    return DATA_ENTRIES.filter(e => {
-      if (activeCategory !== 'all' && activeCategory !== 'sources' && e.category !== activeCategory) return false;
-      if (search) {
-        const q = search.toLowerCase();
-        return (
-          e.title.toLowerCase().includes(q) ||
-          e.fields.some(f => f.value.toLowerCase().includes(q) || f.label.toLowerCase().includes(q))
-        );
-      }
-      return true;
-    });
-  }, [activeCategory, search]);
+    if (!search) return apiEntries;
+    const q = search.toLowerCase();
+    return apiEntries.filter(e =>
+      e.title.toLowerCase().includes(q) ||
+      Object.values(e.structured_data).some(v => String(v).toLowerCase().includes(q)),
+    );
+  }, [apiEntries, search]);
 
   // Group by category for "all" view
   const groupedEntries = useMemo(() => {
     const map = new Map<DataCategory, DataEntry[]>();
     filteredEntries.forEach(e => {
-      if (!map.has(e.category)) map.set(e.category, []);
-      map.get(e.category)!.push(e);
+      const cat = e.category as DataCategory;
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(e);
     });
     return map;
   }, [filteredEntries]);
 
-  const totalEntries = DATA_ENTRIES.length;
-  const totalSources = DATA_SOURCES.length;
-  const avgQuality = Math.round(DATA_ENTRIES.reduce((s, e) => s + e.qualityScore, 0) / DATA_ENTRIES.length);
-  const aiReady = DATA_ENTRIES.filter(e => e.qualityScore >= 75).length;
+  const totalEntries = statsData?.total_entries ?? 0;
+  const totalSources = statsData?.total_sources ?? 0;
+  const avgQuality   = statsData?.avg_quality ?? 0;
+  const aiReady      = statsData?.ai_ready_entries ?? 0;
 
   return (
     <Box sx={{
@@ -1070,13 +1526,14 @@ export default function MyDataPage() {
         {/* Left nav — hidden on mobile */}
         <Box sx={{ display: { xs: 'none', md: 'flex' }, flexDirection: 'column', overflow: 'hidden' }}>
           <LeftNav
-            entries={DATA_ENTRIES}
+            entries={apiEntries}
             activeCategory={activeCategory}
             onSelect={setActiveCategory}
             isDark={isDark}
             theme={theme}
             search={search}
             onSearch={setSearch}
+            sourcesCount={totalSources}
           />
         </Box>
 
@@ -1100,8 +1557,8 @@ export default function MyDataPage() {
 
           {/* AI insight banner — shown when there are low quality entries */}
           {(() => {
-            const lowCount = DATA_ENTRIES.filter(e => e.qualityScore < 75).length;
-            const missingCount = DATA_ENTRIES.filter(e => e.missingFields.length > 0).length;
+            const lowCount     = apiEntries.filter(e => e.quality_score < 75).length;
+            const missingCount = apiEntries.filter(e => (e.missing_fields?.length ?? 0) > 0).length;
             if (lowCount === 0 && missingCount === 0) return null;
             return (
               <Box sx={{
@@ -1182,6 +1639,18 @@ export default function MyDataPage() {
 
       {/* Add data modal */}
       <AddDataModal open={modalOpen} onClose={() => setModalOpen(false)} isDark={isDark} theme={theme} />
+
+      {/* Toast notifications */}
+      <Snackbar
+        open={!!toast}
+        autoHideDuration={4000}
+        onClose={() => setToast(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert severity={toast?.severity ?? 'success'} onClose={() => setToast(null)} sx={{ fontSize: '0.78rem' }}>
+          {toast?.msg}
+        </Alert>
+      </Snackbar>
     </Box>
   );
 }

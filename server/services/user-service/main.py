@@ -18,8 +18,8 @@ from shared.config import get_config
 from shared.logger import setup_logging, set_request_id, clear_request_id
 from shared.database import init_database, close_database, check_database_health
 from shared.cache import init_redis, close_redis, check_redis_health
-from api import settings_router, profile_router
-from models import User, UserSettings  # Import models to register with SQLAlchemy
+from api import settings_router, profile_router, data_ingestion_router
+from models import User, UserSettings, UserDataSource, UserDataEntry, UserDataVersion
 
 logger = setup_logging("user-service")
 config = get_config()
@@ -33,6 +33,16 @@ async def lifespan(app: FastAPI):
     logger.info("User Service starting up...")
     await init_database()
     await init_redis()
+
+    # Ensure Qdrant user_data_entries collection exists
+    try:
+        from services.ingestion.embedding_service import ensure_collection
+        import asyncio
+        await asyncio.to_thread(ensure_collection)
+        logger.info("Qdrant user_data_entries collection ready")
+    except Exception as e:
+        logger.warning(f"Qdrant collection init failed (non-fatal): {e}")
+
     logger.info("User Service started successfully")
     yield
     logger.info("User Service shutting down...")
@@ -59,6 +69,7 @@ app.add_middleware(
 # Include routers
 app.include_router(settings_router)
 app.include_router(profile_router)
+app.include_router(data_ingestion_router)
 
 
 @app.middleware("http")

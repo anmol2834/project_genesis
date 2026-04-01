@@ -5,7 +5,6 @@ import { Box, Typography, useTheme, alpha } from '@mui/material';
 import ConversationList from './ConversationList';
 import ChatView from './ChatView';
 import { useInboxThreads } from '@/hooks/queries/useInboxThreads';
-import { type InboxThread } from '@/services/endpoints/emailInbox';
 import { threadToConversation } from './inboxAdapter';
 import type { Conversation } from './inboxData';
 
@@ -13,7 +12,7 @@ import type { Conversation } from './inboxData';
 const LoadingSkeleton = memo(function LoadingSkeleton({ isDark }: { isDark: boolean }) {
   return (
     <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-      {[1, 2, 3].map((i) => (
+      {[1, 2, 3, 4, 5].map((i) => (
         <Box key={i} sx={{ display: 'flex', gap: 1.25, alignItems: 'flex-start' }}>
           <Box sx={{
             width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
@@ -80,13 +79,22 @@ export default function InboxView() {
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
 
-  const { data: threads, isLoading, isError } = useInboxThreads();
+  const {
+    data,
+    isLoading,
+    isError,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
+  } = useInboxThreads();
 
-  // Convert real threads to the Conversation shape the existing UI expects
-  const conversations = useMemo<Conversation[]>(
-    () => (threads ?? []).map(threadToConversation),
-    [threads]
-  );
+  // Flatten all pages into a single array of Conversation objects
+  const conversations = useMemo<Conversation[]>(() => {
+    if (!data) return [];
+    return data.pages
+      .flatMap((page) => page.threads)
+      .map(threadToConversation);
+  }, [data]);
 
   const [activeId, setActiveId] = useState<string | null>(null);
   const [mobileShowChat, setMobileShowChat] = useState(false);
@@ -148,6 +156,9 @@ export default function InboxView() {
             conversations={conversations}
             activeId={active?.id ?? ''}
             onSelect={handleSelect}
+            hasNextPage={hasNextPage}
+            isFetchingNextPage={isFetchingNextPage}
+            fetchNextPage={fetchNextPage}
           />
         )}
       </Box>

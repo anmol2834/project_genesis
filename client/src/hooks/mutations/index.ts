@@ -10,4 +10,4 @@ export * from './useBillingMutations';
 export * from './useSettingsMutations';
 export * from './useResearchMutations';
 export * from './useProfileMutations';
-export * from './useEmailMutations';
+export * from './useDataMutations';

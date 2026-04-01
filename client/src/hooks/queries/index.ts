@@ -9,3 +9,4 @@ export * from './useBilling';
 export * from './useSettings';
 export * from './useResearch';
 export * from './useProfile';
+export * from './useData';
