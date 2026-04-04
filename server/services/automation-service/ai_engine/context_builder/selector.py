@@ -20,6 +20,7 @@ The selector detects this and triggers full intent-aware retrieval internally.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import List, Optional
 
@@ -29,6 +30,7 @@ from .schema import (
 from .retriever import VectorRetriever
 from .ranker import rank_blocks, deduplicate_blocks, build_recency_map
 from .tokenizer import enforce_group_budgets, blocks_to_text, estimate_tokens
+from .hybrid_search_engine import get_hybrid_search_engine, NO_CONTEXT
 from ..preprocess.processor import PreprocessedInput
 from ..schemas.intent_schema import IntentResult, IntentType
 
@@ -44,6 +46,7 @@ _CHUNK_TYPE_PRIORITY = {
     "tone":          3,
     "use_case":      4,
     "audience":      5,
+    "user_data":     2,   # User business data — same priority as business_core
 }
 
 # Max conversation messages to include (last N incoming + last N outgoing)
@@ -94,12 +97,94 @@ class ContextSelector:
         if hits:
             knowledge_blocks = self._convert_hits(hits)
         elif intent_result is not None:
-            knowledge_blocks = await self._retriever.retrieve_for_intent(
-                user_id=preprocessed.user_id,
-                message_text=preprocessed.clean_incoming_content,
-                intent_result=intent_result,
-                limit=6,
-            )
+            # Intents that never need product/pricing data — skip hybrid search
+            _NO_HYBRID_INTENTS = {
+                IntentType.REPLY, IntentType.SPAM, IntentType.PROMO,
+                IntentType.UNSUBSCRIBE, IntentType.OUT_OF_OFFICE, IntentType.UNKNOWN,
+            }
+            run_hybrid = intent_result.intent not in _NO_HYBRID_INTENTS
+
+            intent_str = intent_result.intent.value if intent_result else None
+
+            if run_hybrid:
+                # Extract last AI reply for entity memory
+                last_ai_reply = ""
+                if preprocessed.clean_history:
+                    for msg in reversed(preprocessed.clean_history):
+                        if msg.direction == "outgoing" and msg.clean_content.strip():
+                            last_ai_reply = msg.clean_content.strip()[:300]
+                            break
+
+                # Run business_context retrieval AND hybrid user_data search in parallel
+                business_blocks_task = self._retriever.retrieve_for_intent(
+                    user_id=preprocessed.user_id,
+                    message_text=preprocessed.clean_incoming_content,
+                    intent_result=intent_result,
+                    limit=6,
+                )
+                hybrid_task = get_hybrid_search_engine().search(
+                    user_id=preprocessed.user_id,
+                    raw_query=preprocessed.clean_incoming_content,
+                    intent=intent_str,
+                    top_k=3,
+                    clean_history=preprocessed.clean_history,
+                    last_ai_reply=last_ai_reply,
+                )
+                business_blocks, hybrid_result = await asyncio.gather(
+                    business_blocks_task,
+                    hybrid_task,
+                    return_exceptions=True,
+                )
+
+                # Unpack tuple return (context_string, active_entity)
+                if isinstance(hybrid_result, Exception):
+                    hybrid_context = NO_CONTEXT
+                    active_entity  = None
+                elif isinstance(hybrid_result, tuple):
+                    hybrid_context, active_entity = hybrid_result
+                else:
+                    # Fallback: old string return (backward compat)
+                    hybrid_context = hybrid_result if hybrid_result else NO_CONTEXT
+                    active_entity  = None
+            else:
+                # Skip hybrid search — only fetch business profile context
+                business_blocks = await self._retriever.retrieve_for_intent(
+                    user_id=preprocessed.user_id,
+                    message_text=preprocessed.clean_incoming_content,
+                    intent_result=intent_result,
+                    limit=6,
+                )
+                hybrid_context = NO_CONTEXT
+                active_entity  = None
+                logger.info(
+                    "HybridSearch: skipped for intent=%s | user=%s",
+                    intent_str, preprocessed.user_id[:8],
+                )
+
+            # Handle exceptions gracefully — never block the pipeline
+            if isinstance(business_blocks, Exception):
+                logger.warning("Business context retrieval failed: %s", business_blocks)
+                business_blocks = []
+
+            knowledge_blocks = list(business_blocks)
+
+            # Inject hybrid search result ONLY when it contains relevant data
+            if hybrid_context and hybrid_context != NO_CONTEXT:
+                knowledge_blocks.append(ContextBlock(
+                    content=hybrid_context,
+                    score=0.92,
+                    source=ContextSource.QDRANT,
+                    chunk_type="user_data",
+                ))
+                logger.info(
+                    "HybridSearch injected %d chars of user data context | user=%s entity=%r",
+                    len(hybrid_context), preprocessed.user_id[:8], active_entity,
+                )
+                print(f"[CONTEXT] HybridSearch: injected user_data block ({len(hybrid_context)} chars) entity={active_entity!r}")
+            else:
+                logger.info("HybridSearch: no relevant user data | user=%s intent=%s entity=%r",
+                            preprocessed.user_id[:8], intent_str, active_entity)
+                print(f"[CONTEXT] HybridSearch: NO_CONTEXT for user={preprocessed.user_id[:8]}")
 
         # ── CRITICAL: Log context health ──────────────────────────────────
         found_types = {b.chunk_type for b in knowledge_blocks}
@@ -221,7 +306,7 @@ class ContextSelector:
         ranked = rank_blocks(blocks, recency_map)
 
         # Filter: keep mandatory chunk types always, filter others by threshold
-        mandatory = {"instruction", "business_core", "tone", "use_case", "audience"}
+        mandatory = {"instruction", "business_core", "tone", "use_case", "audience", "user_data"}
         result = [
             b for b in ranked
             if b.chunk_type in mandatory or b.score >= _SCORE_THRESHOLD
@@ -293,6 +378,17 @@ class ContextSelector:
         tone_guidance        = knowledge_by_type.get("tone", "")
         use_case_context     = knowledge_by_type.get("use_case", "")
 
+        # User business data (products, pricing, contacts, offers) from hybrid search
+        user_data_context = knowledge_by_type.get("user_data", "")
+
+        # Append user_data to business_core so the prompt compiler sees it
+        # without requiring any changes to the prompt compiler interface
+        if user_data_context:
+            if business_core:
+                business_core = business_core + "\n\n" + user_data_context
+            else:
+                business_core = user_data_context
+
         # Conversation summary from intent blocks
         summary_blocks = [b for b in result.intent_blocks if b.chunk_type == "summary"]
         conversation_summary = summary_blocks[0].content if summary_blocks else preprocessed.message_summary or ""
@@ -304,38 +400,44 @@ class ContextSelector:
         total_tokens = result.tokens_estimate
 
         # ── Data availability flags ───────────────────────────────────────
-        # Scan all retrieved business context to determine what data exists.
-        # These flags are passed to the LLM so it knows what NOT to invent.
-        all_biz_text = " ".join([
-            business_instruction, business_core, use_case_context
-        ]).lower()
+        # CRITICAL: flags are based ONLY on what was actually injected into context.
+        # user_data_context is only present when hybrid search found relevant results.
+        # Scanning business_instruction/business_core for product keywords is WRONG
+        # because those chunks describe the business profile, not actual product data.
 
         import re as _re
-        # Products: look for product-related keywords or explicit product mentions
-        has_products = bool(_re.search(
-            r"\b(product|item|package|plan|offering|solution|tool|software|app|platform)\b",
-            all_biz_text
+
+        # has_products/has_pricing/has_services: TRUE only when user_data was injected
+        # (user_data comes from hybrid search on user_data_entries collection)
+        has_user_data = bool(user_data_context.strip())
+
+        # Universal product detection — any entry title or item name present
+        # Looks for: "Relevant ... Data:" header, "- <Title>" lines, or any named item
+        has_products = has_user_data and bool(_re.search(
+            r"(relevant\s+\w+|^\s*-\s+\w)",
+            user_data_context.lower(),
+            _re.MULTILINE,
         ))
-        # Services: require explicit service LIST indicators, not just generic words.
-        # "support" in a business description does NOT mean a services list exists.
-        # We need patterns like "services: X, Y" or "we offer X" or "our services include"
+
+        # Universal pricing detection — any currency symbol or price keyword
+        has_pricing = has_user_data and bool(_re.search(
+            r"(₹|€|£|\$|price|pricing|cost|fee|rate|per\s+month|per\s+year|"
+            r"\d+\s*inr|\d+\s*usd|\d+\s*eur|\bfree\b|\bpaid\b)",
+            user_data_context.lower(),
+        ))
+
+        # Contact detection — phone/email in user_data
+        has_contact = has_user_data and bool(_re.search(
+            r"(\+?\d[\d\s\-]{7,}|[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}|"
+            r"phone|email|contact|helpline|whatsapp)",
+            user_data_context.lower(),
+        ))
+
+        # Services: from explicit service descriptions in business_instruction
         has_services = bool(_re.search(
-            r"(services?\s*[:=\-]\s*\w|"          # "services: X" or "service: X"
-            r"we\s+offer\s+\w|"                    # "we offer X"
-            r"our\s+services?\s+(include|are)\s+|" # "our services include"
-            r"services?\s+include\s+|"             # "services include"
-            r"we\s+provide\s+\w|"                  # "we provide X"
-            r"offerings?\s*[:=]\s*\w|"             # "offerings: X"
-            r"\b(consultation|coaching|training|"  # Explicit service-type words
-            r"delivery|maintenance|installation|"
-            r"tour|trip|event|campaign|workshop)\b)",
-            all_biz_text
-        ))
-        # Pricing: look for explicit price/cost mentions
-        has_pricing = bool(_re.search(
-            r"\b(price|pricing|cost|fee|rate|plan|subscription|₹|\$|inr|usd|"
-            r"per month|per year|annually|monthly|free|paid|premium|basic)\b",
-            all_biz_text
+            r"(services?\s*[:=\-]\s*\w|we\s+offer\s+\w|our\s+services?\s+(include|are)\s+|"
+            r"we\s+provide\s+\w|\b(consultation|coaching|training|tour|trip|event|workshop)\b)",
+            (business_instruction + " " + business_core).lower(),
         ))
         has_use_cases = bool(use_case_context.strip())
 

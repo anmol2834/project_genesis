@@ -1,1 +1,5 @@
 # Automation service — all deps covered by project-genesis-base
+
+# Language translation — used by hybrid_search_engine for query normalization
+# Wraps Google Translate (free, no API key) + MyMemory fallback
+deep-translator==1.9.1

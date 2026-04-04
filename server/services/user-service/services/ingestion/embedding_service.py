@@ -149,11 +149,15 @@ def upsert_entries(entries: List[Dict[str, Any]], user_id: str) -> List[str]:
                 # AI routing tags (dynamic, contextual)
                 "ai_tags":        entry.get("ai_tags") or entry.get("ai_relevance") or [],
 
-                # Keywords for fast keyword matching
+                # Keywords for fast keyword matching (20+ tokens)
                 "keywords":       entry.get("keywords") or [],
 
                 # Typed attributes for filterable search (price, stock, supplier, etc.)
+                # Now includes: email, phone, working_hours, department, valid_until, description
                 "attributes":     entry.get("attributes") or {},
+
+                # Full structured data — preserved for LLM context (Phase 2 schema)
+                "structured_data": entry.get("structured_data") or {},
 
                 # Top-level filter fields (promoted from attributes for direct Qdrant filtering)
                 "status":         (entry.get("attributes") or {}).get("status", ""),

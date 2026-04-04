@@ -117,26 +117,43 @@ class DecisionTree:
         self,
         account_metadata: AccountMetadata,
     ) -> Optional[PolicyDecision]:
-        """Account-level hard blocks. Always checked first."""
+        """
+        Account-level hard blocks.
+
+        ENTERPRISE RULE:
+          automation_disabled → pipeline CONTINUES (AI still generates reply)
+                                but send_email = False in the output.
+          daily_limit_exceeded → pipeline CONTINUES with send_email = False.
+
+        The Policy Engine NEVER stops the intelligence pipeline.
+        Only the Finalizer decides whether to send.
+        """
 
         if not account_metadata.automation_enabled:
+            # Return SAFE_MODE (not REJECT) so the pipeline continues.
+            # block_send=True tells the Finalizer to generate but NOT dispatch.
             return PolicyDecision(
-                action=PolicyAction.REJECT,
+                action=PolicyAction.SAFE_MODE,
                 matched_rule_id="RULE_001",
-                reason="Automation is disabled for this account.",
-                constraints=CONSTRAINTS_MINIMAL,
+                reason="AUTOMATION_DISABLED: AI reply generated but not sent. Automation is off for this account.",
+                constraints=CONSTRAINTS_SAFE,
+                is_safe_mode=True,
+                block_send=True,
                 layer_trace=RuleLayer.HARD.value,
             )
 
         if account_metadata.daily_sent_count >= account_metadata.daily_send_limit:
+            # Same pattern: continue pipeline, block sending only.
             return PolicyDecision(
-                action=PolicyAction.REJECT,
+                action=PolicyAction.SAFE_MODE,
                 matched_rule_id="RULE_002",
                 reason=(
-                    f"Daily send limit reached "
-                    f"({account_metadata.daily_sent_count}/{account_metadata.daily_send_limit})."
+                    f"DAILY_LIMIT_EXCEEDED: AI reply generated but not sent. "
+                    f"Daily limit reached ({account_metadata.daily_sent_count}/{account_metadata.daily_send_limit})."
                 ),
-                constraints=CONSTRAINTS_MINIMAL,
+                constraints=CONSTRAINTS_SAFE,
+                is_safe_mode=True,
+                block_send=True,
                 layer_trace=RuleLayer.HARD.value,
             )
 

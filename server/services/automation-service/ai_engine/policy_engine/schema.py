@@ -97,6 +97,10 @@ class PolicyDecision:
     is_safe_mode:    bool = False   # True when action == SAFE_MODE
     requires_human:  bool = False   # True when action == HUMAN_REVIEW
 
+    # Send-blocking flags — pipeline CONTINUES but email is NOT dispatched
+    # Set by RULE_001 (automation disabled) and RULE_002 (daily limit exceeded)
+    block_send:      bool = False   # True → generate reply but do NOT send
+
     # Audit trail
     layer_trace:     str  = ""      # Which decision layer fired (HARD/SAFETY/BUSINESS/etc.)
 
@@ -108,5 +112,6 @@ class PolicyDecision:
             "constraints":     self.constraints.to_dict(),
             "is_safe_mode":    self.is_safe_mode,
             "requires_human":  self.requires_human,
+            "block_send":      self.block_send,
             "layer_trace":     self.layer_trace,
         }

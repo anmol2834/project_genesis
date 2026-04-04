@@ -300,6 +300,7 @@ class DecisionFinalizer:
             reason=reason,
             confidence=confidence.final_score,
             trace=trace,
+            metadata={"block_send": getattr(policy, "block_send", False)},
         )
 
     def _to_output(
@@ -338,7 +339,26 @@ class DecisionFinalizer:
         )
 
         # ── Routing decision ──────────────────────────────────────────────
-        send = (status == AIDecisionStatus.SUCCESS)
+        # block_send=True means: AI generated the reply but must NOT dispatch it.
+        # This happens when automation is disabled (RULE_001) or daily limit
+        # is exceeded (RULE_002). The reply is always preserved for review.
+        block_send = bool(decision.metadata.get("block_send", False))
+        send = (status == AIDecisionStatus.SUCCESS) and not block_send
+
+        # When block_send is active, downgrade status to HUMAN_REVIEW so the
+        # reply is stored and visible but not dispatched.
+        if block_send and status == AIDecisionStatus.SUCCESS:
+            status = AIDecisionStatus.HUMAN_REVIEW
+            logger.info(
+                "block_send=True: reply generated but send suppressed | rule=%s | conv=%s",
+                decision.trace.policy_rule_id,
+                str(ai_input.conversation_id)[:8],
+            )
+            print(
+                f"[FINALIZER] block_send=True | rule={decision.trace.policy_rule_id} "
+                f"| reply_generated=True | send=False"
+            )
+
         routing = OutputRouting(
             send_email=send,
             priority="high" if confidence.final_score >= 0.85 else "normal",
@@ -409,6 +429,9 @@ class DecisionFinalizer:
         reason = None
         if status != AIDecisionStatus.SUCCESS:
             reason = decision.reason or f"Routed to {status.value}"
+        # block_send always carries an explicit reason from the policy rule
+        if block_send and not reason:
+            reason = decision.reason or "Reply generated but not sent (automation disabled or limit reached)"
 
         return AIEngineOutput(
             status=status,

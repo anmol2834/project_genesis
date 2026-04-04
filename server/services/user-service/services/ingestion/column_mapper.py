@@ -51,12 +51,19 @@ CANONICAL_FIELDS: List[Tuple[str, List[str]]] = [
     # ── Dates ─────────────────────────────────────────────────────────────
     ("created_date", ["created date", "creation date", "date added", "added on", "date created", "entry date", "launch date"]),
     ("updated_date", ["updated date", "last updated", "modified date", "last modified"]),
-    ("expiry_date",  ["expiry date", "expiry", "valid until", "expires", "end date", "deadline"]),
+    ("valid_until",  ["expiry date", "expiry", "valid until", "expires", "end date", "deadline",
+                      "offer expiry", "valid through", "offer end date"]),
 
     # ── Contact ───────────────────────────────────────────────────────────
     ("email",        ["email", "email address", "e-mail", "mail"]),
     ("phone",        ["phone", "phone number", "contact no", "mobile", "telephone", "cell", "contact number"]),
     ("website",      ["website", "url", "link", "web", "site"]),
+    ("contact_name", ["contact name", "person name", "agent name", "representative name",
+                      "staff name", "employee name", "full name of contact"]),
+    ("department",   ["department", "team", "division", "support type", "contact type",
+                      "role", "designation", "position"]),
+    ("working_hours",["working hours", "support hours", "availability", "office hours",
+                      "business hours", "timing", "timings", "hours of operation"]),
 
     # ── Pricing / Plans ───────────────────────────────────────────────────
     ("plan_name",    ["plan name", "plan", "tier", "subscription plan", "package"]),
@@ -98,8 +105,11 @@ _KEYWORD_OVERRIDES: List[Tuple[str, str]] = [
     ("date added",       "created_date"),
     ("updated date",     "updated_date"),
     ("last updated",     "updated_date"),
-    ("expiry",           "expiry_date"),
-    ("valid until",      "expiry_date"),
+    ("expiry",           "valid_until"),
+    ("valid until",      "valid_until"),
+    ("offer expiry",     "valid_until"),
+    ("valid through",    "valid_until"),
+    ("offer end",        "valid_until"),
     ("product name",     "name"),
     ("item name",        "name"),
     ("price",            "price"),
@@ -115,6 +125,16 @@ _KEYWORD_OVERRIDES: List[Tuple[str, str]] = [
     ("mobile",           "phone"),
     ("website",          "website"),
     ("url",              "website"),
+    ("contact name",     "contact_name"),
+    ("person name",      "contact_name"),
+    ("agent name",       "contact_name"),
+    ("representative",   "contact_name"),
+    ("department",       "department"),
+    ("working hours",    "working_hours"),
+    ("support hours",    "working_hours"),
+    ("office hours",     "working_hours"),
+    ("availability",     "working_hours"),
+    ("timing",           "working_hours"),
 ]
 
 # Flatten to (canonical_key, phrase) pairs for embedding

@@ -117,4 +117,12 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8009, reload=config.DEBUG)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8009,
+        reload=False,        # Disabled — prevents Windows socket exhaustion (WinError 10055)
+        workers=1,           # Single worker for Windows
+        access_log=False,    # Suppress 200 OK noise
+        timeout_keep_alive=5,
+    )

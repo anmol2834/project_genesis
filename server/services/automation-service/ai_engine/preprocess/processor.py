@@ -31,15 +31,51 @@ _QUOTED_REPLY_RE  = re.compile(
     r"(^|\n)(>.*(\n|$))+",
     re.MULTILINE,
 )
+
+# ── Email thread / reply chain patterns ──────────────────────────────────────
+# These patterns match the quoted reply chain that Gmail/Outlook appends to
+# reply messages. They must be stripped BEFORE any AI processing.
+#
+# Pattern 1: "On Mon, 1 Jan 2024, 10:00 AM, John <john@example.com> wrote:"
+#   — standard Gmail/Outlook format, may or may not have a preceding newline
+# Pattern 2: "On Wed, 1 Apr, 2026, 10:34 pm blackmist file, <email@...>"
+#   — Gmail mobile format without "wrote:" at the end
+# Pattern 3: "---------- Forwarded message ---------"
+# Pattern 4: "From: ...\nSent: ...\nTo: ...\nSubject: ..."  (Outlook format)
+
 _ON_DATE_WROTE_RE = re.compile(
-    r"\n[-–—]*\s*On .{5,80}wrote:.*",
+    r"(\n|^|\s{2,})"                    # preceded by newline, start, or 2+ spaces
+    r"[-–—]*\s*"                         # optional dash separator
+    r"On\s+"                             # "On "
+    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?,?\s*"  # optional day name
+    r"\d{1,2}\s+\w+[,\s]+\d{4}"         # date: "1 Apr, 2026" or "1 Apr 2026"
+    r".*",                               # rest of line and everything after
     re.DOTALL | re.IGNORECASE,
 )
-_SIGNATURE_RE     = re.compile(
+
+# Fallback: catch any "On <date>" pattern that slipped through
+_ON_DATE_FALLBACK_RE = re.compile(
+    r"\s+On\s+\w+,?\s+\d{1,2}\s+\w+,?\s+\d{4}.*",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Outlook-style forwarded/reply header
+_OUTLOOK_HEADER_RE = re.compile(
+    r"\n[-_]{3,}.*?(Forwarded|Original)\s+(message|email).*",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# "From: ... Sent: ... To: ... Subject: ..." block (Outlook reply format)
+_OUTLOOK_FROM_RE = re.compile(
+    r"\n\s*From:\s+.+?\n\s*Sent:\s+.+?\n\s*To:\s+.+",
+    re.DOTALL | re.IGNORECASE,
+)
+
+_SIGNATURE_RE = re.compile(
     r"\n[-–—]{1,3}\s*\n.*",
     re.DOTALL,
 )
-_FOOTER_RE        = re.compile(
+_FOOTER_RE = re.compile(
     r"\n(sent from|get outlook|unsubscribe|this email was sent|"
     r"confidentiality notice|disclaimer|you received this).*",
     re.DOTALL | re.IGNORECASE,
@@ -155,8 +191,19 @@ class EmailPreprocessor:
         return text
 
     def _remove_quoted_reply(self, text: str) -> str:
-        """Strip quoted reply chains."""
+        """
+        Strip all email reply chain content.
+        Handles Gmail, Outlook, mobile, and forwarded message formats.
+        """
+        # Primary: "On Wed, 1 Apr, 2026, 10:34 pm ..." (Gmail/mobile format)
         text = _ON_DATE_WROTE_RE.sub("", text)
+        # Fallback: any remaining "On <date>" pattern
+        text = _ON_DATE_FALLBACK_RE.sub("", text)
+        # Outlook forwarded message header
+        text = _OUTLOOK_HEADER_RE.sub("", text)
+        # Outlook From/Sent/To block
+        text = _OUTLOOK_FROM_RE.sub("", text)
+        # Quoted lines starting with >
         text = _QUOTED_REPLY_RE.sub("\n", text)
         return text
 

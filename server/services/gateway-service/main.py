@@ -163,12 +163,12 @@ async def gateway_router(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=config.DEBUG,
-        log_level=config.LOG_LEVEL.lower(),
-        access_log=False  # Disable access logs (200 OK, etc.)
+        reload=False,
+        workers=1,
+        access_log=False,
+        timeout_keep_alive=5,
     )

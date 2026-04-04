@@ -1,94 +1,204 @@
 """
 Prompt Compiler — Templates
 ============================
-Business-driven, human-level communication engine.
+Enterprise-grade, zero-hallucination, human-like communication engine.
 
 CORE PRINCIPLES:
-  1. Business boundary: only speak about what exists in business_context
-  2. Out-of-scope: acknowledge → deny clearly → redirect to what we DO offer
-  3. Anti-repetition: never ask the same question twice
-  4. Context priority: current message 70%, history 20%, older 10%
-  5. Language mirror: exact same language and script as user
-  6. Conversion: every reply moves toward a business outcome
+  1. Response mode selection BEFORE task assignment — greet/answer/clarify/redirect
+  2. Language mirror — detect script + language, reply in exact same form
+  3. Data-driven flags — has_products/has_pricing only True when data is injected
+  4. No contradiction — LLM picks ONE path and stays on it
+  5. Anti-repetition — never ask the same question twice
+  6. Human-like — no robotic tone, no forced business push
 """
 import json as _json
+import re as _re
 
-_CASUAL_PATTERNS = [
-    "kaisa hai", "kaise ho", "kya chal raha", "kya kar rahe", "aur batao",
-    "kya haal", "sab theek", "how are you", "what's up", "whats up",
-    "how r u", "sup bro", "hey bhai", "hi bhai", "hello bhai",
-    "kya haal chaal", "kya scene hai", "bhai kya kar raha",
-]
+# ── Language / script detection ───────────────────────────────────────────────
+
+_DEVANAGARI_RE = _re.compile(r"[\u0900-\u097F]")
+
+_HINGLISH_WORDS = {
+    "kya", "hai", "nahi", "haan", "theek", "acha", "batao", "chahiye",
+    "kitna", "kab", "kaise", "kyun", "mujhe", "humko", "aap", "tum",
+    "yeh", "woh", "iska", "uska", "price", "bhai", "yaar", "ek",
+    "do", "teen", "mil", "milega", "dena", "lena", "karo", "karna",
+    "ho", "hoga", "tha", "thi", "the", "raha", "rahi", "rahe",
+    "sab", "kuch", "thoda", "bahut", "bilkul", "zaroor", "please",
+    "ok", "okay", "haan", "nahin", "nahi", "accha", "acha",
+}
 
 
-def _is_casual_message(message: str) -> bool:
-    msg_lower = message.lower().strip()
-    if len(msg_lower) < 40:
-        for pattern in _CASUAL_PATTERNS:
-            if pattern in msg_lower:
-                return True
-    return False
+def detect_language_mode(message: str) -> str:
+    """
+    Detect the language/script of the incoming message.
 
+    Priority order (CRITICAL — must check Devanagari FIRST):
+      1. Devanagari script → "hindi"
+      2. Latin script with Hindi words (≥15%) → "hinglish"
+      3. Pure English → "english"
+
+    NEVER overrides user's language — if user writes English, reply in English.
+    """
+    if not message:
+        return "english"
+
+    # Step 1: Devanagari script check FIRST (before Hinglish word check)
+    # A message like "नमस्ते price" has Devanagari → must be "hindi", not "hinglish"
+    if _DEVANAGARI_RE.search(message):
+        return "hindi"
+
+    # Step 2: Check for Hinglish words in Latin script
+    words = set(_re.findall(r"\b\w+\b", message.lower()))
+    total_words = max(len(words), 1)
+    hinglish_count = len(words & _HINGLISH_WORDS)
+
+    # Require ≥15% Hinglish words AND at least 1 clear Hindi word
+    # This prevents English words like "the", "ok" from triggering Hinglish
+    if hinglish_count >= 1 and hinglish_count / total_words >= 0.15:
+        return "hinglish"
+
+    return "english"
+
+
+# ── Response mode detection ───────────────────────────────────────────────────
+
+_GREETING_RE = _re.compile(
+    r"^(hi+|hey+|hello+|helo|hii+|hiii+|sup|what'?s up|howdy|"
+    r"good\s+(morning|afternoon|evening|day|night)|"
+    r"namaste|namaskar|salam|assalam|"
+    r"greetings?|"
+    r"thanks?|thank you|thx|ty|"
+    r"ok|okay|k|got it|noted|sure|alright|fine|"
+    r"bye|goodbye|see you|take care|"
+    r"yes|no|yeah|nope|yep|nah)[.!?🙏👋😊\s]*$",
+    _re.IGNORECASE,
+)
+
+_INFORMATIONAL_RE = _re.compile(
+    r"\b(price|prise|cost|rate|fee|amount|kitna|daam|"
+    r"product|item|goods|prodict|prodcut|"
+    r"offer|discount|deal|promo|chhoot|sale|coupon|"
+    r"stock|available|availability|milega|"
+    r"contact|phone|number|email|support|helpline|"
+    r"delivery|shipping|dispatch|courier|"
+    r"refund|return|policy|warranty|"
+    r"service|plan|package|subscription|"
+    r"about|company|who are you|"
+    r"how much|what is|tell me|batao|dikhao|chahiye|"
+    r"buy|purchase|order|book|details|info|jankari)\b",
+    _re.IGNORECASE,
+)
+
+
+def detect_response_mode(
+    message: str,
+    intent: str,
+    has_data: bool,
+    data_flags: dict,
+) -> str:
+    """
+    Determine the response mode BEFORE building the task.
+
+    Returns one of: "greet" | "answer" | "clarify" | "redirect"
+
+    Rules:
+      greet    — pure greeting/casual, no business query
+      answer   — informational query + data available
+      clarify  — informational query + no data, or vague query
+      redirect — out-of-scope query
+    """
+    msg = message.strip()
+
+    # Pure greeting / casual acknowledgement
+    if len(msg) <= 80 and _GREETING_RE.match(msg):
+        return "greet"
+
+    # Noise intents never need data
+    if intent in ("spam", "promo", "unsubscribe", "out_of_office"):
+        return "greet"
+
+    # Informational query
+    has_info_keywords = bool(_INFORMATIONAL_RE.search(msg))
+    has_any_data = (
+        data_flags.get("has_products", False) or
+        data_flags.get("has_pricing", False) or
+        data_flags.get("has_services", False) or
+        data_flags.get("has_use_cases", False)
+    )
+
+    if has_info_keywords or intent in ("question", "interest", "negotiation", "support_request"):
+        if has_any_data:
+            return "answer"
+        else:
+            return "clarify"
+
+    if intent in ("follow_up", "objection", "complaint"):
+        return "answer" if has_any_data else "clarify"
+
+    if intent == "not_interested":
+        return "redirect"
+
+    # Default: clarify for vague messages
+    return "clarify" if not has_any_data else "answer"
+
+
+# ── System prompt ─────────────────────────────────────────────────────────────
 
 def build_system_prompt(company_name: str, intent: str) -> str:
     system = {
-        "identity": f"You are a smart business communication assistant for {company_name}. You behave like an experienced human sales and support agent.",
+        "identity": (
+            f"You are a smart business communication assistant for {company_name}. "
+            "You behave like an experienced human sales and support agent."
+        ),
 
-        "business_boundary_rules": [
-            "You ONLY speak about what is explicitly present in business_context.",
-            "If the user asks about something NOT in business_context → do NOT answer it, do NOT pretend you can help.",
-            "Out-of-scope response strategy: (1) Acknowledge their query, (2) Clearly state this is not what we offer, (3) Redirect to what we DO offer.",
-            "NEVER hallucinate services, products, or capabilities not in business_context.",
-            "NEVER act as a different business or pretend to offer something you don't.",
-            "Example of correct out-of-scope response: 'That's an interesting requirement! However, we currently focus on [business offering] — not AI calling systems. If you're interested in [what we do], I'd love to tell you more.'"
+        "core_rules": [
+            "You have ONE job: reply to the current message naturally and helpfully.",
+            "NEVER contradict yourself. Pick ONE response path and stay on it.",
+            "If data is in business_context → use it directly. Do NOT say 'I cannot provide' then provide it.",
+            "If data is NOT in business_context → say so honestly in 1 sentence, then offer to help differently.",
+            "NEVER hallucinate products, prices, or services not in business_context.",
+            "NEVER say 'I cannot provide details' and then provide details in the same reply.",
         ],
 
-        "thinking_protocol": [
-            "Step 1: What is the user ACTUALLY asking in the current message?",
-            "Step 2: Is this inside our business scope (check business_context)?",
-            "Step 3: If YES → answer directly and move toward conversion.",
-            "Step 4: If NO → acknowledge, deny clearly, redirect to our actual offering.",
-            "Step 5: Have I already asked this question in last_ai_reply? If YES → do NOT ask again."
+        "response_path_rules": {
+            "greet":    "Respond warmly in 1-2 sentences. Ask ONE relevant business question. No product listing.",
+            "answer":   "Answer directly using ONLY data from business_context. Be specific. No vague promises.",
+            "clarify":  "Ask ONE specific question to understand their need. Do NOT invent data.",
+            "redirect": "Acknowledge their message. Explain what we DO offer. Ask if that helps.",
+        },
+
+        "language_rules": [
+            "Detect the user's language and script from current_message.",
+            "language_mode=hinglish → reply in Hinglish (Latin script, Hindi words mixed with English).",
+            "language_mode=hindi → reply in Hindi (Devanagari script).",
+            "language_mode=english → reply in English only.",
+            "NEVER switch scripts. NEVER translate.",
+            "Match the user's tone and energy level.",
         ],
 
         "anti_repetition_rules": [
-            "If last_ai_reply asked a question → do NOT ask the same or similar question again.",
-            "If the user has already answered a question → do NOT ask it again.",
-            "Each reply MUST add new value — new information, new direction, or a clear next step.",
-            "Do NOT reuse the same sentence structure as last_ai_reply.",
-            "Do NOT use: 'I'm here to help', 'feel free to ask', 'hope this helps'."
+            "If last_ai_reply asked a question → do NOT ask the same question again.",
+            "Each reply MUST add new value — new info, new direction, or a clear next step.",
+            "Do NOT use: 'I'm here to help', 'feel free to ask', 'hope this helps', 'let me know'.",
+            "Do NOT start with 'Great!', 'Sure!', 'Absolutely!' — these are robotic.",
         ],
 
-        "language_rules": [
-            "Detect the user's language AND script from the current message.",
-            "Reply in the EXACT same language and script.",
-            "Hinglish → Hinglish. Hindi (Devanagari) → Hindi. English → English.",
-            "Do NOT translate or switch scripts.",
-            "Match the user's tone and message length."
-        ],
-
-        "conversion_rules": [
-            "Every reply should move the conversation toward a business outcome.",
-            "If user shows interest → guide them toward what we offer.",
-            "If user is out-of-scope → redirect to our actual offering with a question.",
-            "If user is disengaged → close professionally, leave door open.",
-            "Do NOT keep asking the same qualifying question in a loop."
-        ],
-
-        "output_rules": [
-            "Return ONLY valid JSON. No markdown, no extra text."
-        ],
-
-        "output_schema": {
-            "status": "success",
-            "reply": "your reply text",
-            "confidence": "number 0.5-1.0",
-            "intent_handled": intent,
-            "mode": "answer | redirect | refuse | convert"
-        }
+        "output_format": {
+            "instruction": "Return ONLY valid JSON. No markdown. No extra text before or after.",
+            "schema": {
+                "status": "success",
+                "reply": "<your reply text here>",
+                "confidence": 0.85,
+                "intent_handled": intent,
+                "mode": "<greet|answer|clarify|redirect>",
+            },
+        },
     }
     return _json.dumps(system, ensure_ascii=False)
 
+
+# ── User prompt ───────────────────────────────────────────────────────────────
 
 def build_user_prompt(
     mode: str,
@@ -106,202 +216,255 @@ def build_user_prompt(
 ) -> str:
     if data_flags is None:
         data_flags = {
-            "has_products": False,
-            "has_services": False,
-            "has_pricing":  False,
+            "has_products":  False,
+            "has_services":  False,
+            "has_pricing":   False,
             "has_use_cases": False,
         }
 
-    is_casual = _is_casual_message(incoming_message)
+    # ── Language detection ────────────────────────────────────────────────
+    language_mode = detect_language_mode(incoming_message)
 
+    # ── Response mode detection ───────────────────────────────────────────
+    has_data = any(data_flags.values())
+    response_mode = detect_response_mode(incoming_message, intent, has_data, data_flags)
+
+    # Override mode for special pipeline modes
+    if mode == "minimal":
+        response_mode = "greet"
+    elif mode == "abuse":
+        response_mode = "greet"
+    elif mode == "no_context":
+        response_mode = "clarify" if not _GREETING_RE.match(incoming_message.strip()) else "greet"
+
+    # ── Build context block ───────────────────────────────────────────────
     context = {
         "current_message": {
-            "subject":   subject,
-            "message":   incoming_message,
-            "intent":    intent,
-            "sentiment": sentiment,
-            "is_casual": is_casual
+            "subject":       subject,
+            "message":       incoming_message,
+            "intent":        intent,
+            "sentiment":     sentiment,
+            "language_mode": language_mode,
         },
         "conversation_history": conversation_history,
-        "data_flags": data_flags
+        "data_flags": data_flags,
+        "response_mode": response_mode,
     }
 
-    has_biz = bool(business_instruction and "(business context not available" not in business_instruction)
+    # Only inject business context when it exists and is needed
+    has_biz = bool(
+        business_instruction
+        and "(business context not available" not in business_instruction
+    )
     if has_biz:
         context["business_context"] = business_instruction
 
+    # Only inject last_ai_reply when it exists (anti-repetition)
     if last_ai_reply and last_ai_reply.strip():
         context["last_ai_reply"] = last_ai_reply.strip()[:300]
 
-    # ── Task instructions ─────────────────────────────────────────────────────
-
-    if mode == "minimal":
-        task = [
-            f"Acknowledge warmly (max {max_tokens} words). Say message received, team will follow up.",
-            "Reply in same language/script as current message."
-        ]
-
-    elif mode == "abuse":
-        task = [
-            f"Respond calmly and briefly (max {max_tokens} words). Do NOT push business info.",
-            "Acknowledge their feeling. Offer to disengage or help if needed.",
-            "Reply in same language/script as current message."
-        ]
-
-    elif mode == "no_context":
-        if is_casual:
-            task = [
-                "Acknowledge the greeting in 1 sentence. Then ask one business question.",
-                "Example: 'Sab badhiya 🙂 Waise aap kisi specific cheez ke bare me explore kar rahe ho?'",
-                "Reply in same language/script as current message."
-            ]
-        else:
-            task = [
-                f"Reply (max {max_tokens} words).",
-                "No business details available. Ask a smart follow-up to understand their need.",
-                "Do NOT invent products, services, or pricing.",
-                "Reply in same language/script as current message."
-            ]
-
-    elif mode == "safe":
-        if intent == "unsubscribe" or (intent == "not_interested" and sentiment in ("negative", "neutral")):
-            task = [
-                "User wants to stop contact. Send ONE final polite acknowledgement (1-2 sentences).",
-                "Confirm no further contact. Do NOT push business info or ask questions.",
-                "Example (Hinglish): 'Samajh gaya — aapko ab contact nahi kiya jayega. Dhanyavaad.'",
-                "Example (English): 'Understood — we will not contact you again. Thank you.'",
-                "Reply in same language/script as current message."
-            ]
-        elif is_casual:
-            task = [
-                "Acknowledge greeting in 1 sentence. Then ask one business question.",
-                "Do NOT continue casual chat.",
-                "Reply in same language/script as current message."
-            ]
-        else:
-            intent_guidance = _get_intent_guidance(intent, sub_intent, sentiment, has_biz, data_flags, last_ai_reply)
-            task = [
-                f"Reply (max {max_tokens} words).",
-                intent_guidance,
-                "Reply in same language/script as current message."
-            ]
-
-    else:  # standard
-        if is_casual:
-            task = [
-                "Acknowledge greeting in 1 sentence. Then ask one business question.",
-                "Do NOT continue casual chat.",
-                "Reply in same language/script as current message."
-            ]
-        else:
-            intent_guidance = _get_intent_guidance(intent, sub_intent, sentiment, has_biz, data_flags, last_ai_reply)
-            task = [
-                f"Reply (max {max_tokens} words).",
-                intent_guidance,
-                "Use ONLY data in business context. Check data_flags before mentioning products/services/pricing.",
-                "Reply in same language/script as current message."
-            ]
+    # ── Build task based on response_mode ─────────────────────────────────
+    task = _build_task(
+        response_mode=response_mode,
+        mode=mode,
+        intent=intent,
+        sub_intent=sub_intent,
+        sentiment=sentiment,
+        language_mode=language_mode,
+        max_tokens=max_tokens,
+        has_biz=has_biz,
+        data_flags=data_flags,
+        last_ai_reply=last_ai_reply,
+        incoming_message=incoming_message,
+    )
 
     payload = {
         "context": context,
-        "task": task
+        "task":    task,
     }
 
     return _json.dumps(payload, ensure_ascii=False)
 
 
-def _get_intent_guidance(
+def _build_task(
+    response_mode: str,
+    mode: str,
     intent: str,
     sub_intent: str,
     sentiment: str,
+    language_mode: str,
+    max_tokens: str,
     has_biz: bool,
     data_flags: dict,
-    last_ai_reply: str = "",
-) -> str:
+    last_ai_reply: str,
+    incoming_message: str,
+) -> list:
     """
-    Return a business-driven, non-repetitive instruction.
-    Detects if a clarifying question was already asked and avoids repeating it.
-    Handles out-of-scope queries with honest redirect.
+    Build the task instruction list based on the detected response_mode.
+    Each mode has ONE clear path — no contradictions possible.
     """
-    has_pricing  = data_flags.get("has_pricing", False)
-    has_services = data_flags.get("has_services", False)
-    has_products = data_flags.get("has_products", False)
-
-    # Detect if we already asked a clarifying question in the last reply
     already_asked = bool(last_ai_reply and "?" in last_ai_reply)
+    lang_rule = _get_language_rule(language_mode)
 
-    # Negative/abusive sentiment — calm, no business push
-    if sentiment in ("negative", "abusive", "angry"):
+    # ── GREET mode ────────────────────────────────────────────────────────
+    if response_mode == "greet":
+        if mode == "abuse":
+            return [
+                f"Respond calmly in 1-2 sentences (max {max_tokens} words).",
+                "Acknowledge their feeling. Do NOT push any business info.",
+                lang_rule,
+            ]
+        if mode == "minimal":
+            return [
+                f"Acknowledge warmly in 1 sentence (max {max_tokens} words).",
+                "Say the team will follow up. Do NOT list products or services.",
+                lang_rule,
+            ]
+        if intent in ("unsubscribe", "not_interested"):
+            return [
+                "Send ONE final polite acknowledgement (1-2 sentences).",
+                "Confirm no further contact. Do NOT push business info or ask questions.",
+                lang_rule,
+            ]
+        # Pure greeting
+        return [
+            "Respond to the greeting warmly in 1 sentence.",
+            "Then ask ONE relevant business question to understand their need.",
+            "Do NOT list products, prices, or services in a greeting reply.",
+            lang_rule,
+        ]
+
+    # ── ANSWER mode ───────────────────────────────────────────────────────
+    if response_mode == "answer":
+        has_pricing  = data_flags.get("has_pricing", False)
+        has_products = data_flags.get("has_products", False)
+
+        # Pricing query with data — answer directly, NO questions
+        if sub_intent in ("pricing", "price") or "pricing" in sub_intent.lower():
+            if has_pricing:
+                return [
+                    f"Answer the pricing question directly (max {max_tokens} words).",
+                    "Use ONLY the price data from business_context. Give the actual number(s).",
+                    "Do NOT ask any questions. Do NOT say 'I cannot provide pricing'.",
+                    "End with a clear CTA: invite them to proceed or ask for more details.",
+                    lang_rule,
+                ]
+            else:
+                return [
+                    f"Pricing details are not in our current data (max {max_tokens} words).",
+                    "Say honestly: exact pricing is not available right now.",
+                    "Ask ONE question: what type of plan/product are they looking for?",
+                    lang_rule,
+                ]
+
+        # Interest intent — push toward conversion, no unnecessary questions
+        if intent == "interest":
+            return [
+                f"The user is interested. Answer directly (max {max_tokens} words).",
+                "Share the most relevant product/service details from business_context.",
+                "Be specific — names, prices, key benefits.",
+                "End with ONE clear CTA (e.g., 'Would you like to proceed?' or 'Shall I share more details?').",
+                "Do NOT ask clarifying questions — they are already interested.",
+                lang_rule,
+            ]
+
+        # General answer with data
+        if has_products or has_pricing:
+            return [
+                f"Answer directly using the data in business_context (max {max_tokens} words).",
+                "Be specific — use the actual names, prices, and details from the data.",
+                "Do NOT say 'I cannot provide' — the data is present, use it.",
+                "If they asked about a specific item, answer ONLY about that item.",
+                lang_rule,
+            ]
+
+        return [
+            f"Answer using business_context (max {max_tokens} words).",
+            "Be direct and specific. Use only what is in the context.",
+            lang_rule,
+        ]
+
+    # ── CLARIFY mode ──────────────────────────────────────────────────────
+    if response_mode == "clarify":
+        if already_asked:
+            return [
+                f"You already asked a question in last_ai_reply (max {max_tokens} words).",
+                "Do NOT ask the same question again.",
+                "Either: (A) provide a helpful answer based on what you know, OR (B) offer a specific next step.",
+                lang_rule,
+            ]
+        if intent in ("follow_up",):
+            return [
+                f"Continue the conversation naturally (max {max_tokens} words).",
+                "Provide the next logical step or ask ONE specific question to move forward.",
+                lang_rule,
+            ]
+        return [
+            f"Ask ONE specific question to understand their need (max {max_tokens} words).",
+            "Do NOT invent products, prices, or services.",
+            "Do NOT list everything we offer — just ask what they need.",
+            lang_rule,
+        ]
+
+    # ── REDIRECT mode ─────────────────────────────────────────────────────
+    if response_mode == "redirect":
         if intent == "not_interested":
-            return "Respect their decision calmly. 1 sentence. Do NOT mention services or products."
-        return "Respond calmly and briefly. Acknowledge their feeling. Do NOT push business info."
+            return [
+                f"Respect their decision (max {max_tokens} words).",
+                "1-2 sentences only. Do NOT push anything. Leave the door open politely.",
+                lang_rule,
+            ]
+        if intent == "objection":
+            return [
+                f"Address their specific concern (max {max_tokens} words).",
+                "Use business_context if relevant. Ask what would help them feel comfortable.",
+                lang_rule,
+            ]
+        if intent == "complaint":
+            return [
+                f"Acknowledge the issue and apologize briefly (max {max_tokens} words).",
+                "Offer ONE concrete next step. Do NOT make promises not in business_context.",
+                lang_rule,
+            ]
+        return [
+            f"Acknowledge their message (max {max_tokens} words).",
+            "Explain what we DO offer based on business_context.",
+            "Ask if that is relevant to their need.",
+            lang_rule,
+        ]
 
-    if sub_intent == "pricing" or "pricing" in sub_intent.lower():
-        if has_pricing:
-            return "Share pricing from business context clearly."
-        if already_asked:
-            return "Pricing is not in our current context. Acknowledge this honestly and offer to connect them with the right person."
-        return "Pricing not in context. Ask what type of experience/solution they need so you can guide them."
-
-    if intent in ("question", "interest"):
-        # Check if the query is likely out-of-scope
-        # If business context exists but user is asking about something very specific
-        # that isn't in it, we should redirect honestly
-        if has_biz:
-            if already_asked:
-                # We already asked a clarifying question — now we must give a real answer or honest redirect
-                return (
-                    "You already asked a clarifying question in last_ai_reply. "
-                    "Now you MUST do one of: "
-                    "(A) If their need matches business_context → answer directly with what we offer. "
-                    "(B) If their need does NOT match business_context → say clearly: "
-                    "'What you're describing (e.g. AI calling system) is not something we currently offer. "
-                    "We focus on [business offering]. Would you be interested in exploring that instead?' "
-                    "Do NOT ask another clarifying question."
-                )
-            return (
-                "Answer using only what is in business_context. "
-                "If their query is outside business scope → acknowledge it, clearly state we don't offer that, "
-                "then redirect: 'We focus on [business offering] — would you like to know more about that?'"
-            )
-        if already_asked:
-            return "You already asked a question. Now provide a direct answer or honest redirect. Do NOT ask again."
-        return "Ask one specific follow-up question to understand their need."
-
-    if intent == "follow_up":
-        if already_asked:
-            return "Continue the conversation. Provide the next logical step or a concrete answer. Do NOT ask the same question again."
-        return "Continue from where the conversation left off. Provide the next logical step."
-
-    if intent == "objection":
-        if has_biz:
-            return "Address the specific concern using business context. Ask what would help them feel comfortable."
-        return "Acknowledge their concern. Ask what specific information would help."
-
-    if intent == "complaint":
-        return "Acknowledge the issue. Apologize briefly. Offer a concrete next step."
-
-    if intent == "support_request":
-        return "Address the support need directly. If not in context, ask for more details."
-
-    if intent == "not_interested":
-        return "Respect their decision. Keep it brief. Do not push anything."
-
-    if intent == "reply":
-        return "Acknowledge briefly. Ask one relevant business question."
-
-    if has_biz:
-        if already_asked:
-            return "Provide a direct answer or honest redirect. Do NOT ask another question."
-        return "Answer using only business context. If data missing, ask one clarifying question."
-    return "Ask one specific follow-up question to understand their need."
+    # ── Fallback ──────────────────────────────────────────────────────────
+    return [
+        f"Reply naturally (max {max_tokens} words).",
+        "Be helpful and human. Use business_context if relevant.",
+        lang_rule,
+    ]
 
 
-# ── Legacy constants ──────────────────────────────────────────────────────────
-SYSTEM_BASE = ""
-USER_STANDARD = ""
-USER_SAFE = ""
-USER_MINIMAL = ""
-USER_ABUSE = ""
-USER_NO_CONTEXT = ""
+def _get_language_rule(language_mode: str) -> str:
+    """
+    Return the language instruction for the given mode.
+    STRICT: never force a language the user didn't use.
+    """
+    if language_mode == "hinglish":
+        return (
+            "LANGUAGE: Reply in Hinglish — Latin script, natural mix of Hindi and English. "
+            "Match the user's exact style. Do NOT translate to pure Hindi or pure English."
+        )
+    if language_mode == "hindi":
+        return (
+            "LANGUAGE: Reply in Hindi using Devanagari script only. "
+            "Do NOT use Latin script or English words unless they are proper nouns."
+        )
+    # Default: English only — never force Hinglish on English users
+    return "LANGUAGE: Reply in English only. Do NOT use Hindi or Hinglish words."
+
+
+# ── Legacy constants (kept for backward compat) ───────────────────────────────
+SYSTEM_BASE       = ""
+USER_STANDARD     = ""
+USER_SAFE         = ""
+USER_MINIMAL      = ""
+USER_ABUSE        = ""
+USER_NO_CONTEXT   = ""
 MIXED_INTENT_NOTE = ""
