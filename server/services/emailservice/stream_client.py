@@ -238,36 +238,60 @@ class EventDrivenConsumer:
 
 async def ensure_streams() -> None:
     """
-    Clean up legacy XREADGROUP consumer groups and old shard keys.
-    No consumer groups needed in the event-driven model.
+    Idempotent stream initialization.
+    - First run: cleans up legacy XREADGROUP consumer groups and old shard keys
+    - Subsequent runs: skips cleanup entirely (guarded by a Redis key)
+    - Never destroys anything on normal startup after first run
     """
     redis = get_redis_client()
 
-    all_streams = [
+    # ── One-time legacy cleanup (runs only once across all restarts) ──────────
+    # Guard key: set after first successful cleanup, TTL = 30 days
+    # If the key exists, skip all destructive operations entirely
+    _CLEANUP_DONE_KEY = "es:stream_init:cleanup_v2"
+    try:
+        already_clean = await redis.exists(_CLEANUP_DONE_KEY)
+    except Exception:
+        already_clean = False
+
+    if not already_clean:
+        all_streams = [
+            cfg.TOPIC_GMAIL_RAW, cfg.TOPIC_OUTLOOK_RAW, cfg.TOPIC_SMTP_RAW,
+            cfg.TOPIC_STORE_READY, cfg.TOPIC_AI_EVENTS, cfg.TOPIC_DLQ,
+        ]
+        old_groups = [
+            cfg.CG_GMAIL_FETCH, cfg.CG_OUTLOOK_FETCH, cfg.CG_SMTP_FETCH,
+            cfg.CG_STORAGE, cfg.CG_AI_HANDOFF, cfg.CG_DLQ_MONITOR, cfg.CG_FILTER_DEDUP,
+        ]
+        old_bases = all_streams + ["automation_events", "fetch_results", "email_queue"]
+
+        pipe = redis.pipeline(transaction=False)
+        # Destroy legacy consumer groups (safe — XGROUP DESTROY is idempotent if group missing)
+        for stream in all_streams:
+            for group in old_groups:
+                pipe.xgroup_destroy(stream, group)
+        # Delete old shard keys from N_SHARDS=4 era
+        for base in old_bases:
+            for suffix in [":0", ":1", ":2", ":3"]:
+                pipe.delete(f"{base}{suffix}")
+        # Mark cleanup as done — TTL 30 days
+        pipe.setex(_CLEANUP_DONE_KEY, 86400 * 30, "1")
+        try:
+            await pipe.execute(raise_on_error=False)
+            logger.info("One-time legacy stream cleanup complete")
+        except Exception as e:
+            logger.warning("Legacy stream cleanup warning: %s", e)
+    else:
+        logger.debug("Stream cleanup already done — skipping")
+
+    logger.info("Event-driven streams ready (N_SHARDS=%d)", N_SHARDS)
+
+    # Log backlog sizes for visibility (read-only, always safe)
+    all_streams_check = [
         cfg.TOPIC_GMAIL_RAW, cfg.TOPIC_OUTLOOK_RAW, cfg.TOPIC_SMTP_RAW,
         cfg.TOPIC_STORE_READY, cfg.TOPIC_AI_EVENTS, cfg.TOPIC_DLQ,
     ]
-    old_groups = [
-        cfg.CG_GMAIL_FETCH, cfg.CG_OUTLOOK_FETCH, cfg.CG_SMTP_FETCH,
-        cfg.CG_STORAGE, cfg.CG_AI_HANDOFF, cfg.CG_DLQ_MONITOR, cfg.CG_FILTER_DEDUP,
-    ]
-    old_bases = all_streams + ["automation_events", "fetch_results", "email_queue"]
-
-    pipe = redis.pipeline(transaction=False)
-    for stream in all_streams:
-        for group in old_groups:
-            pipe.xgroup_destroy(stream, group)
-    for base in old_bases:
-        for suffix in [":0", ":1", ":2", ":3"]:
-            pipe.delete(f"{base}{suffix}")
-    try:
-        await pipe.execute(raise_on_error=False)
-        logger.info("Event-driven streams ready (N_SHARDS=%d)", N_SHARDS)
-    except Exception:
-        pass
-
-    # Log backlog sizes for visibility
-    for stream in all_streams:
+    for stream in all_streams_check:
         try:
             length = await redis.xlen(stream)
             if length:

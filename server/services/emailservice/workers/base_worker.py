@@ -37,6 +37,16 @@ from metrics import M
 
 logger = logging.getLogger("emailservice.worker")
 
+
+class TransientFailure(Exception):
+    """
+    Raised by workers when events fail due to transient conditions
+    (API errors, token refresh, rate limits, temporary unavailability).
+    Distinct from RuntimeError so BaseWorker logs at WARNING instead of ERROR
+    and routes to retry queue rather than treating as a hard failure.
+    """
+    pass
+
 # ── Backlog drain tuning ──────────────────────────────────────────────────────
 # Max messages processed per second during startup backlog drain.
 # Keeps DB writes and API calls within safe limits during recovery.
@@ -189,6 +199,7 @@ class BaseWorker(ABC):
             return
         t0 = time.monotonic()
         failed: list[dict] = []
+        is_transient = False
 
         try:
             await self.process_batch(records)
@@ -199,7 +210,14 @@ class BaseWorker(ABC):
         except Exception as e:
             self._errors += len(records)
             failed = records
-            logger.error("[%s] batch error: %s", self.__class__.__name__, e, exc_info=True)
+            # Check if this is a transient failure (API errors, token refresh, etc.)
+            # vs a hard failure (bug, unexpected exception)
+            is_transient = isinstance(e, TransientFailure)
+            if is_transient:
+                logger.warning("[%s] transient batch failure (will retry): %s",
+                               self.__class__.__name__, e)
+            else:
+                logger.error("[%s] batch error: %s", self.__class__.__name__, e, exc_info=True)
             M.messages_processed.labels(
                 provider=self._provider_label(), status="error"
             ).inc(len(records))

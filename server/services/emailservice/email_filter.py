@@ -46,62 +46,26 @@ _REJECT_LABELS: frozenset[str] = frozenset({
 })
 
 # ── Stage 2: Sender domain/prefix rejection (O(1) frozenset lookup) ──────────
-# Exact sender address prefixes — checked with str.startswith() on a tuple.
-# Python's str.startswith(tuple) is implemented in C — microsecond-level.
+# ONLY clearly automated/system sender prefixes.
+# Do NOT include legitimate business prefixes like support@, hello@, team@, info@
+# — those are real conversational senders.
 _REJECT_SENDER_PREFIXES: tuple[str, ...] = (
     "noreply@",
     "no-reply@",
     "donotreply@",
     "do-not-reply@",
+    "no_reply@",
     "mailer-daemon@",
     "postmaster@",
     "bounce@",
     "bounces@",
     "automated@",
-    "notifications@",
     "newsletter@",
     "newsletters@",
     "marketing@",
     "promo@",
     "promotions@",
-    "offers@",
-    "deals@",
-    "updates@",
-    "alerts@",
-    "info@",
-    "support@",
-    "hello@",
-    "team@",
-    "news@",
-    "digest@",
-    "weekly@",
-    "daily@",
-    "monthly@",
     "unsubscribe@",
-    "reply@",
-    "no_reply@",
-    "system@",
-    "admin@",
-    "webmaster@",
-    "feedback@",
-    "survey@",
-    "billing@",
-    "invoice@",
-    "receipts@",
-    "orders@",
-    "shipping@",
-    "delivery@",
-    "confirm@",
-    "verify@",
-    "security@",
-    "account@",
-    "accounts@",
-    "service@",
-    "services@",
-    "contact@",
-    "hello@",
-    "hi@",
-    "hey@",
 )
 
 # Known marketing/transactional domain suffixes (O(1) frozenset lookup on domain part)

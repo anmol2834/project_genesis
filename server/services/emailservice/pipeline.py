@@ -101,7 +101,7 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
         # Rate limit
         await get_rate_limiter().acquire_gmail(user_id)
 
-        # Get fresh token
+        # Get fresh token — always attempt refresh if expired
         token = await get_fresh_token(snap)
 
         # Fetch message IDs from Gmail History API
@@ -109,15 +109,40 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
         start_id  = stored_id if (stored_id and stored_id != history_id) \
                     else str(max(1, int(history_id) - 1))
 
-        message_ids, fetch_error = await _fetch_message_ids(token, email_address, start_id)
+        message_ids, fetch_error, auth_error = await _fetch_message_ids(token, email_address, start_id)
+
+        if auth_error:
+            # Token was expired even after get_fresh_token() — force re-fetch from DB
+            # and retry once with a fresh token
+            logger.warning("Auth error for %s — forcing token refresh from DB", email_address)
+            from token_cache import invalidate as _invalidate
+            await _invalidate(email_address)
+            snap_fresh = await get_account_snapshot(email_address)
+            if snap_fresh:
+                token_fresh = await get_fresh_token(snap_fresh)
+                message_ids, fetch_error, auth_error = await _fetch_message_ids(
+                    token_fresh, email_address, start_id
+                )
+                if auth_error:
+                    logger.error("Auth error persists for %s after token refresh — event will retry via DLQ",
+                                 email_address)
+                    await cb.record_failure()
+                    return False  # → DLQ retry
+            else:
+                logger.error("Cannot load account for %s after cache invalidation", email_address)
+                return False  # → DLQ retry
 
         if fetch_error:
+            logger.warning("Transient fetch error for %s historyId=%s — event will retry via DLQ",
+                           email_address, history_id)
             await cb.record_failure()
-            return False
+            return False  # → DLQ retry
 
         await cb.record_success()
 
         if not message_ids:
+            logger.info("No new messages for %s historyId=%s (history gap or already processed)",
+                        email_address, history_id)
             await advance_history_cursor(snap["id"], history_id, email_address)
             return True
 
@@ -138,9 +163,18 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
         )
         messages = [m for m in results if m and not isinstance(m, Exception)]
 
+        # Log any individual message fetch failures for traceability
+        exceptions = [r for r in results if isinstance(r, Exception)]
+        if exceptions:
+            logger.warning("Gmail message fetch: %d/%d failed for %s | errors: %s",
+                           len(exceptions), len(new_ids), email_address,
+                           [str(e)[:80] for e in exceptions[:3]])
+
         if not messages:
-            await advance_history_cursor(snap["id"], history_id, email_address)
-            return True
+            logger.warning("Gmail: all %d messages failed to fetch for %s historyId=%s — event will retry",
+                           len(new_ids), email_address, history_id)
+            # Don't advance cursor — retry will re-fetch these message IDs
+            return False  # → DLQ retry
 
         # Filter + store via durable store_ready queue
         store_events = []
@@ -174,6 +208,9 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
             await _pub_batch(cfg.TOPIC_STORE_READY, store_events)
             logger.info("Gmail enqueued to store_ready | email=%s messages=%d historyId=%s",
                         email_address, len(store_events), history_id)
+        else:
+            logger.info("Gmail: all %d messages filtered/deduped for %s historyId=%s",
+                        len(messages), email_address, history_id)
 
         await advance_history_cursor(snap["id"], history_id, email_address)
         return True
@@ -364,6 +401,13 @@ async def _store_message(msg: dict, user_id: str, account_id: str, provider: str
 # ── Gmail API helpers ─────────────────────────────────────────────────────────
 
 async def _fetch_message_ids(token: str, email: str, start_id: str):
+    """
+    Fetch message IDs from Gmail History API.
+    Returns (ids, fetch_error, auth_error) where:
+      - fetch_error=True  → transient failure, should retry
+      - auth_error=True   → token expired/invalid, must refresh and retry
+      - both False        → success (ids may be empty = no new messages)
+    """
     ids, fetch_error, page_token = [], False, None
     http = get_http_client()
     while True:
@@ -377,18 +421,31 @@ async def _fetch_message_ids(token: str, email: str, start_id: str):
                 params=params,
             )
         except Exception as e:
-            logger.error("History API error for %s: %s", email, e)
-            return ids, True
+            logger.error("History API network error for %s: %s", email, e)
+            return ids, True, False  # transient — retry
 
         if resp.status_code == 429:
+            logger.warning("History API rate limited for %s", email)
             await asyncio.sleep(10)
-            return ids, True
+            return ids, True, False  # transient — retry
+
         if resp.status_code >= 500:
-            return ids, True
-        if resp.status_code in (401, 404):
-            return ids, False  # auth error or expired history — not retryable
+            logger.warning("History API server error %d for %s", resp.status_code, email)
+            return ids, True, False  # transient — retry
+
+        if resp.status_code == 401:
+            logger.warning("History API 401 (token expired) for %s — will refresh and retry", email)
+            return ids, False, True  # auth error — refresh token and retry
+
+        if resp.status_code == 404:
+            # historyId too old — gap in history. Use current historyId as new start.
+            logger.warning("History API 404 for %s (historyId=%s expired) — will re-sync from current",
+                           email, start_id)
+            return ids, False, False  # not retryable — history gap, advance cursor
+
         if resp.status_code != 200:
-            return ids, False
+            logger.error("History API unexpected status %d for %s", resp.status_code, email)
+            return ids, True, False  # treat unknown errors as transient
 
         data = resp.json()
         for record in data.get("history", []):
@@ -399,7 +456,7 @@ async def _fetch_message_ids(token: str, email: str, start_id: str):
         page_token = data.get("nextPageToken")
         if not page_token:
             break
-    return ids, False
+    return ids, False, False
 
 
 async def _fetch_gmail_message_safe(token: str, email: str, msg_id: str, sem: asyncio.Semaphore):

@@ -15,7 +15,7 @@ import asyncio, base64, logging, re, time
 from datetime import datetime
 
 import config as cfg
-from workers.base_worker import BaseWorker
+from workers.base_worker import BaseWorker, TransientFailure
 from pipeline import process_gmail_event
 from idempotency import get_idempotency_cache
 from metrics import M
@@ -43,9 +43,19 @@ class GmailFetchWorker(BaseWorker):
         tasks = [self._process_one(rec, sem) for rec in records]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        failed = sum(1 for r in results if isinstance(r, Exception) or r is False)
-        if failed:
-            raise RuntimeError(f"{failed}/{len(records)} Gmail events failed")
+        # Separate hard exceptions (bugs) from soft False returns (transient failures)
+        hard_failures = [r for r in results if isinstance(r, Exception)]
+        soft_failures = sum(1 for r in results if r is False)
+
+        if hard_failures:
+            # Unexpected exception — re-raise so BaseWorker can DLQ the batch
+            raise hard_failures[0]
+
+        if soft_failures:
+            # Transient failures (API errors, token refresh, rate limits, etc.)
+            # Already logged by process_gmail_event() with full context.
+            # Use TransientFailure so BaseWorker logs at WARNING, not ERROR.
+            raise TransientFailure(f"{soft_failures}/{len(records)} Gmail events need retry")
 
     async def _process_one(self, rec: dict, sem: asyncio.Semaphore) -> bool:
         async with sem:
