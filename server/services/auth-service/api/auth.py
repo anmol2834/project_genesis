@@ -325,9 +325,10 @@ async def login(request: LoginRequest, req: Request):
     await _check_login_rate_limit(rate_key)
 
     try:
+        email_normalized = request.email.lower().strip()
         async with get_db_session() as session:
             user = (await session.execute(
-                select(User).where(User.email == request.email)
+                select(User).where(User.email == email_normalized)
             )).scalar_one_or_none()
 
         if not user or not verify_password(request.password, user.password_hash):
