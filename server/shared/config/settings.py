@@ -4,10 +4,17 @@ Single source of truth for all microservices configuration
 Uses Pydantic Settings for type-safe configuration management
 """
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, validator
 from typing import List, Optional
 import os
+
+# Resolve the server root .env path at import time using the absolute path of
+# this file — works regardless of cwd or how the module was imported.
+_SETTINGS_DIR = os.path.dirname(os.path.abspath(__file__))   # .../server/shared/config
+_SHARED_DIR   = os.path.dirname(_SETTINGS_DIR)               # .../server/shared
+_SERVER_DIR   = os.path.dirname(_SHARED_DIR)                 # .../server
+_ENV_FILE     = os.path.join(_SERVER_DIR, ".env")
 
 
 class GlobalConfig(BaseSettings):
@@ -181,11 +188,27 @@ class GlobalConfig(BaseSettings):
             return [item.strip().strip('"') for item in v.split(",") if item.strip()]
         return v
     
-    class Config:
-        # Find .env file in server root directory (2 levels up from shared/config)
-        env_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
-        env_file_encoding = "utf-8"
-        case_sensitive = True
+    # ── Upstash Redis REST API (emailservice) ────────────────────────────────
+    UPSTASH_REDIS_REST_URL:   Optional[str] = Field(default=None)
+    UPSTASH_REDIS_REST_TOKEN: Optional[str] = Field(default=None)
+
+    # ── Redis Streams URL (emailservice only — Upstash Redis) ─────────────────
+    # Separate from REDIS_URL (shared services use RedisLabs).
+    # emailservice uses this for Redis Streams pipeline (gmail_events, store_ready, etc.)
+    REDIS_STREAMS_URL: Optional[str] = Field(default=None)
+
+    # ── Kafka / Redis Streams (emailservice) ─────────────────────────────────
+    KAFKA_BOOTSTRAP_SERVERS: Optional[str] = Field(default=None)
+    KAFKA_SASL_USERNAME:     Optional[str] = Field(default=None)
+    KAFKA_SASL_PASSWORD:     Optional[str] = Field(default=None)
+
+    # pydantic-settings v2: use model_config instead of inner class Config
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE,
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",   # silently ignore undeclared env vars (service-specific keys)
+    )
 
 
 # Global configuration instance

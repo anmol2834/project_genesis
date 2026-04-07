@@ -24,52 +24,58 @@ def get_celery_app() -> Celery:
     
     if _celery_app is None:
         config = get_config()
-        
+
         _celery_app = Celery(
             "mailautomation",
             broker=config.CELERY_BROKER_URL,
             backend=config.CELERY_RESULT_BACKEND,
         )
-        
-        # Configure Celery
-        _celery_app.conf.update(
+
+        # ── SSL configuration for rediss:// (Upstash / TLS Redis) ────────────
+        # Celery 5.x requires ssl_cert_reqs to be set via dedicated config keys,
+        # NOT via transport_options — the backend ignores transport_options for SSL.
+        #
+        # broker_use_ssl   → controls SSL for the Kombu broker connection
+        # redis_backend_use_ssl → controls SSL for the Redis result backend
+        #
+        # ssl.CERT_NONE = 0 — skips cert verification, safe for Upstash managed TLS.
+        import ssl as _ssl
+        _is_ssl = config.CELERY_BROKER_URL.startswith("rediss://")
+        _ssl_config = {"ssl_cert_reqs": _ssl.CERT_NONE} if _is_ssl else {}
+
+        conf: dict = dict(
             task_serializer=config.CELERY_TASK_SERIALIZER,
             result_serializer=config.CELERY_RESULT_SERIALIZER,
             accept_content=config.CELERY_ACCEPT_CONTENT,
             timezone=config.CELERY_TIMEZONE,
             enable_utc=config.CELERY_ENABLE_UTC,
-            
-            # Task routing - separate queues for each service
+
+            # Task routing
             task_routes={
                 'auth.create_user_embedding': {'queue': 'auth_queue'},
                 'user.update_user_embedding': {'queue': 'user_queue'},
             },
             task_default_queue='celery',
-            
-            # Worker configuration
+
+            # Worker
             worker_prefetch_multiplier=1,
             worker_max_tasks_per_child=1000,
+            worker_disable_rate_limits=True,
 
-            # Task configuration
+            # Task
             task_acks_late=True,
             task_reject_on_worker_lost=True,
             task_time_limit=300,
             task_soft_time_limit=240,
 
-            # Result backend — disable result tracking to save Redis connections
+            # Result backend
             task_ignore_result=True,
             result_expires=3600,
             result_persistent=False,
-            result_backend_transport_options={
-                'retry_on_timeout': True,
-                'max_connections': 1,
-            },
 
-            # Broker — minimal pool for free-tier Redis
-            # socket_keepalive_options sends TCP keepalive probes every 60s
-            # so the RedisLabs server never closes the idle BRPOP connection
+            # Broker transport
             broker_connection_retry_on_startup=True,
-            broker_connection_max_retries=None,   # retry forever on disconnect
+            broker_connection_max_retries=None,
             broker_pool_limit=1,
             broker_transport_options={
                 'visibility_timeout': 3600,
@@ -79,13 +85,20 @@ def get_celery_app() -> Celery:
                 'socket_connect_timeout': 10,
                 'retry_on_timeout': True,
             },
-
-            # Disable rate limits — saves Redis connections
-            worker_disable_rate_limits=True,
+            result_backend_transport_options={
+                'retry_on_timeout': True,
+                'max_connections': 1,
+            },
         )
-        
+
+        # Inject SSL config via the correct Celery 5.x keys
+        if _is_ssl:
+            conf["broker_use_ssl"] = _ssl_config
+            conf["redis_backend_use_ssl"] = _ssl_config
+
+        _celery_app.conf.update(conf)
         logger.info("Celery application created")
-    
+
     return _celery_app
 
 

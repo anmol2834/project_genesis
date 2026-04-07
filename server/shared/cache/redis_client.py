@@ -1,124 +1,91 @@
 """
-Redis Connection Module
-Async connection using redis-py with asyncio support.
-
-Architecture:
-- Single global ConnectionPool shared across the entire process
-- Single global Redis client that draws from that pool
-- Pool size tuned for concurrent async workload (webhooks + background tasks)
+Redis Connection Module — Upstash-compatible (rediss:// SSL)
 """
-
 import redis.asyncio as redis
 from redis.asyncio.connection import ConnectionPool
 from typing import Optional
-import logging
-import asyncio
+import logging, asyncio
 
 from shared.config import get_config
 
 logger = logging.getLogger(__name__)
 
-# ── Globals ───────────────────────────────────────────────────────────────────
 _redis_pool:   Optional[ConnectionPool] = None
 _redis_client: Optional[redis.Redis]    = None
 _init_lock = asyncio.Lock()
 
 
-async def _build_pool() -> ConnectionPool:
-    """Build the shared connection pool (called once at startup)."""
-    config = get_config()
-    pool = ConnectionPool.from_url(
-        config.REDIS_URL,
+def _build_pool_sync(url: str, max_connections: int = 20) -> ConnectionPool:
+    """
+    Build connection pool from the given Redis URL.
+    rediss:// → SSL is handled automatically by redis-py from the URL scheme.
+    Do NOT pass ssl=True separately — it conflicts with the URL-based SSL setup.
+    """
+    return ConnectionPool.from_url(
+        url,
         encoding="utf-8",
         decode_responses=True,
-        max_connections=2,           # minimal — free-tier Redis has a hard client cap
-        socket_timeout=10,
+        max_connections=20,
+        socket_timeout=15,           # must be > XREADGROUP block time (8s) + network headroom
         socket_connect_timeout=10,
         socket_keepalive=True,
-        health_check_interval=60,
         retry_on_timeout=True,
     )
-    logger.info("Redis connection pool created (max_connections=2)")
-    return pool
 
 
-async def init_redis() -> bool:
+async def init_redis(url: Optional[str] = None) -> bool:
     """
-    Initialise the shared pool and client.
-    Must be called once at application startup (lifespan).
+    Initialise Redis connection pool.
 
-    Returns True on success, False on failure.
-    Never raises — Redis is non-critical for the AI pipeline.
+    Args:
+        url: Override Redis URL. If None, uses REDIS_STREAMS_URL (if set) or
+             REDIS_URL from config. Pass explicitly when a service needs a
+             specific Redis instance (e.g. emailservice → Upstash Streams).
     """
     global _redis_pool, _redis_client
-
     async with _init_lock:
         if _redis_client is not None:
-            return True  # already initialised
-
+            return True
+        cfg = get_config()
+        # Resolution order: explicit arg → REDIS_STREAMS_URL (if caller is emailservice)
+        # → REDIS_URL (shared default)
+        resolved_url = url or cfg.REDIS_URL
         for attempt in range(3):
             try:
-                _redis_pool   = await _build_pool()
+                _redis_pool   = _build_pool_sync(resolved_url, 20)
                 _redis_client = redis.Redis(connection_pool=_redis_pool)
-
-                await asyncio.wait_for(_redis_client.ping(), timeout=5.0)
-                logger.info("Redis initialised successfully")
+                await asyncio.wait_for(_redis_client.ping(), timeout=8.0)
+                logger.info("Redis initialised successfully (url=%s)", resolved_url[:40])
                 return True
-
             except asyncio.TimeoutError:
                 logger.warning("Redis init timeout (attempt %d/3)", attempt + 1)
             except Exception as e:
                 logger.warning("Redis init failed (attempt %d/3): %s", attempt + 1, e)
-
             if attempt < 2:
                 await asyncio.sleep(1)
-
-        logger.error(
-            "Redis unavailable after 3 attempts — service will start without Redis. "
-            "Learning engine cache and rate-limiting will be disabled."
-        )
-        # Reset so get_redis_client() falls back to on-the-fly client
-        _redis_pool   = None
-        _redis_client = None
+        logger.error("Redis unavailable after 3 attempts — starting without Redis cache")
+        _redis_pool = _redis_client = None
         return False
 
 
 def get_redis_client() -> redis.Redis:
-    """
-    Return the shared Redis client.
-    Raises RuntimeError if init_redis() was never called.
-    """
+    global _redis_client, _redis_pool
     if _redis_client is None:
-        # Fallback: build a client on-the-fly (e.g. Celery worker process)
-        config = get_config()
-        return redis.from_url(
-            config.REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-            max_connections=5,
-            socket_timeout=10,
-            socket_connect_timeout=10,
-            socket_keepalive=True,
-            retry_on_timeout=True,
-            health_check_interval=30,
-        )
+        url = get_config().REDIS_URL
+        _redis_pool   = _build_pool_sync(url, 10)
+        _redis_client = redis.Redis(connection_pool=_redis_pool)
+        logger.info("Redis fallback client created")
     return _redis_client
 
 
 async def get_redis() -> redis.Redis:
-    """
-    Async alias used throughout the codebase: `redis = await get_redis()`.
-    Returns the shared client; initialises lazily if needed.
-    """
     if _redis_client is None:
         await init_redis()
     return get_redis_client()
 
 
 async def close_redis() -> None:
-    """Close all Redis connections. Call on application shutdown."""
     global _redis_client, _redis_pool
-
     try:
         if _redis_client:
             await _redis_client.aclose()
@@ -128,42 +95,34 @@ async def close_redis() -> None:
             _redis_pool = None
         logger.info("Redis connections closed")
     except Exception as e:
-        logger.error(f"Error closing Redis: {e}")
+        logger.error("Error closing Redis: %s", e)
 
 
 async def check_redis_health() -> bool:
     try:
-        client = get_redis_client()
-        await asyncio.wait_for(client.ping(), timeout=3.0)
+        await asyncio.wait_for(get_redis_client().ping(), timeout=3.0)
         return True
     except Exception as e:
-        logger.error(f"Redis health check failed: {e}")
+        logger.error("Redis health check failed: %s", e)
         return False
 
-
-# ── Simple cache helpers ──────────────────────────────────────────────────────
 
 async def get_cached(key: str) -> Optional[str]:
     try:
         return await get_redis_client().get(key)
-    except Exception as e:
-        logger.error(f"Redis GET '{key}': {e}")
+    except Exception:
         return None
-
 
 async def set_cached(key: str, value: str, ttl: int = 300) -> bool:
     try:
         await get_redis_client().setex(key, ttl, value)
         return True
-    except Exception as e:
-        logger.error(f"Redis SET '{key}': {e}")
+    except Exception:
         return False
-
 
 async def delete_cached(key: str) -> bool:
     try:
         await get_redis_client().delete(key)
         return True
-    except Exception as e:
-        logger.error(f"Redis DEL '{key}': {e}")
+    except Exception:
         return False
