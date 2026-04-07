@@ -1,273 +1,349 @@
 """
-emailservice — Redis Streams Client
-=====================================
-Cost-efficient Redis Streams consumer using BLOCKING reads.
+emailservice — Redis Streams Client (Event-Driven, Zero Idle Cost)
+===================================================================
+Architecture:
+  publish()  → XADD to stream + signal in-process asyncio.Event
+  consume()  → sleep on asyncio.Event → wake → XRANGE drain → XDEL
 
-Key design: XREADGROUP with block=30000ms
-- When stream is empty: Redis holds the connection for up to 30s, returns nil
-- When a message arrives: Redis returns it immediately (push, not poll)
-- Result: 1 Redis command per 30s when idle (vs 15/sec with short timeouts)
-- On message arrival: instant delivery, no polling delay
+Zero Redis commands when idle.
+No XREADGROUP. No XAUTOCLAIM. No blocking loops.
+No consumer groups — simpler, cheaper, no group overhead.
 
-Command budget at idle (5 workers):
-  5 workers × 1 XREADGROUP/30s = 0.17 commands/sec = ~500/hour
-  vs previous: 5 × 10/sec = 50 commands/sec = 180,000/hour
+Redis command budget:
+  Idle:   0 commands/sec (workers sleeping on asyncio.Event)
+  Active: 1 XADD (publish) + N XRANGE + N XDEL per batch (drain)
+  vs old: 3 workers × 1 XREADGROUP/8s = 22 commands/min idle
+  New:    0 commands/min idle
+
+Shard-aware routing:
+  partition_key (user_id) is hashed to a shard index.
+  Each shard has its own asyncio.Event — workers can be pinned to shards
+  for horizontal scaling without locks or duplicate processing.
+
+Startup recovery:
+  On startup, each stream is drained once to catch events from previous crash.
+  This costs 1 XRANGE per stream on startup, then 0 until next event.
 """
 from __future__ import annotations
-import asyncio, json, logging, time, uuid
-from typing import Optional
+import asyncio, hashlib, json, logging, time, uuid
+from collections import defaultdict
+from typing import Callable, Awaitable
 
 from shared.cache import get_redis_client
 import config as cfg
 
 logger = logging.getLogger("emailservice.streams")
 
-STREAM_MAXLEN  = 10_000
-N_SHARDS       = 1
-_CONSUMER_NAME = f"worker-{uuid.uuid4().hex[:8]}"
+STREAM_MAXLEN = 10_000
+N_SHARDS      = cfg.STREAM_N_SHARDS  # 1 by default; increase for horizontal scale
 
-# Block time for XREADGROUP. Must be < socket_timeout (15s) with headroom.
-# 8s block = Redis pushes messages instantly, returns nil after 8s if empty.
-# Cost: 5 workers × 1 cmd/8s = 0.6 cmd/sec = ~2,200/hour idle (vs 90,000 before)
-_BLOCK_MS = 8_000
+# ── Per-stream wake signals ───────────────────────────────────────────────────
+# Each logical stream has one asyncio.Event per shard.
+# publish() sets the event; the drain loop clears it after draining.
+_stream_events: dict[str, asyncio.Event] = defaultdict(asyncio.Event)
+
+
+def _wake_key(stream: str, shard: int = 0) -> str:
+    return f"{stream}:{shard}" if N_SHARDS > 1 else stream
+
+
+def _shard_for(partition_key: str) -> int:
+    if not partition_key or N_SHARDS <= 1:
+        return 0
+    return int(hashlib.md5(partition_key.encode()).hexdigest(), 16) % N_SHARDS
+
+
+def _stream_key(stream: str, partition_key: str = "") -> str:
+    shard = _shard_for(partition_key)
+    return f"{stream}:{shard}" if N_SHARDS > 1 else stream
 
 
 def _all_shards(stream: str) -> list[str]:
-    return [stream]
+    if N_SHARDS <= 1:
+        return [stream]
+    return [f"{stream}:{i}" for i in range(N_SHARDS)]
 
 
-def _shard_key(stream: str, partition_key: str = "") -> str:
-    return stream
+def _get_event(stream: str, partition_key: str = "") -> asyncio.Event:
+    """Get the asyncio.Event for a stream+shard combination."""
+    key = _wake_key(stream, _shard_for(partition_key))
+    return _stream_events[key]
 
 
 # ── Producer ──────────────────────────────────────────────────────────────────
 
 async def publish(stream: str, payload: dict, partition_key: str = "") -> None:
-    redis = get_redis_client()
+    """
+    Write event to Redis Stream and signal the in-process wake event.
+    The drain worker wakes immediately and processes the batch.
+    """
+    redis  = get_redis_client()
+    target = _stream_key(stream, partition_key)
     await redis.xadd(
-        stream,
+        target,
         {"data": json.dumps(payload, default=str)},
         maxlen=STREAM_MAXLEN,
         approximate=True,
     )
+    # Signal the drain worker — pure Python, zero Redis
+    _get_event(stream, partition_key).set()
 
 
 async def publish_batch(stream: str, events: list[tuple[dict, str]]) -> None:
+    """Publish multiple events in one pipeline round-trip, then signal once."""
     if not events:
         return
     redis = get_redis_client()
-    pipe = redis.pipeline(transaction=False)
-    for payload, _ in events:
-        pipe.xadd(
-            stream,
-            {"data": json.dumps(payload, default=str)},
-            maxlen=STREAM_MAXLEN,
-            approximate=True,
-        )
-    await pipe.execute()
+    # Group by shard for efficient pipelining
+    by_shard: dict[str, list[dict]] = {}
+    for payload, key in events:
+        shard_key = _stream_key(stream, key)
+        by_shard.setdefault(shard_key, []).append((payload, key))
+
+    for shard_key, shard_events in by_shard.items():
+        pipe = redis.pipeline(transaction=False)
+        for payload, _ in shard_events:
+            pipe.xadd(
+                shard_key,
+                {"data": json.dumps(payload, default=str)},
+                maxlen=STREAM_MAXLEN,
+                approximate=True,
+            )
+        await pipe.execute()
+
+    # Signal all affected shards once (not per-message)
+    signalled: set[str] = set()
+    for _, key in events:
+        wake_key = _wake_key(stream, _shard_for(key))
+        if wake_key not in signalled:
+            _stream_events[wake_key].set()
+            signalled.add(wake_key)
 
 
-# ── Consumer ──────────────────────────────────────────────────────────────────
+# ── Event-Driven Drain Consumer ───────────────────────────────────────────────
 
-class StreamConsumer:
+class EventDrivenConsumer:
     """
-    Blocking Redis Streams consumer.
+    Zero-idle-cost stream consumer.
 
-    Uses XREADGROUP with block=30000ms:
-    - Empty stream: 1 command per 30s (Redis holds connection, pushes on arrival)
-    - Message arrives: delivered instantly, no polling delay
-    - After each 30s timeout: runs XAUTOCLAIM to recover stuck pending messages
+    Lifecycle:
+      1. start()  → drain startup backlog (1 XRANGE per stream)
+      2. wait()   → sleep on asyncio.Event (0 Redis commands)
+      3. drain()  → XRANGE all messages → process → XDEL
+      4. goto 2
+
+    No XREADGROUP. No XAUTOCLAIM. No consumer groups.
+    No blocking Redis calls. No periodic timers.
+
+    Retry model:
+      Failed messages are re-added to the in-process retry queue with
+      exponential backoff. They are NOT left in Redis (no pending state).
+      After MAX_RETRIES, they go to the DLQ stream.
     """
 
-    def __init__(self, streams: list[str], group_id: str):
-        self.streams   = streams
-        self.group_id  = group_id
-        self._consumer = _CONSUMER_NAME
-        self._pending: list[tuple[str, str]] = []
-        self._running  = False
-        # XAUTOCLAIM: run once on startup (recover stuck messages), then every 5 min
-        self._last_autoclaim = 0.0          # 0 = run on first empty poll
-        self._autoclaim_interval = 300.0    # then every 5 minutes
+    MAX_RETRIES    = cfg.DLQ_MAX_RETRIES
+    DRAIN_BATCH    = 500   # max messages per drain cycle
+
+    def __init__(self, streams: list[str]):
+        self.streams  = streams
+        self._running = False
+        # Retry queue: (stream_key, payload_dict, retry_count, next_attempt_ts)
+        self._retry_queue: list[tuple[str, dict, int, float]] = []
 
     async def start(self) -> None:
-        """Create consumer groups with id=0 (read from beginning of stream)."""
+        """Ensure streams exist and drain any startup backlog."""
         redis = get_redis_client()
-        pipe = redis.pipeline(transaction=False)
+        pipe  = redis.pipeline(transaction=False)
         for stream in self.streams:
-            pipe.xgroup_create(stream, self.group_id, id="0", mkstream=True)
+            for shard in _all_shards(stream):
+                pipe.xlen(shard)  # creates the key if it doesn't exist via XADD later
         try:
             await pipe.execute(raise_on_error=False)
         except Exception:
-            pass  # BUSYGROUP = already exists = fine
+            pass
         self._running = True
-        logger.info("StreamConsumer | streams=%s group=%s consumer=%s",
-                    self.streams, self.group_id, self._consumer)
+        logger.info("EventDrivenConsumer | streams=%s", self.streams)
 
     async def stop(self) -> None:
         self._running = False
-        if self._pending:
-            await self._ack_pending()
-
-    async def getmany(self, max_records: int = 100) -> dict[str, list]:
-        """
-        Block until messages arrive or 30s timeout.
-        On timeout: check for pending/stuck messages via XAUTOCLAIM.
-        Returns immediately when messages are available.
-        """
-        redis = get_redis_client()
-        try:
-            raw = await redis.xreadgroup(
-                groupname=self.group_id,
-                consumername=self._consumer,
-                streams={s: ">" for s in self.streams},
-                count=max_records,
-                block=_BLOCK_MS,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            err = str(e)
-            # Socket timeout after block period = normal empty-stream behavior, not an error
-            if "timeout" in err.lower() or "timed out" in err.lower():
-                # Treat as empty result — check pending messages
-                return await self._claim_pending(redis, max_records)
-            logger.error("XREADGROUP error: %s", e)
-            await asyncio.sleep(2)
-            return {}
-
-        if raw:
-            return self._parse_raw(raw)
-
-        # Timeout — no new messages. Run XAUTOCLAIM on startup and every 5 min.
-        now = time.time()
-        if (now - self._last_autoclaim) >= self._autoclaim_interval:
-            self._last_autoclaim = now
-            return await self._claim_pending(redis, max_records)
-
-        return {}
-
-    def _parse_raw(self, raw) -> dict[str, list]:
-        result: dict[str, list] = {}
-        for stream_name, messages in raw:
-            for msg_id, fields in messages:
-                try:
-                    record = json.loads(fields.get("data", "{}"))
-                    record["_stream_id"] = msg_id
-                    record["_stream"]    = stream_name
-                    result.setdefault(stream_name, []).append(record)
-                    self._pending.append((stream_name, msg_id))
-                except Exception as e:
-                    logger.error("Parse error for msg %s: %s", msg_id, e)
-                    # ACK unparseable messages so they don't block forever
-                    asyncio.create_task(self._ack_one(stream_name, msg_id))
-        return result
-
-    async def _claim_pending(self, redis, max_records: int) -> dict[str, list]:
-        """
-        Reclaim messages delivered to a crashed consumer (pending > 30s).
-        Called after each 30s timeout — costs 1 XAUTOCLAIM per stream per 30s.
-        """
-        result: dict[str, list] = {}
+        # Wake all events so any waiting coroutines can exit
         for stream in self.streams:
-            try:
-                claimed = await redis.xautoclaim(
-                    stream, self.group_id, self._consumer,
-                    min_idle_time=30_000,
-                    start_id="0-0",
-                    count=max_records,
-                )
-                messages = claimed[1] if isinstance(claimed, (list, tuple)) and len(claimed) > 1 else []
-                for msg_id, fields in messages:
-                    try:
-                        record = json.loads(fields.get("data", "{}"))
-                        record["_stream_id"] = msg_id
-                        record["_stream"]    = stream
-                        record["_reclaimed"] = True
-                        result.setdefault(stream, []).append(record)
-                        self._pending.append((stream, msg_id))
-                    except Exception as e:
-                        logger.error("Parse error for reclaimed msg %s: %s", msg_id, e)
-                        asyncio.create_task(self._ack_one(stream, msg_id))
-                if messages:
-                    logger.info("Reclaimed %d pending messages from %s", len(messages), stream)
-            except Exception as e:
-                logger.debug("XAUTOCLAIM skipped for %s: %s", stream, e)
-        return result
+            for shard in range(max(N_SHARDS, 1)):
+                _stream_events[_wake_key(stream, shard)].set()
 
-    async def commit(self) -> None:
-        await self._ack_pending()
+    async def drain_once(self) -> list[dict]:
+        """
+        Drain all pending messages from all shards of all streams.
+        Returns list of parsed records. Deletes successfully-read messages.
+        Called by the worker after waking from asyncio.Event.
+        """
+        redis   = get_redis_client()
+        records = []
 
-    async def _ack_pending(self) -> None:
-        if not self._pending:
-            return
-        redis = get_redis_client()
-        by_stream: dict[str, list[str]] = {}
-        for stream, msg_id in self._pending:
-            by_stream.setdefault(stream, []).append(msg_id)
-        pipe = redis.pipeline(transaction=False)
-        for stream, ids in by_stream.items():
-            pipe.xack(stream, self.group_id, *ids)
-        try:
-            await pipe.execute()
-        except Exception as e:
-            logger.error("XACK failed: %s", e)
-        self._pending.clear()
+        for stream in self.streams:
+            for shard_key in _all_shards(stream):
+                try:
+                    messages = await redis.xrange(shard_key, "-", "+", count=self.DRAIN_BATCH)
+                    if not messages:
+                        continue
 
-    async def _ack_one(self, stream: str, msg_id: str) -> None:
-        try:
-            await get_redis_client().xack(stream, self.group_id, msg_id)
-        except Exception:
-            pass
+                    ids_to_delete = []
+                    for msg_id, fields in messages:
+                        try:
+                            record = json.loads(fields.get("data", "{}"))
+                            record["_stream_id"]  = msg_id
+                            record["_stream"]     = stream
+                            record["_shard_key"]  = shard_key
+                            records.append(record)
+                            ids_to_delete.append(msg_id)
+                        except Exception as e:
+                            logger.error("Parse error for msg %s: %s", msg_id, e)
+                            ids_to_delete.append(msg_id)  # delete unparseable
 
-    def assignment(self) -> list[str]:
-        return list(self.streams)
+                    # Delete in one pipeline call
+                    if ids_to_delete:
+                        pipe = redis.pipeline(transaction=False)
+                        for mid in ids_to_delete:
+                            pipe.xdel(shard_key, mid)
+                        await pipe.execute(raise_on_error=False)
+
+                except Exception as e:
+                    logger.error("Drain error for %s: %s", shard_key, e)
+
+        # Also drain any due retry items
+        now = time.monotonic()
+        due = [(sk, p, rc) for sk, p, rc, ts in self._retry_queue if ts <= now]
+        self._retry_queue = [(sk, p, rc, ts) for sk, p, rc, ts in self._retry_queue if ts > now]
+
+        for shard_key, payload, retry_count in due:
+            payload["_retry_count"] = retry_count
+            payload["_stream"]      = shard_key.split(":")[0] if ":" in shard_key else shard_key
+            payload["_shard_key"]   = shard_key
+            records.append(payload)
+
+        return records
+
+    def requeue(self, record: dict, reason: str = "") -> None:
+        """
+        Re-queue a failed record with exponential backoff.
+        After MAX_RETRIES, the record is sent to DLQ (handled by caller).
+        """
+        retry_count = record.get("_retry_count", 0) + 1
+        shard_key   = record.get("_shard_key", record.get("_stream", "unknown"))
+        delay       = min(cfg.STORE_RETRY_BASE_DELAY_S * (2 ** (retry_count - 1)), 300.0)
+        next_ts     = time.monotonic() + delay
+
+        # Strip internal fields before re-queuing
+        payload = {k: v for k, v in record.items() if not k.startswith("_")}
+
+        self._retry_queue.append((shard_key, payload, retry_count, next_ts))
+        logger.debug("Requeued msg %s (attempt %d, delay=%.1fs): %s",
+                     record.get("message_id", "?"), retry_count, delay, reason)
+
+        # Wake the drain loop so it picks up retries when they're due
+        if self._retry_queue:
+            for stream in self.streams:
+                _stream_events[_wake_key(stream)].set()
+
+    def has_pending_retries(self) -> bool:
+        return bool(self._retry_queue)
+
+    def next_retry_delay(self) -> float:
+        """Seconds until the next retry is due (0 if none pending)."""
+        if not self._retry_queue:
+            return 0.0
+        now = time.monotonic()
+        return max(0.0, min(ts - now for _, _, _, ts in self._retry_queue))
 
 
 # ── Stream setup ──────────────────────────────────────────────────────────────
 
 async def ensure_streams() -> None:
     """
-    Create only the recovery stream (no consumer group needed).
-    Uses XRANGE/XDEL pattern — simpler than XREADGROUP, no group overhead.
-    Cleans up all old stream keys from previous architecture.
+    Ensure all stream keys exist. No consumer groups needed.
+    Clean up legacy XREADGROUP-era keys.
     """
     redis = get_redis_client()
 
-    # Ensure recovery stream exists (XADD a sentinel then delete it)
+    # All logical streams used by the system
+    all_streams = [
+        cfg.TOPIC_GMAIL_RAW,
+        cfg.TOPIC_OUTLOOK_RAW,
+        cfg.TOPIC_SMTP_RAW,
+        cfg.TOPIC_STORE_READY,
+        cfg.TOPIC_AI_EVENTS,
+        cfg.TOPIC_DLQ,
+    ]
+
+    # Streams exist implicitly when first XADD is called.
+    # Just log what we expect to use.
+    logger.info("Event-driven streams configured: %s (N_SHARDS=%d)", all_streams, N_SHARDS)
+
+    # Clean up legacy consumer group keys and old shard keys
+    old_groups = [
+        cfg.CG_GMAIL_FETCH, cfg.CG_OUTLOOK_FETCH, cfg.CG_SMTP_FETCH,
+        cfg.CG_STORAGE, cfg.CG_AI_HANDOFF, cfg.CG_DLQ_MONITOR,
+        cfg.CG_FILTER_DEDUP,
+    ]
+    old_suffixes = [":0", ":1", ":2", ":3"]
+    old_bases    = all_streams + ["automation_events", "fetch_results", "email_queue"]
+
+    pipe = redis.pipeline(transaction=False)
+    # Delete old consumer groups
+    for stream in all_streams:
+        for group in old_groups:
+            pipe.xgroup_destroy(stream, group)
+    # Delete old shard keys
+    for base in old_bases:
+        for suffix in old_suffixes:
+            pipe.delete(f"{base}{suffix}")
+    try:
+        await pipe.execute(raise_on_error=False)
+        logger.info("Legacy XREADGROUP consumer groups and shard keys cleaned up")
+    except Exception:
+        pass
+
+    # Recovery stream (XRANGE/XDEL pattern — no group)
     from workers.recovery_worker import RECOVERY_STREAM
     try:
-        # Just ensure the key exists — no consumer group needed
         length = await redis.xlen(RECOVERY_STREAM)
-        logger.info("Recovery stream ready: %s (length=%d)", RECOVERY_STREAM, length)
-    except Exception:
-        # Stream doesn't exist yet — will be created on first XADD
-        logger.info("Recovery stream will be created on first failure event")
-
-    # Clean up all old stream keys from previous architecture
-    old_streams = [
-        "gmail_events", "outlook_events", "smtp_events",
-        "fetch_results", "store_ready", "ai_events", "email_dlq",
-        "automation_events",
-    ]
-    pipe = redis.pipeline(transaction=False)
-    for stream in old_streams:
-        for suffix in ["", ":0", ":1", ":2", ":3"]:
-            pipe.delete(f"{stream}{suffix}")
-    try:
-        results = await pipe.execute(raise_on_error=False)
-        deleted = sum(1 for r in results if r == 1)
-        if deleted:
-            logger.info("Cleaned up %d old stream keys", deleted)
+        if length:
+            logger.info("Recovery stream has %d leftover events — will drain on startup", length)
     except Exception:
         pass
 
 
-async def get_stream_lag(stream: str, group_id: str) -> int:
+async def get_stream_lag(stream: str, group_id: str = "") -> int:
+    """Returns approximate number of unprocessed messages in a stream."""
     try:
-        groups = await get_redis_client().xinfo_groups(stream)
-        for g in groups:
-            if g.get("name") == group_id:
-                return int(g.get("pending", 0))
+        total = 0
+        for shard in _all_shards(stream):
+            total += await get_redis_client().xlen(shard)
+        return total
     except Exception:
-        pass
-    return 0
+        return 0
+
+
+# ── Backward-compat shim (kafka_client.py uses make_consumer) ─────────────────
+
+class StreamConsumer:
+    """
+    Backward-compatible shim. Returns an EventDrivenConsumer.
+    BaseWorker calls make_consumer() → this class.
+    """
+    def __init__(self, streams: list[str], group_id: str):
+        self._inner = EventDrivenConsumer(streams)
+        self.streams  = streams
+        self.group_id = group_id
+
+    async def start(self) -> None:
+        await self._inner.start()
+
+    async def stop(self) -> None:
+        await self._inner.stop()
+
+    def get_inner(self) -> EventDrivenConsumer:
+        return self._inner
+
+    def assignment(self) -> list[str]:
+        return list(self.streams)

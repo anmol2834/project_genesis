@@ -1,170 +1,326 @@
 """
-emailservice — SMTP/IMAP Fetch Worker
-Consumes from: smtp_events (published by SmtpPoller)
-Produces to:   fetch_results
+emailservice — SMTP/IMAP Worker (IMAP IDLE — push-based)
+==========================================================
+Replaces the polling-based SmtpPoller with IMAP IDLE connections.
 
-Also runs the SmtpPoller internally — smart polling:
-  - Active users (last message < 1h): poll every 60s
-  - Inactive users: poll every 300s
-  - IMAP IDLE when server supports it
+IMAP IDLE (RFC 2177):
+  - Server pushes EXISTS/RECENT notifications when new mail arrives
+  - Client holds a persistent connection, no polling
+  - Timeout: 29 minutes (RFC recommends < 30 min), then re-issue IDLE
+  - Zero Redis commands while idle — only fires when mail arrives
+
+Architecture:
+  - One IdleConnection per SMTP account (managed by ImapIdleManager)
+  - On new mail notification: fetch UNSEEN messages → publish to store_ready
+  - On connection error: reconnect after IMAP_RECONNECT_DELAY_S
+  - Graceful shutdown: sends DONE command before closing
+
+Fallback for servers that don't support IDLE:
+  - Falls back to NOOP polling every IMAP_IDLE_TIMEOUT_S seconds
+  - Still far better than the old 30s polling loop
 """
 from __future__ import annotations
-import asyncio, email as _email_lib, imaplib, logging, time
+import asyncio, email as _email_lib, imaplib, logging, re, time
 from datetime import datetime
 from email.header import decode_header
 from typing import Optional
 
 import config as cfg
-from workers.base_worker import BaseWorker
-from kafka_client import publish, publish_batch
+from pipeline import store_message_with_retry
 from token_cache import get_account_snapshot
 from shared.database import get_db_session
-from shared.cache import get_redis
+from idempotency import get_idempotency_cache
+from metrics import M
 
 logger = logging.getLogger("emailservice.smtp_fetch")
 
 
-class SmtpFetchWorker(BaseWorker):
-    """Consumes smtp_events and fetches IMAP messages."""
-    topics   = [cfg.TOPIC_SMTP_RAW]
-    group_id = cfg.CG_SMTP_FETCH
+class ImapIdleConnection:
+    """
+    Manages a single IMAP IDLE connection for one account.
+    Push-based: server notifies us when new mail arrives.
+    """
 
-    async def process_batch(self, records: list[dict]) -> None:
-        sem = asyncio.Semaphore(cfg.WORKER_CONCURRENCY)
-        tasks = [self._process_one(rec, sem) for rec in records]
-        await asyncio.gather(*tasks, return_exceptions=True)
+    def __init__(self, snap: dict):
+        self._snap    = snap
+        self._running = False
+        self._imap: Optional[imaplib.IMAP4_SSL] = None
 
-    async def _process_one(self, rec: dict, sem: asyncio.Semaphore) -> None:
-        async with sem:
-            account_id = rec.get("account_id", "")
-            email_addr = rec.get("email_address", "")
-            if not account_id:
-                return
+    async def run(self) -> None:
+        """Main loop: connect → IDLE → on notification fetch → repeat."""
+        self._running = True
+        email = self._snap.get("email_address", "?")
+        logger.info("IMAP IDLE started | email=%s", email)
 
-            snap = await get_account_snapshot(email_addr) if email_addr else None
-            if not snap:
-                snap = await self._load_snap_by_id(account_id)
-            if not snap:
-                return
+        while self._running:
+            try:
+                await self._connect_and_idle()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("IMAP IDLE error for %s: %s — reconnecting in %ds",
+                             email, e, cfg.IMAP_RECONNECT_DELAY_S)
+                await asyncio.sleep(cfg.IMAP_RECONNECT_DELAY_S)
 
-            messages = await self._fetch_imap(snap)
-            if not messages:
-                return
+    async def stop(self) -> None:
+        self._running = False
+        if self._imap:
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self._close_imap)
+            except Exception:
+                pass
 
-            events = [
-                (
-                    {
-                        "provider":         "smtp",
-                        "email_address":    snap["email_address"],
-                        "user_id":          snap["user_id"],
-                        "email_account_id": snap["id"],
-                        **msg,
-                        "timestamp": msg["timestamp"].isoformat()
-                            if isinstance(msg.get("timestamp"), datetime) else msg.get("timestamp", ""),
-                    },
-                    snap["user_id"],
-                )
-                for msg in messages
-            ]
-            await publish_batch(cfg.TOPIC_FETCH_RESULTS, events)
-
-    async def _load_snap_by_id(self, account_id: str) -> Optional[dict]:
+    def _close_imap(self) -> None:
         try:
-            from models.email_account import EmailAccount
-            from sqlalchemy import select
-            from uuid import UUID
-            async with get_db_session() as session:
-                acct = (await session.execute(
-                    select(EmailAccount).where(EmailAccount.id == UUID(account_id))
-                )).scalar_one_or_none()
-                if not acct:
-                    return None
-                return {
-                    "id": str(acct.id), "user_id": str(acct.user_id),
-                    "email_address": acct.email_address, "provider": acct.provider.value,
-                    "smtp_host": acct.smtp_host, "smtp_port": acct.smtp_port,
-                    "smtp_username": acct.smtp_username, "smtp_password": acct.smtp_password,
-                    "imap_host": acct.imap_host, "imap_port": acct.imap_port,
-                    "last_synced_at": acct.last_synced_at.isoformat() if acct.last_synced_at else None,
-                }
-        except Exception as e:
-            logger.error("Failed to load SMTP snap: %s", e)
-            return None
+            self._imap.send(b"DONE\r\n")
+        except Exception:
+            pass
+        try:
+            self._imap.logout()
+        except Exception:
+            pass
+        self._imap = None
 
-    async def _fetch_imap(self, snap: dict) -> list[dict]:
-        """Fetch new IMAP messages in a thread pool (blocking I/O)."""
+    async def _connect_and_idle(self) -> None:
         loop = asyncio.get_event_loop()
-        try:
-            return await loop.run_in_executor(None, self._fetch_imap_sync, snap)
-        except Exception as e:
-            logger.error("IMAP fetch failed for %s: %s", snap.get("email_address"), e)
-            return []
+        snap = self._snap
 
-    def _fetch_imap_sync(self, snap: dict) -> list[dict]:
+        # Refresh snap in case credentials changed
+        fresh = await get_account_snapshot(snap["email_address"])
+        if fresh:
+            self._snap = snap = fresh
+
         from encryption import decrypt_token
         host = snap.get("imap_host") or snap.get("smtp_host") or "imap.gmail.com"
         port = snap.get("imap_port") or 993
         user = snap.get("smtp_username") or snap.get("email_address")
         pwd  = decrypt_token(snap["smtp_password"]) if snap.get("smtp_password") else ""
 
+        # Connect + login in thread pool (blocking I/O)
+        def _connect():
+            imap = imaplib.IMAP4_SSL(host, port)
+            imap.login(user, pwd)
+            imap.select("INBOX")
+            return imap
+
+        self._imap = await loop.run_in_executor(None, _connect)
+
+        # Check for IDLE capability
+        caps = self._imap.capabilities
+        supports_idle = b"IDLE" in caps if caps else False
+
+        if supports_idle:
+            await self._idle_loop(loop)
+        else:
+            # Fallback: NOOP every IMAP_IDLE_TIMEOUT_S
+            await self._noop_loop(loop)
+
+    async def _idle_loop(self, loop) -> None:
+        """True IMAP IDLE — server pushes notifications."""
+        email = self._snap.get("email_address", "?")
+        while self._running:
+            # Send IDLE command
+            def _start_idle():
+                self._imap.send(b"A001 IDLE\r\n")
+                # Read the continuation response (+ idling)
+                self._imap.readline()
+
+            await loop.run_in_executor(None, _start_idle)
+
+            # Wait for server notification (up to IMAP_IDLE_TIMEOUT_S)
+            def _wait_for_notification():
+                self._imap.sock.settimeout(cfg.IMAP_IDLE_TIMEOUT_S)
+                try:
+                    line = self._imap.readline()
+                    return line
+                except Exception:
+                    return b""
+
+            notification = await loop.run_in_executor(None, _wait_for_notification)
+
+            # Send DONE to exit IDLE
+            def _end_idle():
+                try:
+                    self._imap.send(b"DONE\r\n")
+                    self._imap.readline()  # OK response
+                except Exception:
+                    pass
+
+            await loop.run_in_executor(None, _end_idle)
+
+            # If we got a real notification (EXISTS/RECENT), fetch new messages
+            if notification and (b"EXISTS" in notification or b"RECENT" in notification):
+                logger.debug("IMAP IDLE notification for %s: %s", email, notification[:80])
+                await self._fetch_and_store(loop)
+
+    async def _noop_loop(self, loop) -> None:
+        """Fallback for servers without IDLE support."""
+        while self._running:
+            await asyncio.sleep(cfg.IMAP_IDLE_TIMEOUT_S)
+            def _noop():
+                self._imap.noop()
+            await loop.run_in_executor(None, _noop)
+            await self._fetch_and_store(loop)
+
+    async def _fetch_and_store(self, loop) -> None:
+        """Fetch UNSEEN messages and store them via pipeline."""
+        snap = self._snap
+        messages = await loop.run_in_executor(None, self._fetch_unseen)
+        if not messages:
+            return
+
+        idem = get_idempotency_cache()
+        stored = 0
+        for msg in messages:
+            event_id = f"smtp:{snap['id']}:{msg['message_id']}"
+            if idem.check_and_mark("smtp_store", event_id):
+                continue
+
+            msg["user_id"]    = snap["user_id"]
+            msg["account_id"] = snap["id"]
+            msg["provider"]   = "smtp"
+            msg["event_id"]   = event_id
+            msg["direction"]  = "incoming"
+
+            ok = await store_message_with_retry(msg)
+            if ok:
+                stored += 1
+
+        if stored:
+            logger.info("IMAP IDLE: stored %d messages for %s", stored, snap.get("email_address"))
+            M.messages_processed.labels(provider="smtp", status="ok").inc(stored)
+
+    def _fetch_unseen(self) -> list[dict]:
         messages = []
         try:
-            with imaplib.IMAP4_SSL(host, port) as imap:
-                imap.login(user, pwd)
-                imap.select("INBOX")
-                # Fetch UNSEEN messages only
-                _, data = imap.search(None, "UNSEEN")
-                msg_nums = data[0].split()
-                for num in msg_nums[-50:]:  # max 50 per poll
-                    _, raw = imap.fetch(num, "(RFC822)")
-                    if raw and raw[0]:
-                        parsed = self._parse_raw_email(raw[0][1])
-                        if parsed:
-                            messages.append(parsed)
+            _, data = self._imap.search(None, "UNSEEN")
+            msg_nums = data[0].split()
+            for num in msg_nums[-50:]:  # max 50 per fetch
+                _, raw = self._imap.fetch(num, "(RFC822)")
+                if raw and raw[0]:
+                    parsed = _parse_raw_email(raw[0][1])
+                    if parsed:
+                        messages.append(parsed)
         except Exception as e:
-            logger.error("IMAP sync error: %s", e)
-
+            logger.error("IMAP fetch error: %s", e)
         return messages
 
-    def _parse_raw_email(self, raw: bytes) -> Optional[dict]:
-        try:
-            msg = _email_lib.message_from_bytes(raw)
-            subject = _decode_header_value(msg.get("Subject", ""))
-            from_raw = msg.get("From", "")
-            to_raw   = msg.get("To", "")
-            msg_id   = msg.get("Message-ID", "").strip("<>")
-            thread_id = msg.get("References", msg_id).split()[-1].strip("<>") if msg.get("References") else msg_id
 
-            content = ""
-            for part in msg.walk():
-                if part.get_content_type() == "text/plain":
-                    content = part.get_payload(decode=True).decode("utf-8", errors="ignore")
-                    break
+class ImapIdleManager:
+    """
+    Manages IMAP IDLE connections for all active SMTP accounts.
+    Starts one IdleConnection per account on startup.
+    Monitors for new accounts added at runtime.
+    """
 
-            date_str = msg.get("Date", "")
+    def __init__(self):
+        self._connections: dict[str, ImapIdleConnection] = {}
+        self._running = False
+        self._monitor_task: Optional[asyncio.Task] = None
+
+    async def start(self) -> None:
+        self._running = True
+        accounts = await _load_smtp_accounts()
+        for acct in accounts:
+            await self._start_account(acct)
+        # Monitor for new accounts every 5 minutes
+        self._monitor_task = asyncio.create_task(self._monitor_loop())
+        logger.info("ImapIdleManager started | accounts=%d", len(self._connections))
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._monitor_task:
+            self._monitor_task.cancel()
+        for conn in self._connections.values():
+            await conn.stop()
+        self._connections.clear()
+
+    async def _start_account(self, acct: dict) -> None:
+        account_id = acct["id"]
+        if account_id in self._connections:
+            return
+        snap = await get_account_snapshot(acct["email_address"])
+        if not snap or not snap.get("smtp_password"):
+            return
+        conn = ImapIdleConnection(snap)
+        self._connections[account_id] = conn
+        asyncio.create_task(conn.run())
+        logger.info("IMAP IDLE connection started | email=%s", acct["email_address"])
+
+    async def _monitor_loop(self) -> None:
+        """Check for new SMTP accounts every 5 minutes."""
+        while self._running:
+            await asyncio.sleep(300)
             try:
-                from email.utils import parsedate_to_datetime
-                ts = parsedate_to_datetime(date_str).replace(tzinfo=None)
-            except Exception:
-                ts = datetime.utcnow()
+                accounts = await _load_smtp_accounts()
+                for acct in accounts:
+                    if acct["id"] not in self._connections:
+                        await self._start_account(acct)
+            except Exception as e:
+                logger.error("ImapIdleManager monitor error: %s", e)
 
-            return {
-                "message_id":      msg_id or f"smtp-{time.time()}",
-                "thread_id":       thread_id,
-                "subject":         subject,
-                "from_email":      _parse_email_addr(from_raw),
-                "to_emails":       [_parse_email_addr(a) for a in to_raw.split(",") if a.strip()],
-                "cc_emails":       [],
-                "content":         content.strip() or "(no content)",
-                "timestamp":       ts,
-                "has_attachments": any(
-                    part.get_filename() for part in msg.walk() if part.get_filename()
-                ),
-                "metadata":        {},
-            }
-        except Exception as e:
-            logger.error("Email parse error: %s", e)
-            return None
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _load_smtp_accounts() -> list[dict]:
+    try:
+        from models.email_account import EmailAccount, EmailProvider
+        from sqlalchemy import select
+        async with get_db_session() as session:
+            result = await session.execute(
+                select(EmailAccount.id, EmailAccount.user_id, EmailAccount.email_address)
+                .where(
+                    EmailAccount.provider.in_([EmailProvider.SMTP, EmailProvider.YAHOO, EmailProvider.ZOHO]),
+                    EmailAccount.is_active == True,
+                )
+            )
+            return [
+                {"id": str(r[0]), "user_id": str(r[1]), "email_address": r[2]}
+                for r in result.all()
+            ]
+    except Exception as e:
+        logger.error("Failed to load SMTP accounts: %s", e)
+        return []
+
+
+def _parse_raw_email(raw: bytes) -> Optional[dict]:
+    try:
+        msg = _email_lib.message_from_bytes(raw)
+        subject  = _decode_header_value(msg.get("Subject", ""))
+        from_raw = msg.get("From", "")
+        to_raw   = msg.get("To", "")
+        msg_id   = msg.get("Message-ID", "").strip("<>")
+        thread_id = msg.get("References", msg_id).split()[-1].strip("<>") if msg.get("References") else msg_id
+
+        content = ""
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                content = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                break
+
+        date_str = msg.get("Date", "")
+        try:
+            from email.utils import parsedate_to_datetime
+            ts = parsedate_to_datetime(date_str).replace(tzinfo=None)
+        except Exception:
+            ts = datetime.utcnow()
+
+        return {
+            "message_id":      msg_id or f"smtp-{time.time()}",
+            "thread_id":       thread_id,
+            "subject":         subject,
+            "from_email":      _parse_email_addr(from_raw),
+            "to_emails":       [_parse_email_addr(a) for a in to_raw.split(",") if a.strip()],
+            "cc_emails":       [],
+            "content":         content.strip() or "(no content)",
+            "timestamp":       ts,
+            "has_attachments": any(part.get_filename() for part in msg.walk() if part.get_filename()),
+            "metadata":        {},
+        }
+    except Exception as e:
+        logger.error("Email parse error: %s", e)
+        return None
 
 
 def _decode_header_value(value: str) -> str:
@@ -179,94 +335,5 @@ def _decode_header_value(value: str) -> str:
 
 
 def _parse_email_addr(s: str) -> str:
-    import re
     m = re.search(r'<([^>]+)>', s)
     return m.group(1) if m else s.strip()
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# SMTP SMART POLLER
-# Runs as a background task inside the SMTP fetch worker process.
-# Publishes smtp_events to Kafka based on activity level.
-# ═════════════════════════════════════════════════════════════════════════════
-
-class SmtpPoller:
-    """
-    Smart SMTP poller — polls active users frequently, inactive users rarely.
-    Publishes smtp_events to Kafka; SmtpFetchWorker consumes them.
-    """
-
-    async def run(self) -> None:
-        logger.info("SmtpPoller started")
-        while True:
-            try:
-                await self._poll_all()
-            except Exception as e:
-                logger.error("SmtpPoller error: %s", e)
-            await asyncio.sleep(30)  # check every 30s, actual poll interval per account
-
-    async def _poll_all(self) -> None:
-        accounts = await self._load_smtp_accounts()
-        now = time.time()
-
-        for acct in accounts:
-            account_id = acct["id"]
-            email      = acct["email_address"]
-            last_msg   = acct.get("last_message_at_ts", 0)
-            last_poll  = await self._get_last_poll(account_id)
-
-            # Determine poll interval based on activity
-            is_active = (now - last_msg) < cfg.SMTP_ACTIVE_THRESHOLD
-            interval  = cfg.SMTP_POLL_ACTIVE_SECS if is_active else cfg.SMTP_POLL_INACTIVE_SECS
-
-            if (now - last_poll) < interval:
-                continue  # not time yet
-
-            await publish(
-                cfg.TOPIC_SMTP_RAW,
-                {"account_id": account_id, "email_address": email},
-                partition_key=acct.get("user_id", account_id),
-            )
-            await self._set_last_poll(account_id, now)
-
-    async def _load_smtp_accounts(self) -> list[dict]:
-        try:
-            from models.email_account import EmailAccount, EmailProvider
-            from models.conversations import EmailConversation
-            from sqlalchemy import select, func
-            async with get_db_session() as session:
-                result = await session.execute(
-                    select(
-                        EmailAccount.id, EmailAccount.user_id, EmailAccount.email_address,
-                        func.max(EmailConversation.last_message_at).label("last_msg"),
-                    )
-                    .outerjoin(EmailConversation, EmailConversation.email_account_id == EmailAccount.id)
-                    .where(
-                        EmailAccount.provider.in_([EmailProvider.SMTP, EmailProvider.YAHOO, EmailProvider.ZOHO]),
-                        EmailAccount.is_active == True,
-                    )
-                    .group_by(EmailAccount.id, EmailAccount.user_id, EmailAccount.email_address)
-                )
-                return [
-                    {"id": str(r[0]), "user_id": str(r[1]), "email_address": r[2],
-                     "last_message_at_ts": r[3].timestamp() if r[3] else 0}
-                    for r in result.all()
-                ]
-        except Exception as e:
-            logger.error("Failed to load SMTP accounts: %s", e)
-            return []
-
-    async def _get_last_poll(self, account_id: str) -> float:
-        try:
-            redis = await get_redis()
-            val = await redis.get(f"es:smtp:poll:{account_id}")
-            return float(val) if val else 0.0
-        except Exception:
-            return 0.0
-
-    async def _set_last_poll(self, account_id: str, ts: float) -> None:
-        try:
-            redis = await get_redis()
-            await redis.setex(f"es:smtp:poll:{account_id}", 3600, str(ts))
-        except Exception:
-            pass

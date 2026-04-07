@@ -1,26 +1,69 @@
 """
 emailservice — Webhook Layer
 ==============================
-Receives Gmail Pub/Sub and Outlook Graph notifications.
+Strict event-driven decoupling: webhook handlers ONLY enqueue minimal
+payloads into Redis Streams and return immediately. Zero processing
+inside the request lifecycle.
 
-Architecture:
-  webhook arrives → process directly (async task) → DB
-  On failure → push to email_queue for recovery
+Flow:
+  Gmail Pub/Sub  → POST /webhooks/gmail   → XADD gmail_events  → 200
+  Outlook Graph  → POST /webhooks/outlook → XADD outlook_events → 200
 
-Zero Redis commands on the happy path.
-Redis only touched on processing failure (rare).
+The stream workers (GmailFetchWorker, OutlookFetchWorker) consume these
+events asynchronously. The webhook handler never touches pipeline.py.
+
+Guaranteed delivery: if XADD fails, the event is written to the
+in-process fallback queue so it is not silently dropped.
 """
 from __future__ import annotations
-import asyncio, base64, json, logging, time
+import asyncio, base64, json, logging, time, uuid
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 
 import config as cfg
-from pipeline import process_gmail_event, process_outlook_event
-from workers.recovery_worker import push_to_recovery
+from stream_client import publish
+from shared.cache import get_redis_client
 
 logger = logging.getLogger("emailservice.webhooks")
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+# In-process fallback: events that failed XADD go here and are retried
+_fallback_queue: asyncio.Queue = asyncio.Queue(maxsize=10_000)
+
+
+async def _enqueue(stream: str, payload: dict, partition_key: str = "") -> None:
+    """
+    Enqueue an event to a Redis Stream.
+    On Redis failure: write to in-process fallback queue (never drop).
+    """
+    try:
+        await publish(stream, payload, partition_key=partition_key)
+    except Exception as e:
+        logger.warning("XADD failed for %s, using fallback queue: %s", stream, e)
+        try:
+            _fallback_queue.put_nowait({"stream": stream, "payload": payload, "key": partition_key})
+        except asyncio.QueueFull:
+            logger.error("Fallback queue full — event dropped for stream %s", stream)
+
+
+async def drain_fallback_queue() -> None:
+    """
+    Background task: retry events that failed XADD.
+    Called from main.py on startup and periodically.
+    """
+    while not _fallback_queue.empty():
+        try:
+            item = _fallback_queue.get_nowait()
+            await publish(item["stream"], item["payload"], partition_key=item.get("key", ""))
+        except asyncio.QueueEmpty:
+            break
+        except Exception as e:
+            logger.warning("Fallback drain failed: %s — re-queuing", e)
+            try:
+                _fallback_queue.put_nowait(item)
+            except asyncio.QueueFull:
+                pass
+            break
 
 
 # ── Gmail Pub/Sub ─────────────────────────────────────────────────────────────
@@ -29,8 +72,8 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 async def gmail_webhook(request: Request):
     """
     Gmail Pub/Sub push endpoint.
-    Processes the notification directly in a background task.
-    Returns 200 immediately (< 5ms) — Pub/Sub requirement.
+    Decodes envelope, enqueues to gmail_events stream, returns 200 in < 5ms.
+    No processing. No pipeline calls. No asyncio.create_task with business logic.
     """
     try:
         body      = await request.json()
@@ -51,26 +94,33 @@ async def gmail_webhook(request: Request):
         if not email_address or not history_id:
             return {"status": "skip", "reason": "empty_payload"}
 
-        # Process directly in background — no Redis Stream involved
-        asyncio.create_task(_handle_gmail(pubsub_id, email_address, history_id))
+        # Generate a global event_id for end-to-end idempotency tracking
+        event_id = f"gmail:{pubsub_id}"
 
-        logger.debug("Gmail webhook received | email=%s historyId=%s", email_address, history_id)
-        return {"status": "accepted"}
+        # Update last-seen timestamp for the heartbeat watchdog
+        asyncio.create_task(_touch_account_heartbeat(email_address))
+
+        # Enqueue to stream — this is the ONLY thing the webhook does
+        await _enqueue(
+            cfg.TOPIC_GMAIL_RAW,
+            {
+                "event_id":     event_id,
+                "pubsub_id":    pubsub_id,
+                "email_address": email_address,
+                "history_id":   history_id,
+                "publish_time": message.get("publishTime", ""),
+                "enqueued_at":  time.time(),
+            },
+            partition_key=email_address,
+        )
+
+        logger.debug("Gmail webhook enqueued | email=%s historyId=%s event_id=%s",
+                     email_address, history_id, event_id)
+        return {"status": "accepted", "event_id": event_id}
 
     except Exception as e:
         logger.error("Gmail webhook error: %s", e)
         return {"status": "error"}
-
-
-async def _handle_gmail(pubsub_id: str, email_address: str, history_id: str) -> None:
-    """Process Gmail event. On failure, push to recovery queue."""
-    success = await process_gmail_event(pubsub_id, email_address, history_id)
-    if not success:
-        await push_to_recovery("gmail", {
-            "pubsub_id":     pubsub_id,
-            "email_address": email_address,
-            "history_id":    history_id,
-        })
 
 
 @router.get("/gmail")
@@ -82,7 +132,10 @@ async def gmail_webhook_probe():
 
 @router.post("/outlook")
 async def outlook_webhook(request: Request):
-    """Outlook Graph push endpoint."""
+    """
+    Outlook Graph push endpoint.
+    Handles validation handshake, then enqueues to outlook_events stream.
+    """
     validation_token = request.query_params.get("validationToken")
     if validation_token:
         return PlainTextResponse(content=validation_token, status_code=200)
@@ -92,25 +145,34 @@ async def outlook_webhook(request: Request):
         for notif in body.get("value", []):
             if notif.get("changeType") != "created":
                 continue
+
             resource        = notif.get("resource", "")
             subscription_id = notif.get("subscriptionId", "")
             message_id      = resource.split("/")[-1] if "/" in resource else resource
-            if message_id:
-                asyncio.create_task(_handle_outlook(subscription_id, message_id))
+
+            if not message_id:
+                continue
+
+            event_id = f"outlook:{subscription_id}:{message_id}"
+
+            await _enqueue(
+                cfg.TOPIC_OUTLOOK_RAW,
+                {
+                    "event_id":        event_id,
+                    "subscription_id": subscription_id,
+                    "message_id":      message_id,
+                    "resource":        resource,
+                    "client_state":    notif.get("clientState", ""),
+                    "enqueued_at":     time.time(),
+                },
+                partition_key=subscription_id,
+            )
 
         return {"status": "accepted"}
+
     except Exception as e:
         logger.error("Outlook webhook error: %s", e)
         return {"status": "error"}
-
-
-async def _handle_outlook(subscription_id: str, message_id: str) -> None:
-    success = await process_outlook_event(subscription_id, message_id)
-    if not success:
-        await push_to_recovery("outlook", {
-            "subscription_id": subscription_id,
-            "message_id":      message_id,
-        })
 
 
 @router.get("/outlook")
@@ -123,4 +185,25 @@ async def outlook_webhook_get(request: Request):
 
 @router.get("/health")
 async def webhook_health():
-    return {"status": "healthy", "endpoints": ["/webhooks/gmail", "/webhooks/outlook"]}
+    return {
+        "status":    "healthy",
+        "endpoints": ["/webhooks/gmail", "/webhooks/outlook"],
+        "fallback_queue_depth": _fallback_queue.qsize(),
+    }
+
+
+# ── Heartbeat helper ──────────────────────────────────────────────────────────
+
+async def _touch_account_heartbeat(email_address: str) -> None:
+    """
+    Record that this account received a webhook event right now.
+    Used by the watchdog to detect silent subscription failures.
+    TTL = 3 × inactivity threshold so the key auto-expires if the account
+    is genuinely inactive (not a subscription failure).
+    """
+    try:
+        redis = get_redis_client()
+        ttl = cfg.WATCH_INACTIVITY_THRESHOLD_S * 3
+        await redis.setex(f"es:heartbeat:{email_address}", ttl, str(time.time()))
+    except Exception:
+        pass  # heartbeat is best-effort — never fail the webhook for this

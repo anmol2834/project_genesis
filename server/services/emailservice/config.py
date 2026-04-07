@@ -155,3 +155,24 @@ FETCH_SUPPRESS_DELAY_S        = 120  # delay suppressed fetches by 2 min
 # ── Dynamic config ────────────────────────────────────────────────────────────
 DYNAMIC_CONFIG_ENABLED  = True
 DYNAMIC_CONFIG_REFRESH_S = 300   # 5 minutes — was 30s
+
+# ── Watch heartbeat watchdog ──────────────────────────────────────────────────
+WATCH_HEARTBEAT_INTERVAL_S   = 3600   # check every hour
+WATCH_INACTIVITY_THRESHOLD_S = 7200   # re-register if silent for 2h
+
+# ── IMAP IDLE ─────────────────────────────────────────────────────────────────
+IMAP_IDLE_TIMEOUT_S    = 1740   # 29 min (RFC 2177 recommends < 30 min)
+IMAP_RECONNECT_DELAY_S = 30     # delay before reconnecting after error
+
+# ── Durable store-ready queue ─────────────────────────────────────────────────
+STORE_RETRY_MAX          = 10   # max DB write retries before DLQ
+STORE_RETRY_BASE_DELAY_S = 1.0  # exponential backoff base
+
+# ── AI events stream (async handoff) ─────────────────────────────────────────
+AI_EVENTS_MAXLEN = 50_000       # automation-service consumes this directly
+
+# ── Shard-aware routing ───────────────────────────────────────────────────────
+STREAM_N_SHARDS = 1             # increase to 4+ when scaling horizontally
+
+# ── SLA worker pools ──────────────────────────────────────────────────────────
+SLA_PRIORITY_THRESHOLD = 2      # priorities 0,1 → fast pool; 2,3 → standard pool

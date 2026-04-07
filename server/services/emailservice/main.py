@@ -69,26 +69,54 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error("Startup history recovery failed: %s", e)
 
-    async def _run_smtp_poller():
-        """Run SMTP poller as a non-blocking background task."""
-        await asyncio.sleep(20)
-        try:
-            from workers.smtp_fetch_worker import SmtpPoller
-            # run() is an infinite loop — wrap in create_task so it doesn't block
-            asyncio.create_task(SmtpPoller().run())
-        except Exception as e:
-            logger.error("SMTP poller startup error: %s", e)
-
     asyncio.create_task(_run_watch_sync())
     asyncio.create_task(_run_history_recovery())
-    asyncio.create_task(_run_smtp_poller())
 
-    # ── Start single recovery worker ──────────────────────────────────────────
-    # Replaces 5 always-running polling workers.
-    # Only does work when there are failed events to recover.
-    # Idle cost: 1 XREADGROUP per 8s (vs 5 workers × 1/8s before)
+    # ── Start stream workers ──────────────────────────────────────────────────
+    _pipeline_workers = []
+    _imap_manager     = None
+    _watch_manager_instance = None
+
+    async def _start_workers():
+        nonlocal _imap_manager, _watch_manager_instance
+        await asyncio.sleep(2)
+        try:
+            from workers.gmail_fetch_worker import GmailFetchWorker
+            from workers.storage_worker import StorageWorker
+            from workers.ai_handoff_worker import AIHandoffWorker
+            from workers.smtp_fetch_worker import ImapIdleManager
+            from workers.watch_manager import WatchManager
+
+            workers_to_start = [
+                GmailFetchWorker(),   # gmail_events → pipeline → store_ready
+                StorageWorker(),      # store_ready  → DB (with retry)
+                AIHandoffWorker(),    # ai_events    → automation-service
+            ]
+            _pipeline_workers.extend(workers_to_start)
+            for w in workers_to_start:
+                asyncio.create_task(w.start())
+                logger.info("Worker started: %s", w.__class__.__name__)
+
+            # IMAP IDLE manager (replaces SmtpPoller — push-based, no polling)
+            _imap_manager = ImapIdleManager()
+            asyncio.create_task(_imap_manager.start())
+            logger.info("ImapIdleManager started")
+
+            # Heartbeat watchdog (dual-layer watch protection)
+            _watch_manager_instance = WatchManager()
+            asyncio.create_task(_watch_manager_instance.run_watchdog())
+            logger.info("Watch heartbeat watchdog started")
+
+            # Drain webhook fallback queue periodically
+            asyncio.create_task(_drain_webhook_fallback())
+
+        except Exception as e:
+            logger.error("Worker startup failed: %s", e, exc_info=True)
+
+    asyncio.create_task(_start_workers())
+
+    # ── Start recovery worker ─────────────────────────────────────────────────
     _recovery_worker_instance = None
-    _pipeline_workers = []  # kept for shutdown compatibility
 
     async def _start_recovery_worker():
         nonlocal _recovery_worker_instance
@@ -103,10 +131,27 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_start_recovery_worker())
 
+    async def _drain_webhook_fallback():
+        """Periodically retry events that failed XADD in the webhook handler."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                from api.webhooks import drain_fallback_queue
+                await drain_fallback_queue()
+            except Exception as e:
+                logger.debug("Fallback drain error: %s", e)
+
     logger.info("emailservice ready on port %d", cfg.SERVICE_PORT)
     yield
 
     logger.info("emailservice shutting down...")
+    for w in _pipeline_workers:
+        try:
+            await w.stop()
+        except Exception as e:
+            logger.warning("Worker stop error (%s): %s", w.__class__.__name__, e)
+    if _imap_manager:
+        await _imap_manager.stop()
     if _recovery_worker_instance:
         await _recovery_worker_instance.stop()
     from pipeline import close_http_client

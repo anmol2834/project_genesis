@@ -12,7 +12,7 @@ Outlook subscription:
   - Validation handshake handled by webhook layer
 """
 from __future__ import annotations
-import asyncio, logging
+import asyncio, logging, time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -49,6 +49,58 @@ class WatchManager:
         sem = asyncio.Semaphore(10)
         tasks = [self._renew_if_needed(acct, sem) for acct in accounts]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def run_watchdog(self) -> None:
+        """
+        Heartbeat watchdog — dual-layer subscription protection.
+        Runs every WATCH_HEARTBEAT_INTERVAL_S and re-registers any account
+        that has been silent for WATCH_INACTIVITY_THRESHOLD_S.
+
+        This catches silent subscription failures that the scheduled renewal
+        misses (e.g. Google silently drops a watch without sending expiry).
+        """
+        logger.info("Watch heartbeat watchdog started (interval=%ds, threshold=%ds)",
+                    cfg.WATCH_HEARTBEAT_INTERVAL_S, cfg.WATCH_INACTIVITY_THRESHOLD_S)
+        while True:
+            await asyncio.sleep(cfg.WATCH_HEARTBEAT_INTERVAL_S)
+            try:
+                await self._check_heartbeats()
+            except Exception as e:
+                logger.error("Watchdog error: %s", e)
+
+    async def _check_heartbeats(self) -> None:
+        """Re-register watches for accounts that haven't received events recently."""
+        accounts = await self._load_active_oauth_accounts()
+        redis    = await get_redis()
+        now      = time.time()
+        renewed  = 0
+
+        for acct in accounts:
+            email = acct.get("email_address", "")
+            try:
+                last_seen_raw = await redis.get(f"es:heartbeat:{email}")
+                if last_seen_raw:
+                    last_seen = float(last_seen_raw)
+                    silent_s  = now - last_seen
+                    if silent_s < cfg.WATCH_INACTIVITY_THRESHOLD_S:
+                        continue  # recently active — no action needed
+                    logger.warning("Watchdog: account %s silent for %.1fh — re-registering watch",
+                                   email, silent_s / 3600)
+                else:
+                    # No heartbeat key at all — account may never have received an event
+                    # Only re-register if watch_expiry is set (account was connected)
+                    if not acct.get("watch_expiry"):
+                        continue
+                    logger.info("Watchdog: no heartbeat for %s — re-registering watch", email)
+
+                await self._register_by_snap(acct)
+                renewed += 1
+
+            except Exception as e:
+                logger.error("Watchdog check failed for %s: %s", email, e)
+
+        if renewed:
+            logger.info("Watchdog: renewed %d watches", renewed)
 
     async def _renew_if_needed(self, acct: dict, sem: asyncio.Semaphore) -> None:
         async with sem:

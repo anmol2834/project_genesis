@@ -70,12 +70,14 @@ async def close_http_client() -> None:
 
 # ── Main entry points ─────────────────────────────────────────────────────────
 
-async def process_gmail_event(pubsub_id: str, email_address: str, history_id: str) -> bool:
+async def process_gmail_event(pubsub_id: str, email_address: str, history_id: str, event_id: str = "") -> bool:
     """
-    Process a Gmail Pub/Sub notification directly.
-    Called from webhook handler — no Redis Stream involved.
-    Returns True on success, False on failure (caller will queue for retry).
+    Process a Gmail Pub/Sub notification.
+    Called from GmailFetchWorker (stream consumer), not from webhook handler.
+    Returns True on success, False on transient failure (caller will retry via DLQ).
     """
+    if not event_id:
+        event_id = f"gmail:{pubsub_id}"
     try:
         # Envelope dedup — prevent double-processing same pubsub notification
         idem = get_idempotency_cache()
@@ -140,8 +142,8 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
             await advance_history_cursor(snap["id"], history_id, email_address)
             return True
 
-        # Filter + store directly
-        stored = 0
+        # Filter + store via durable store_ready queue
+        store_events = []
         for msg in messages:
             if should_filter(msg.get("subject", ""), msg.get("from_email", "")):
                 continue
@@ -150,19 +152,22 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
             get_dedup().mark_seen(msg["message_id"])
 
             direction = "outgoing" if msg.get("from_email", "").lower() == email_address.lower() else "incoming"
-            msg["direction"] = direction
+            msg["direction"]  = direction
+            msg["user_id"]    = user_id
+            msg["account_id"] = snap["id"]
+            msg["provider"]   = "gmail"
+            msg["event_id"]   = event_id  # end-to-end idempotency key
 
-            ok = await _store_message(msg, user_id, snap["id"], "gmail", email_address)
-            if ok:
-                stored += 1
-                # Notify automation service (fire-and-forget, no stream needed)
-                if direction == "incoming":
-                    asyncio.create_task(_notify_automation(user_id, msg["message_id"], msg.get("thread_id", "")))
+            store_events.append((msg, user_id))
+
+        if store_events:
+            # Publish to store_ready stream — StorageWorker handles DB write with retry
+            from stream_client import publish_batch as _pub_batch
+            await _pub_batch(cfg.TOPIC_STORE_READY, store_events)
+            logger.info("Gmail enqueued to store_ready | email=%s messages=%d historyId=%s",
+                        email_address, len(store_events), history_id)
 
         await advance_history_cursor(snap["id"], history_id, email_address)
-        if stored:
-            logger.info("Gmail processed | email=%s messages=%d stored=%d historyId=%s",
-                        email_address, len(messages), stored, history_id)
         return True
 
     except Exception as e:
@@ -170,8 +175,10 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
         return False
 
 
-async def process_outlook_event(subscription_id: str, message_id: str) -> bool:
-    """Process an Outlook Graph notification directly."""
+async def process_outlook_event(subscription_id: str, message_id: str, event_id: str = "") -> bool:
+    """Process an Outlook Graph notification. Called from OutlookFetchWorker."""
+    if not event_id:
+        event_id = f"outlook:{subscription_id}:{message_id}"
     try:
         idem = get_idempotency_cache()
         if idem.check_and_mark("outlook_msg", message_id):
@@ -191,11 +198,15 @@ async def process_outlook_event(subscription_id: str, message_id: str) -> bool:
 
         email_address = snap["email_address"]
         direction = "outgoing" if msg.get("from_email", "").lower() == email_address.lower() else "incoming"
-        msg["direction"] = direction
+        msg["direction"]  = direction
+        msg["user_id"]    = snap["user_id"]
+        msg["account_id"] = snap["id"]
+        msg["provider"]   = "outlook"
+        msg["event_id"]   = event_id
 
-        ok = await _store_message(msg, snap["user_id"], snap["id"], "outlook", email_address)
-        if ok and direction == "incoming":
-            asyncio.create_task(_notify_automation(snap["user_id"], msg["message_id"], msg.get("thread_id", "")))
+        # Publish to store_ready — StorageWorker handles DB write with retry
+        from stream_client import publish_batch as _pub_batch
+        await _pub_batch(cfg.TOPIC_STORE_READY, [(msg, snap["user_id"])])
 
         return True
     except Exception as e:
@@ -203,10 +214,18 @@ async def process_outlook_event(subscription_id: str, message_id: str) -> bool:
         return False
 
 
-# ── Storage ───────────────────────────────────────────────────────────────────
+# ── Storage (called by StorageWorker, not directly) ───────────────────────────
 
-async def _store_message(msg: dict, user_id: str, account_id: str, provider: str, email_address: str) -> bool:
-    """Write message + upsert conversation to PostgreSQL."""
+async def store_message_with_retry(msg: dict) -> bool:
+    """
+    Write message + upsert conversation to PostgreSQL with exponential backoff.
+    Called by StorageWorker — never drops a message on DB failure.
+    Returns True on success, False after max retries (caller sends to DLQ).
+    """
+    user_id    = msg.get("user_id", "")
+    account_id = msg.get("account_id", "")
+    provider   = msg.get("provider", "")
+
     try:
         row = {
             "message_id":       msg["message_id"],
@@ -226,55 +245,107 @@ async def _store_message(msg: dict, user_id: str, account_id: str, provider: str
             "has_attachments":  bool(msg.get("has_attachments", False)),
             "metadata":         msg.get("metadata") or {},
         }
-
-        async with get_db_session() as session:
-            # Insert message
-            stmt = (
-                pg_insert(EmailMessage.__table__)
-                .values([row])
-                .on_conflict_do_nothing(index_elements=["user_id", "message_id"])
-            )
-            result = await session.execute(stmt)
-
-            # Upsert conversation
-            conv_row = {
-                "thread_id":        row["thread_id"],
-                "user_id":          UUID(user_id),
-                "email_account_id": UUID(account_id),
-                "provider":         provider,
-                "subject":          row["subject"],
-                "participants":     _participants(msg),
-                "message_count":    1,
-                "last_message_id":  row["message_id"],
-                "last_message_at":  row["timestamp"],
-                "is_read":          False,
-                "status":           "active",
-            }
-            conv_stmt = (
-                pg_insert(EmailConversation.__table__)
-                .values([conv_row])
-                .on_conflict_do_update(
-                    index_elements=["user_id", "thread_id"],
-                    set_={
-                        "last_message_id": pg_insert(EmailConversation.__table__).excluded.last_message_id,
-                        "last_message_at": pg_insert(EmailConversation.__table__).excluded.last_message_at,
-                        "message_count":   EmailConversation.__table__.c.message_count + 1,
-                        "participants":    pg_insert(EmailConversation.__table__).excluded.participants,
-                        "is_read":         False,
-                        "updated_at":      datetime.utcnow(),
-                    },
-                )
-            )
-            await session.execute(conv_stmt)
-            await session.commit()
-
-        M.db_writes.labels(table="es_messages", status="ok").inc(1)
-        return True
-
     except Exception as e:
-        logger.error("Store failed for msg %s: %s", msg.get("message_id", "?"), e, exc_info=True)
-        M.db_writes.labels(table="es_messages", status="error").inc(1)
-        return False
+        logger.error("Row build failed for msg %s: %s", msg.get("message_id", "?"), e)
+        return False  # bad data — don't retry
+
+    for attempt in range(cfg.STORE_RETRY_MAX):
+        try:
+            async with get_db_session() as session:
+                stmt = (
+                    pg_insert(EmailMessage.__table__)
+                    .values([row])
+                    .on_conflict_do_nothing(index_elements=["user_id", "message_id"])
+                )
+                await session.execute(stmt)
+
+                conv_row = {
+                    "thread_id":        row["thread_id"],
+                    "user_id":          UUID(user_id),
+                    "email_account_id": UUID(account_id),
+                    "provider":         provider,
+                    "subject":          row["subject"],
+                    "participants":     _participants(msg),
+                    "message_count":    1,
+                    "last_message_id":  row["message_id"],
+                    "last_message_at":  row["timestamp"],
+                    "is_read":          False,
+                    "status":           "active",
+                }
+                conv_stmt = (
+                    pg_insert(EmailConversation.__table__)
+                    .values([conv_row])
+                    .on_conflict_do_update(
+                        index_elements=["user_id", "thread_id"],
+                        set_={
+                            "last_message_id": pg_insert(EmailConversation.__table__).excluded.last_message_id,
+                            "last_message_at": pg_insert(EmailConversation.__table__).excluded.last_message_at,
+                            "message_count":   EmailConversation.__table__.c.message_count + 1,
+                            "participants":    pg_insert(EmailConversation.__table__).excluded.participants,
+                            "is_read":         False,
+                            "updated_at":      datetime.utcnow(),
+                        },
+                    )
+                )
+                await session.execute(conv_stmt)
+                await session.commit()
+
+            M.db_writes.labels(table="es_messages", status="ok").inc(1)
+
+            # Publish to ai_events stream for async automation handoff
+            if msg.get("direction") == "incoming":
+                await _publish_ai_event(user_id, msg["message_id"],
+                                        msg.get("thread_id", ""), provider,
+                                        msg.get("event_id", ""))
+            return True
+
+        except Exception as e:
+            delay = cfg.STORE_RETRY_BASE_DELAY_S * (2 ** attempt)
+            logger.warning("DB write attempt %d/%d failed for msg %s: %s — retry in %.1fs",
+                           attempt + 1, cfg.STORE_RETRY_MAX,
+                           msg.get("message_id", "?"), e, delay)
+            M.db_writes.labels(table="es_messages", status="error").inc(1)
+            if attempt < cfg.STORE_RETRY_MAX - 1:
+                await asyncio.sleep(delay)
+
+    logger.error("DB write permanently failed for msg %s after %d attempts",
+                 msg.get("message_id", "?"), cfg.STORE_RETRY_MAX)
+    return False
+
+
+async def _publish_ai_event(user_id: str, message_id: str, thread_id: str,
+                             provider: str, event_id: str) -> None:
+    """
+    Publish to ai_events stream for async automation handoff.
+    automation-service consumes this stream directly — no HTTP call.
+    """
+    try:
+        from stream_client import publish as _pub
+        await _pub(
+            cfg.TOPIC_AI_EVENTS,
+            {
+                "event_id":   event_id,
+                "user_id":    user_id,
+                "message_id": message_id,
+                "thread_id":  thread_id,
+                "provider":   provider,
+                "ts":         time.time(),
+            },
+            partition_key=user_id,
+        )
+    except Exception as e:
+        logger.warning("ai_events publish failed for msg %s: %s", message_id, e)
+        # Non-critical — automation will catch up via history recovery
+
+
+# ── Legacy _store_message kept for backward compat (send_reply.py uses it) ───
+
+async def _store_message(msg: dict, user_id: str, account_id: str, provider: str, email_address: str) -> bool:
+    """Backward-compatible wrapper. New code should use store_message_with_retry()."""
+    msg["user_id"]    = user_id
+    msg["account_id"] = account_id
+    msg["provider"]   = provider
+    return await store_message_with_retry(msg)
 
 
 # ── Gmail API helpers ─────────────────────────────────────────────────────────
@@ -432,29 +503,6 @@ async def _fetch_outlook_message(token: str, message_id: str):
         "has_attachments": m.get("hasAttachments", False),
         "metadata":        {},
     }
-
-
-# ── Automation notification (fire-and-forget) ─────────────────────────────────
-
-async def _notify_automation(user_id: str, message_id: str, thread_id: str) -> None:
-    """
-    Notify automation service about new incoming message.
-    Uses a simple HTTP POST — no Redis Stream needed.
-    If automation service is down, this silently fails (non-critical path).
-    """
-    try:
-        from shared.config import get_config
-        automation_url = get_config().AUTOMATION_SERVICE_URL
-        if not automation_url:
-            return
-        http = get_http_client()
-        await http.post(
-            f"{automation_url}/ai/process",
-            json={"user_id": user_id, "message_id": message_id, "thread_id": thread_id},
-            timeout=5.0,
-        )
-    except Exception:
-        pass  # automation is optional — don't fail email processing
 
 
 # ── Utility functions ─────────────────────────────────────────────────────────
