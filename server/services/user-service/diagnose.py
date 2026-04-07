@@ -16,12 +16,12 @@ def check_redis():
         import redis
         
         config = get_config()
-        r = redis.from_url(config.REDIS_URL, decode_responses=True)
+        r = redis.from_url(config.KAFKA_URL, decode_responses=True)
         r.ping()
         
         # Check connection info
         info = r.info('clients')
-        print(f"   ✓ Redis connected: {config.REDIS_URL.split('@')[1]}")
+        print(f"   ✓ Redis connected: {config.KAFKA_URL.split('@')[1]}")
         print(f"   ✓ Connected clients: {info.get('connected_clients', 'N/A')}")
         return True
     except Exception as e:
