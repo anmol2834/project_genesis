@@ -1,53 +1,59 @@
 /**
- * Email Inbox API — real data from email-service via gateway.
+ * Email Inbox API — reads from es_messages + es_conversations via emailservice.
  *
- * Gateway routes /email-service/* → email-service:8004
- * So /email-service/email/inbox/threads → email-service GET /email/inbox/threads
+ * Gateway routes /email-service/* → emailservice:8004
+ * So /email-service/email/inbox/threads → emailservice GET /email/inbox/threads
  */
 
 import { get, post } from '../apiClient';
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Types matching the actual emailservice inbox.py response ──────────────────
 
-/** A single message stored in last_24h_messages JSONB */
+/** A single message from es_messages table */
 export interface InboxMessage {
-  from:            string;
-  to:              string[];
-  content:         string;
+  message_id:      string;
+  from_email:      string;
+  to_emails:       string[];
+  subject:         string | null;
+  content:         string | null;
   timestamp:       string;
   direction:       'incoming' | 'outgoing';
+  is_read:         boolean;
   has_attachments: boolean;
+  // Aliases provided by backend for compatibility
+  from:            string;
+  to:              string[];
 }
 
-/** A conversation thread returned by the inbox API */
+/** A conversation thread from es_conversations + es_messages */
 export interface InboxThread {
   id:              string;
   thread_id:       string;
   subject:         string;
-  from_email:      string;
-  to_emails:       string[];
   provider:        string;
   is_read:         boolean;
   status:          string;
   last_message_at: string | null;
-  updated_at:      string | null;
-  messages:        InboxMessage[];
-  // Convenience fields
+  message_count:   number;
+  participants:    string[];
+  // Fields populated by inbox.py _fmt_conv()
+  from_email:      string;   // the "other party" email — never empty
+  to_emails:       string[];
+  unread:          number;
   snippet:         string;
   direction:       'incoming' | 'outgoing';
-  unread:          number;
+  // AI / lead fields
+  priority_score:  number | null;
+  intent_type:     string | null;
+  lead_status:     string | null;
+  tags:            string[];
+  follow_up_required: boolean;
+  messages:        InboxMessage[];
 }
 
 export interface ThreadsResponse {
   threads: InboxThread[];
   total:   number;
-}
-
-/** SSE event pushed by the server */
-export interface InboxSSEEvent {
-  type:      'new_message';
-  thread_id: string;
-  thread:    InboxThread;
 }
 
 // ── API calls ─────────────────────────────────────────────────────────────────
@@ -59,14 +65,11 @@ export const emailInboxApi = {
   threads: (limit = 10, offset = 0) =>
     get<ThreadsResponse>(`${BASE}/threads`, { params: { limit, offset } }),
 
-  /** Fetch a single thread */
+  /** Fetch a single thread with all messages */
   thread: (threadId: string) =>
     get<InboxThread>(`${BASE}/threads/${threadId}`),
 
   /** Mark thread as read */
   markRead: (threadId: string) =>
     post<{ status: string }>(`${BASE}/threads/${threadId}/read`),
-
-  /** SSE stream URL — used directly with EventSource */
-  streamUrl: () => `${BASE}/stream`,
 };

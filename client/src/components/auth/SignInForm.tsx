@@ -102,16 +102,24 @@ export default function SignInForm() {
         password: form.password,
       });
 
-      // Step 2: Fetch full user profile
-      const userProfile = await getProfileMutation.mutateAsync(loginResponse.tokens.access_token);
+      // Step 2: Temporarily store the access token so the apiClient interceptor
+      // can attach it to the /auth/me request. We store only tokens here (no user
+      // yet) — AuthContext will be fully populated in step 4.
+      try {
+        localStorage.setItem('auth_tokens', JSON.stringify(loginResponse.tokens));
+      } catch (_) {}
 
-      // Step 3: Update auth context with user data and tokens
+      // Step 3: Fetch full user profile (apiClient now has the token)
+      const userProfile = await getProfileMutation.mutateAsync();
+
+      // Step 4: Update auth context with user data and tokens (persists properly)
       setAuthData(userProfile, loginResponse.tokens);
 
-      // Step 4: Redirect to dashboard
+      // Step 5: Redirect to dashboard
       router.push('/dashboard');
     } catch (error) {
-      // Error is already handled by React Query and displayed via loginMutation.error
+      // Clean up any partially-stored token on failure
+      try { localStorage.removeItem('auth_tokens'); } catch (_) {}
       console.error('[SignInForm] Login failed:', error);
     }
   }, [canSubmit, form.email, form.password, loginMutation, getProfileMutation, setAuthData, router]);
