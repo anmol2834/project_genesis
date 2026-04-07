@@ -62,17 +62,26 @@ class OutlookAdapter:
         if not code:
             raise ValueError("OAuth authorization code is required for Outlook")
         tenant = cfg.MICROSOFT_TENANT_ID_EMAIL or "common"
+
+        token_data: Dict[str, Any] = {
+            "code": code,
+            "client_id": cfg.MICROSOFT_CLIENT_ID_EMAIL,
+            "redirect_uri": cfg.MICROSOFT_REDIRECT_URI_EMAIL,
+            "grant_type": "authorization_code",
+            "scope": "https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
+        }
+
+        # PKCE flow: use code_verifier instead of client_secret when provided
+        code_verifier = credentials.get("code_verifier")
+        if code_verifier:
+            token_data["code_verifier"] = code_verifier
+        else:
+            token_data["client_secret"] = cfg.MICROSOFT_CLIENT_SECRET_EMAIL
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
-                data={
-                    "code": code,
-                    "client_id": cfg.MICROSOFT_CLIENT_ID_EMAIL,
-                    "client_secret": cfg.MICROSOFT_CLIENT_SECRET_EMAIL,
-                    "redirect_uri": cfg.MICROSOFT_REDIRECT_URI_EMAIL,
-                    "grant_type": "authorization_code",
-                    "scope": "https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access",
-                },
+                data=token_data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
         if resp.status_code != 200:

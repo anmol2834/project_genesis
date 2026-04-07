@@ -165,13 +165,14 @@ async def _inc_sent(account_id: str) -> None:
 
 
 async def _store_outgoing(req: SendReplyRequest, provider_msg_id: str, from_email: str) -> None:
+    from pipeline import strip_reply_chain
     try:
         async with get_db_session() as session:
             msg = EmailMessage(
                 message_id=provider_msg_id, thread_id=req.thread_id,
                 user_id=UUID(req.user_id), email_account_id=UUID(req.email_account_id),
                 provider=req.provider, from_email=from_email, to_emails=[req.to],
-                subject=req.subject, content=req.body_text,
+                subject=req.subject, content=strip_reply_chain(req.body_text),
                 timestamp=datetime.utcnow(),
                 direction=MessageDirection.OUTGOING, status=MessageStatus.SENT, is_read=True,
             )

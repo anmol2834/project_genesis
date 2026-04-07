@@ -35,7 +35,7 @@ CG_DLQ_MONITOR   = "es-dlq-monitor"
 # NOTE: No separate Kafka broker needed.
 # The emailservice uses Redis Streams on the existing Upstash Redis instance.
 # All stream names below map directly to Redis Stream keys.
-# Connection is handled by shared.cache (REDIS_URL in .env).
+# Connection is handled by shared.cache (KAFKA_URL in .env).
 KAFKA_BOOTSTRAP_SERVERS = ""   # unused — kept for backward compat only
 KAFKA_SASL_USERNAME     = ""
 KAFKA_SASL_PASSWORD     = ""

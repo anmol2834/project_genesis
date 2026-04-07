@@ -578,6 +578,8 @@ async def _fetch_outlook_message(token: str, message_id: str):
     except Exception:
         ts = datetime.utcnow()
 
+    raw_content = body_content if body_type == "text" else _html_to_text(body_content)
+
     return {
         "message_id":      m.get("id", message_id),
         "thread_id":       m.get("conversationId", ""),
@@ -585,7 +587,7 @@ async def _fetch_outlook_message(token: str, message_id: str):
         "from_email":      m.get("from", {}).get("emailAddress", {}).get("address", ""),
         "to_emails":       [r["emailAddress"]["address"] for r in m.get("toRecipients", [])],
         "cc_emails":       [r["emailAddress"]["address"] for r in m.get("ccRecipients", [])],
-        "content":         body_content if body_type == "text" else _html_to_text(body_content),
+        "content":         strip_reply_chain(raw_content),
         "timestamp":       ts,
         "has_attachments": m.get("hasAttachments", False),
         "metadata":        {},
@@ -619,14 +621,91 @@ def _extract_text(payload: dict) -> str:
                 walk_html(p)
         walk_html(payload)
         text = _html_to_text(html)
-    return text.strip()
+    return strip_reply_chain(text)
 
 def _html_to_text(html: str) -> str:
     if not html:
         return ""
     html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
     html = re.sub(r'<style[^>]*>.*?</style>',  '', html, flags=re.DOTALL | re.IGNORECASE)
-    return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', html).replace('&nbsp;', ' ')).strip()
+    # Convert block-level tags to newlines before stripping all tags
+    html = re.sub(r'<br\s*/?>', '\n', html, flags=re.IGNORECASE)
+    html = re.sub(r'</(p|div|tr|li|blockquote)>', '\n', html, flags=re.IGNORECASE)
+    html = re.sub(r'<[^>]+>', '', html)
+    html = html.replace('&nbsp;', ' ').replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&').replace('&quot;', '"')
+    # Collapse multiple spaces on a single line but preserve newlines
+    lines = [re.sub(r'[ \t]+', ' ', line).strip() for line in html.split('\n')]
+    return '\n'.join(lines).strip()
+
+# Invisible/zero-width Unicode chars that email clients inject before attribution lines
+_INVISIBLE_RE = re.compile(
+    r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f'
+    r'\u00ad\u200b-\u200f\u2028\u2029\u202a-\u202f'
+    r'\u2060-\u206f\ufeff\ufff0-\uffff]'
+)
+
+# "On Tue, 7 Apr 2026 at 7:44 PM John <john@example.com> wrote:" (single or multi-line)
+_ATTRIBUTION_RE = re.compile(
+    r'\n?On\s.+?wrote:\s*$',
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+
+def strip_reply_chain(text: str) -> str:
+    """
+    Remove quoted reply chains from plain-text email content.
+    Handles:
+    - Invisible Unicode chars injected before attribution lines
+    - Single-line and multi-line "On ... wrote:" headers
+    - HTML-derived single-line content where attribution is inline
+    - Outlook "From: / Sent: / To:" block headers
+    - Lines starting with ">"
+    """
+    if not text:
+        return text
+
+    # 1. Strip invisible chars
+    text = _INVISIBLE_RE.sub('', text)
+
+    # 2. Normalize line endings
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # 3. Handle single-line case: if "On <weekday/month>..." appears inline,
+    #    cut everything from that point. This covers HTML→text collapsed output.
+    _inline_attr = re.search(
+        r'\s+On\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s',
+        text, re.IGNORECASE
+    )
+    if _inline_attr:
+        text = text[:_inline_attr.start()].strip()
+        return text
+
+    # 4. Collapse multi-line attribution (Gmail wraps name + email across lines)
+    text = re.sub(r'\nOn (.+?)\n(<[^>]+>)\s*wrote:', r'\nOn \1 \2 wrote:', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'\nOn (.+?)\n(wrote:)', r'\nOn \1 \2', text, flags=re.IGNORECASE | re.DOTALL)
+
+    # 5. Walk lines and cut at the first reply-chain marker
+    lines = text.split('\n')
+    cleaned: list[str] = []
+    for line in lines:
+        trimmed = line.strip()
+        # "On <date> ... wrote:" — full attribution line
+        if re.match(r'^On\s.+wrote:\s*$', trimmed, re.IGNORECASE):
+            break
+        # "On Tue/Mon/..." — start of attribution even without "wrote:" (split line)
+        if re.match(r'^On\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', trimmed, re.IGNORECASE):
+            break
+        # Outlook block-quote header
+        if re.match(r'^From:\s*.+', trimmed, re.IGNORECASE) and cleaned:
+            break
+        # Quoted lines
+        if trimmed.startswith('>'):
+            continue
+        # Separator lines
+        if re.match(r'^[-_]{3,}$', trimmed):
+            break
+        cleaned.append(line)
+
+    return re.sub(r'\n{3,}', '\n\n', '\n'.join(cleaned)).strip()
 
 def _parse_email(s: str) -> str:
     if not s:

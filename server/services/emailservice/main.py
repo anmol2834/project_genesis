@@ -32,7 +32,10 @@ _config = get_config()
 async def lifespan(app: FastAPI):
     logger.info("emailservice starting on port %d...", cfg.SERVICE_PORT)
     await init_database()
-    await init_redis()
+    # emailservice uses Upstash Redis Streams (REDIS_STREAMS_URL), not the
+    # shared RedisLabs instance (REDIS_URL) used by other services.
+    _streams_url = _config.REDIS_STREAMS_URL or _config.REDIS_URL
+    await init_redis(url=_streams_url)
     await _create_tables()
     try:
         await ensure_topics()
@@ -192,17 +195,19 @@ app.add_middleware(
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-from api.webhooks   import router as webhooks_router
-from api.connect    import router as connect_router
-from api.inbox      import router as inbox_router
-from api.send_reply import router as send_reply_router
-from api.accounts   import router as accounts_router
+from api.webhooks     import router as webhooks_router
+from api.connect      import router as connect_router
+from api.inbox        import router as inbox_router
+from api.send_reply   import router as send_reply_router
+from api.accounts     import router as accounts_router
+from api.oauth_config import router as oauth_config_router
 
 app.include_router(webhooks_router)
 app.include_router(connect_router)
 app.include_router(inbox_router)
 app.include_router(send_reply_router)
 app.include_router(accounts_router)
+app.include_router(oauth_config_router)
 
 
 # ── Health + Stats ────────────────────────────────────────────────────────────
