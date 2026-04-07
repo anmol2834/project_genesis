@@ -47,24 +47,25 @@ async def lifespan(app: FastAPI):
         await asyncio.sleep(3)
         try:
             from workers.watch_manager import WatchManager
-            await WatchManager().sync_all_watches()
+            wm = WatchManager()
+            await wm.sync_all_watches()
+            # Start per-account hourly renewal scheduler
+            asyncio.create_task(wm.run_scheduler())
         except Exception as e:
             logger.error("Startup watch sync failed: %s", e)
 
     async def _run_history_recovery():
         """
-        Run once on startup to catch missed messages, then schedule
-        the 6-day periodic check via run_forever().
+        Run once on startup to catch missed messages.
+        Uses per-account debounce — safe to call on every restart.
         """
         nonlocal _recovery_worker
         await asyncio.sleep(12)
         try:
             from workers.history_recovery_worker import HistoryRecoveryWorker
             _recovery_worker = HistoryRecoveryWorker()
-            # Startup: run once immediately (catches downtime gaps)
             await _recovery_worker.run_once()
             await _recovery_worker._mark_ran()
-            # Then schedule every 6 days (non-blocking — runs in background)
             asyncio.create_task(_recovery_worker.run_forever())
         except Exception as e:
             logger.error("Startup history recovery failed: %s", e)

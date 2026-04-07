@@ -197,12 +197,15 @@ class HistoryRecoveryWorker:
                         "timestamp": msg["timestamp"].isoformat()
                             if isinstance(msg.get("timestamp"), datetime)
                             else msg.get("timestamp", ""),
+                        "direction":  "incoming",
+                        "account_id": snap["id"],
+                        "event_id":   f"recovery:{snap['id']}:{msg.get('message_id', '')}",
                     },
                     snap["user_id"],
                 )
                 for msg in messages
             ]
-            await publish_batch(cfg.TOPIC_FETCH_RESULTS, events)
+            await publish_batch(cfg.TOPIC_STORE_READY, events)
 
             # Set debounce key so this account isn't re-processed immediately
             try:

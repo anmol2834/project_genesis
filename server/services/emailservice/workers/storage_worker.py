@@ -17,6 +17,7 @@ import config as cfg
 from workers.base_worker import BaseWorker
 from pipeline import store_message_with_retry
 from idempotency import get_idempotency_cache
+from email_filter import should_filter_pre_db
 from metrics import M
 
 logger = logging.getLogger("emailservice.storage")
@@ -41,11 +42,20 @@ class StorageWorker(BaseWorker):
         records.sort(key=lambda r: r.get("_priority", cfg.PRIORITY_MEDIUM))
 
         idem = get_idempotency_cache()
-        stored = skipped = failed = 0
+        stored = skipped = failed = filtered = 0
 
         for rec in records:
             msg_id   = rec.get("message_id", "")
             event_id = rec.get("event_id", f"store:{msg_id}")
+
+            # Zero-leak guarantee: final O(1) filter check before DB insert.
+            # Catches any promotional/automated email that slipped through
+            # earlier stages (e.g. backlog from before filter was deployed,
+            # or edge cases from restarts/partial failures).
+            if should_filter_pre_db(rec):
+                filtered += 1
+                logger.debug("StorageWorker: pre-DB filter dropped msg %s", msg_id)
+                continue
 
             # End-to-end idempotency: skip if this event_id was already stored
             if idem.check_and_mark("store", event_id):
@@ -60,8 +70,8 @@ class StorageWorker(BaseWorker):
                 # store_message_with_retry already logged and exhausted retries
                 # BaseWorker._send_to_dlq will handle this record
 
-        logger.info("StorageWorker: stored=%d skipped=%d failed=%d batch=%d",
-                    stored, skipped, failed, len(records))
+        logger.info("StorageWorker: stored=%d skipped=%d filtered=%d failed=%d batch=%d",
+                    stored, skipped, filtered, failed, len(records))
 
         if failed:
             # Raise so BaseWorker sends failed records to DLQ

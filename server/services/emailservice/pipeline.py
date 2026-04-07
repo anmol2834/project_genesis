@@ -31,7 +31,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 import config as cfg
 from token_cache import get_account_snapshot, get_fresh_token, advance_history_cursor
-from email_filter import should_filter
+from email_filter import should_filter, should_filter_by_labels
 from dedup import get_dedup
 from idempotency import get_idempotency_cache
 from circuit_breaker import get_circuit_breaker
@@ -145,7 +145,15 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
         # Filter + store via durable store_ready queue
         store_events = []
         for msg in messages:
-            if should_filter(msg.get("subject", ""), msg.get("from_email", "")):
+            # Full filter with all available metadata (O(1)/O(bounded))
+            label_ids = (msg.get("metadata") or {}).get("label_ids")
+            snippet   = (msg.get("metadata") or {}).get("snippet", "")
+            if should_filter(
+                subject    = msg.get("subject", ""),
+                from_email = msg.get("from_email", ""),
+                snippet    = snippet,
+                label_ids  = label_ids,
+            ):
                 continue
             if get_dedup().is_duplicate(msg["message_id"]):
                 continue
@@ -193,7 +201,12 @@ async def process_outlook_event(subscription_id: str, message_id: str, event_id:
         if not msg:
             return True
 
-        if should_filter(msg.get("subject", ""), msg.get("from_email", "")):
+        if should_filter(
+            subject    = msg.get("subject", ""),
+            from_email = msg.get("from_email", ""),
+            snippet    = "",
+            label_ids  = None,
+        ):
             return True
 
         email_address = snap["email_address"]
@@ -411,10 +424,27 @@ async def _fetch_gmail_message(token: str, email: str, msg_id: str):
 
     msg    = resp.json()
     labels = msg.get("labelIds", [])
+
+    # Stage 1: O(1) label check BEFORE any content parsing
+    # Rejects CATEGORY_PROMOTIONS, CATEGORY_UPDATES, SPAM, TRASH, DRAFT instantly
+    if should_filter_by_labels(labels):
+        return None  # drop — never parse content for filtered emails
+
     if any(l in labels for l in ("DRAFT", "TRASH", "SPAM")):
         return None
 
     hdrs    = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+    snippet = msg.get("snippet", "")
+
+    # Stage 2-4: sender + subject + snippet check (all O(1)/O(bounded))
+    if should_filter(
+        subject    = hdrs.get("Subject", ""),
+        from_email = _parse_email(hdrs.get("From", "")),
+        snippet    = snippet,
+        label_ids  = labels,
+    ):
+        return None  # drop — no content fetch needed
+
     content = _extract_text(msg.get("payload", {}))
     ts      = datetime.utcfromtimestamp(int(msg.get("internalDate", 0)) / 1000)
 

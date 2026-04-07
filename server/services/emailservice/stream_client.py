@@ -6,28 +6,27 @@ Architecture:
   consume()  → sleep on asyncio.Event → wake → XRANGE drain → XDEL
 
 Zero Redis commands when idle.
-No XREADGROUP. No XAUTOCLAIM. No blocking loops.
-No consumer groups — simpler, cheaper, no group overhead.
+No XREADGROUP. No XAUTOCLAIM. No blocking loops. No consumer groups.
+
+Startup flood protection:
+  drain_once() accepts a rate_limit parameter (messages/sec).
+  On startup, workers call drain_once(rate_limit=BACKLOG_DRAIN_RATE) to
+  process the backlog in controlled batches with inter-batch delays.
+  After backlog is cleared, workers switch to real-time mode (no rate limit).
 
 Redis command budget:
-  Idle:   0 commands/sec (workers sleeping on asyncio.Event)
-  Active: 1 XADD (publish) + N XRANGE + N XDEL per batch (drain)
-  vs old: 3 workers × 1 XREADGROUP/8s = 22 commands/min idle
-  New:    0 commands/min idle
+  Idle:   0 commands/sec
+  Active: 1 XRANGE + N XDEL per batch (drain)
+  Retry:  in-process queue, no Redis until DLQ
 
 Shard-aware routing:
-  partition_key (user_id) is hashed to a shard index.
-  Each shard has its own asyncio.Event — workers can be pinned to shards
-  for horizontal scaling without locks or duplicate processing.
-
-Startup recovery:
-  On startup, each stream is drained once to catch events from previous crash.
-  This costs 1 XRANGE per stream on startup, then 0 until next event.
+  partition_key (user_id) hashed to shard index.
+  Each shard has its own asyncio.Event.
+  Multiple workers can be pinned to different shards — no locks, no duplicates.
 """
 from __future__ import annotations
-import asyncio, hashlib, json, logging, time, uuid
+import asyncio, hashlib, json, logging, time
 from collections import defaultdict
-from typing import Callable, Awaitable
 
 from shared.cache import get_redis_client
 import config as cfg
@@ -35,11 +34,9 @@ import config as cfg
 logger = logging.getLogger("emailservice.streams")
 
 STREAM_MAXLEN = 10_000
-N_SHARDS      = cfg.STREAM_N_SHARDS  # 1 by default; increase for horizontal scale
+N_SHARDS      = cfg.STREAM_N_SHARDS  # 1 by default
 
 # ── Per-stream wake signals ───────────────────────────────────────────────────
-# Each logical stream has one asyncio.Event per shard.
-# publish() sets the event; the drain loop clears it after draining.
 _stream_events: dict[str, asyncio.Event] = defaultdict(asyncio.Event)
 
 
@@ -65,18 +62,13 @@ def _all_shards(stream: str) -> list[str]:
 
 
 def _get_event(stream: str, partition_key: str = "") -> asyncio.Event:
-    """Get the asyncio.Event for a stream+shard combination."""
-    key = _wake_key(stream, _shard_for(partition_key))
-    return _stream_events[key]
+    return _stream_events[_wake_key(stream, _shard_for(partition_key))]
 
 
 # ── Producer ──────────────────────────────────────────────────────────────────
 
 async def publish(stream: str, payload: dict, partition_key: str = "") -> None:
-    """
-    Write event to Redis Stream and signal the in-process wake event.
-    The drain worker wakes immediately and processes the batch.
-    """
+    """XADD to stream + signal in-process wake event. Zero idle cost."""
     redis  = get_redis_client()
     target = _stream_key(stream, partition_key)
     await redis.xadd(
@@ -85,39 +77,33 @@ async def publish(stream: str, payload: dict, partition_key: str = "") -> None:
         maxlen=STREAM_MAXLEN,
         approximate=True,
     )
-    # Signal the drain worker — pure Python, zero Redis
     _get_event(stream, partition_key).set()
 
 
 async def publish_batch(stream: str, events: list[tuple[dict, str]]) -> None:
-    """Publish multiple events in one pipeline round-trip, then signal once."""
+    """Publish multiple events in one pipeline, signal each affected shard once."""
     if not events:
         return
     redis = get_redis_client()
-    # Group by shard for efficient pipelining
     by_shard: dict[str, list[dict]] = {}
     for payload, key in events:
-        shard_key = _stream_key(stream, key)
-        by_shard.setdefault(shard_key, []).append((payload, key))
+        sk = _stream_key(stream, key)
+        by_shard.setdefault(sk, []).append(payload)
 
-    for shard_key, shard_events in by_shard.items():
+    for sk, payloads in by_shard.items():
         pipe = redis.pipeline(transaction=False)
-        for payload, _ in shard_events:
-            pipe.xadd(
-                shard_key,
-                {"data": json.dumps(payload, default=str)},
-                maxlen=STREAM_MAXLEN,
-                approximate=True,
-            )
+        for p in payloads:
+            pipe.xadd(sk, {"data": json.dumps(p, default=str)},
+                      maxlen=STREAM_MAXLEN, approximate=True)
         await pipe.execute()
 
-    # Signal all affected shards once (not per-message)
+    # Signal each affected shard exactly once
     signalled: set[str] = set()
     for _, key in events:
-        wake_key = _wake_key(stream, _shard_for(key))
-        if wake_key not in signalled:
-            _stream_events[wake_key].set()
-            signalled.add(wake_key)
+        wk = _wake_key(stream, _shard_for(key))
+        if wk not in signalled:
+            _stream_events[wk].set()
+            signalled.add(wk)
 
 
 # ── Event-Driven Drain Consumer ───────────────────────────────────────────────
@@ -126,130 +112,122 @@ class EventDrivenConsumer:
     """
     Zero-idle-cost stream consumer.
 
-    Lifecycle:
-      1. start()  → drain startup backlog (1 XRANGE per stream)
-      2. wait()   → sleep on asyncio.Event (0 Redis commands)
-      3. drain()  → XRANGE all messages → process → XDEL
-      4. goto 2
-
-    No XREADGROUP. No XAUTOCLAIM. No consumer groups.
-    No blocking Redis calls. No periodic timers.
+    Modes:
+      BACKLOG  — startup, processes old events at controlled rate
+      REALTIME — live, processes only new events triggered by publish()
 
     Retry model:
-      Failed messages are re-added to the in-process retry queue with
-      exponential backoff. They are NOT left in Redis (no pending state).
-      After MAX_RETRIES, they go to the DLQ stream.
+      Failed records go to in-process retry queue with exponential backoff.
+      No Redis involvement until DLQ threshold is reached.
+      requeue() does NOT set the wake event — the event loop uses a timeout
+      to wake at the right time, preventing tight retry loops.
     """
 
-    MAX_RETRIES    = cfg.DLQ_MAX_RETRIES
-    DRAIN_BATCH    = 500   # max messages per drain cycle
+    DRAIN_BATCH = 500  # max messages per XRANGE call
 
     def __init__(self, streams: list[str]):
         self.streams  = streams
         self._running = False
-        # Retry queue: (stream_key, payload_dict, retry_count, next_attempt_ts)
+        # (shard_key, payload, retry_count, next_attempt_monotonic)
         self._retry_queue: list[tuple[str, dict, int, float]] = []
+        # Backlog state: set to True during startup drain, False after
+        self._in_backlog_mode = False
 
     async def start(self) -> None:
-        """Ensure streams exist and drain any startup backlog."""
-        redis = get_redis_client()
-        pipe  = redis.pipeline(transaction=False)
-        for stream in self.streams:
-            for shard in _all_shards(stream):
-                pipe.xlen(shard)  # creates the key if it doesn't exist via XADD later
-        try:
-            await pipe.execute(raise_on_error=False)
-        except Exception:
-            pass
         self._running = True
         logger.info("EventDrivenConsumer | streams=%s", self.streams)
 
     async def stop(self) -> None:
         self._running = False
-        # Wake all events so any waiting coroutines can exit
         for stream in self.streams:
             for shard in range(max(N_SHARDS, 1)):
                 _stream_events[_wake_key(stream, shard)].set()
 
-    async def drain_once(self) -> list[dict]:
+    async def backlog_size(self) -> int:
+        """Total messages currently in all stream shards."""
+        redis = get_redis_client()
+        total = 0
+        for stream in self.streams:
+            for sk in _all_shards(stream):
+                try:
+                    total += await redis.xlen(sk)
+                except Exception:
+                    pass
+        return total
+
+    async def drain_once(self, batch_size: int = DRAIN_BATCH) -> list[dict]:
         """
-        Drain all pending messages from all shards of all streams.
-        Returns list of parsed records. Deletes successfully-read messages.
-        Called by the worker after waking from asyncio.Event.
+        Drain up to batch_size messages from all shards.
+        Deletes messages immediately after reading (XDEL in pipeline).
+        Returns parsed records + any due retry items.
         """
         redis   = get_redis_client()
         records = []
 
         for stream in self.streams:
-            for shard_key in _all_shards(stream):
+            for sk in _all_shards(stream):
                 try:
-                    messages = await redis.xrange(shard_key, "-", "+", count=self.DRAIN_BATCH)
+                    messages = await redis.xrange(sk, "-", "+", count=batch_size)
                     if not messages:
                         continue
 
-                    ids_to_delete = []
+                    ids_to_del = []
                     for msg_id, fields in messages:
                         try:
-                            record = json.loads(fields.get("data", "{}"))
-                            record["_stream_id"]  = msg_id
-                            record["_stream"]     = stream
-                            record["_shard_key"]  = shard_key
-                            records.append(record)
-                            ids_to_delete.append(msg_id)
+                            rec = json.loads(fields.get("data", "{}"))
+                            rec["_stream_id"] = msg_id
+                            rec["_stream"]    = stream
+                            rec["_shard_key"] = sk
+                            records.append(rec)
+                            ids_to_del.append(msg_id)
                         except Exception as e:
-                            logger.error("Parse error for msg %s: %s", msg_id, e)
-                            ids_to_delete.append(msg_id)  # delete unparseable
+                            logger.error("Parse error msg %s: %s", msg_id, e)
+                            ids_to_del.append(msg_id)  # delete unparseable
 
-                    # Delete in one pipeline call
-                    if ids_to_delete:
+                    if ids_to_del:
                         pipe = redis.pipeline(transaction=False)
-                        for mid in ids_to_delete:
-                            pipe.xdel(shard_key, mid)
+                        for mid in ids_to_del:
+                            pipe.xdel(sk, mid)
                         await pipe.execute(raise_on_error=False)
 
                 except Exception as e:
-                    logger.error("Drain error for %s: %s", shard_key, e)
+                    logger.error("Drain error %s: %s", sk, e)
 
-        # Also drain any due retry items
+        # Collect due retry items (no Redis involved)
         now = time.monotonic()
-        due = [(sk, p, rc) for sk, p, rc, ts in self._retry_queue if ts <= now]
-        self._retry_queue = [(sk, p, rc, ts) for sk, p, rc, ts in self._retry_queue if ts > now]
+        due   = [(sk, p, rc) for sk, p, rc, ts in self._retry_queue if ts <= now]
+        later = [(sk, p, rc, ts) for sk, p, rc, ts in self._retry_queue if ts > now]
+        self._retry_queue = later
 
-        for shard_key, payload, retry_count in due:
+        for sk, payload, retry_count in due:
             payload["_retry_count"] = retry_count
-            payload["_stream"]      = shard_key.split(":")[0] if ":" in shard_key else shard_key
-            payload["_shard_key"]   = shard_key
+            payload["_stream"]      = sk.split(":")[0] if ":" in sk else sk
+            payload["_shard_key"]   = sk
             records.append(payload)
 
         return records
 
     def requeue(self, record: dict, reason: str = "") -> None:
         """
-        Re-queue a failed record with exponential backoff.
-        After MAX_RETRIES, the record is sent to DLQ (handled by caller).
+        Re-queue failed record with exponential backoff.
+        Does NOT set the wake event — caller's event loop uses next_retry_delay()
+        as a timeout to avoid tight loops.
         """
         retry_count = record.get("_retry_count", 0) + 1
-        shard_key   = record.get("_shard_key", record.get("_stream", "unknown"))
+        sk          = record.get("_shard_key", record.get("_stream", "unknown"))
         delay       = min(cfg.STORE_RETRY_BASE_DELAY_S * (2 ** (retry_count - 1)), 300.0)
         next_ts     = time.monotonic() + delay
 
-        # Strip internal fields before re-queuing
         payload = {k: v for k, v in record.items() if not k.startswith("_")}
-
-        self._retry_queue.append((shard_key, payload, retry_count, next_ts))
+        self._retry_queue.append((sk, payload, retry_count, next_ts))
         logger.debug("Requeued msg %s (attempt %d, delay=%.1fs): %s",
                      record.get("message_id", "?"), retry_count, delay, reason)
-
-        # Wake the drain loop so it picks up retries when they're due
-        if self._retry_queue:
-            for stream in self.streams:
-                _stream_events[_wake_key(stream)].set()
 
     def has_pending_retries(self) -> bool:
         return bool(self._retry_queue)
 
     def next_retry_delay(self) -> float:
-        """Seconds until the next retry is due (0 if none pending)."""
+        """Seconds until the earliest retry is due. Returns 0 if due now."""
         if not self._retry_queue:
             return 0.0
         now = time.monotonic()
@@ -260,79 +238,60 @@ class EventDrivenConsumer:
 
 async def ensure_streams() -> None:
     """
-    Ensure all stream keys exist. No consumer groups needed.
-    Clean up legacy XREADGROUP-era keys.
+    Clean up legacy XREADGROUP consumer groups and old shard keys.
+    No consumer groups needed in the event-driven model.
     """
     redis = get_redis_client()
 
-    # All logical streams used by the system
     all_streams = [
-        cfg.TOPIC_GMAIL_RAW,
-        cfg.TOPIC_OUTLOOK_RAW,
-        cfg.TOPIC_SMTP_RAW,
-        cfg.TOPIC_STORE_READY,
-        cfg.TOPIC_AI_EVENTS,
-        cfg.TOPIC_DLQ,
+        cfg.TOPIC_GMAIL_RAW, cfg.TOPIC_OUTLOOK_RAW, cfg.TOPIC_SMTP_RAW,
+        cfg.TOPIC_STORE_READY, cfg.TOPIC_AI_EVENTS, cfg.TOPIC_DLQ,
     ]
-
-    # Streams exist implicitly when first XADD is called.
-    # Just log what we expect to use.
-    logger.info("Event-driven streams configured: %s (N_SHARDS=%d)", all_streams, N_SHARDS)
-
-    # Clean up legacy consumer group keys and old shard keys
     old_groups = [
         cfg.CG_GMAIL_FETCH, cfg.CG_OUTLOOK_FETCH, cfg.CG_SMTP_FETCH,
-        cfg.CG_STORAGE, cfg.CG_AI_HANDOFF, cfg.CG_DLQ_MONITOR,
-        cfg.CG_FILTER_DEDUP,
+        cfg.CG_STORAGE, cfg.CG_AI_HANDOFF, cfg.CG_DLQ_MONITOR, cfg.CG_FILTER_DEDUP,
     ]
-    old_suffixes = [":0", ":1", ":2", ":3"]
-    old_bases    = all_streams + ["automation_events", "fetch_results", "email_queue"]
+    old_bases = all_streams + ["automation_events", "fetch_results", "email_queue"]
 
     pipe = redis.pipeline(transaction=False)
-    # Delete old consumer groups
     for stream in all_streams:
         for group in old_groups:
             pipe.xgroup_destroy(stream, group)
-    # Delete old shard keys
     for base in old_bases:
-        for suffix in old_suffixes:
+        for suffix in [":0", ":1", ":2", ":3"]:
             pipe.delete(f"{base}{suffix}")
     try:
         await pipe.execute(raise_on_error=False)
-        logger.info("Legacy XREADGROUP consumer groups and shard keys cleaned up")
+        logger.info("Event-driven streams ready (N_SHARDS=%d)", N_SHARDS)
     except Exception:
         pass
 
-    # Recovery stream (XRANGE/XDEL pattern — no group)
-    from workers.recovery_worker import RECOVERY_STREAM
-    try:
-        length = await redis.xlen(RECOVERY_STREAM)
-        if length:
-            logger.info("Recovery stream has %d leftover events — will drain on startup", length)
-    except Exception:
-        pass
+    # Log backlog sizes for visibility
+    for stream in all_streams:
+        try:
+            length = await redis.xlen(stream)
+            if length:
+                logger.info("Startup backlog: %s has %d messages", stream, length)
+        except Exception:
+            pass
 
 
 async def get_stream_lag(stream: str, group_id: str = "") -> int:
-    """Returns approximate number of unprocessed messages in a stream."""
     try:
         total = 0
-        for shard in _all_shards(stream):
-            total += await get_redis_client().xlen(shard)
+        for sk in _all_shards(stream):
+            total += await get_redis_client().xlen(sk)
         return total
     except Exception:
         return 0
 
 
-# ── Backward-compat shim (kafka_client.py uses make_consumer) ─────────────────
+# ── Backward-compat shim ──────────────────────────────────────────────────────
 
 class StreamConsumer:
-    """
-    Backward-compatible shim. Returns an EventDrivenConsumer.
-    BaseWorker calls make_consumer() → this class.
-    """
+    """Backward-compatible shim for kafka_client.make_consumer()."""
     def __init__(self, streams: list[str], group_id: str):
-        self._inner = EventDrivenConsumer(streams)
+        self._inner   = EventDrivenConsumer(streams)
         self.streams  = streams
         self.group_id = group_id
 

@@ -40,15 +40,73 @@ class WatchManager:
 
     async def sync_all_watches(self) -> None:
         """
-        Called on startup and periodically.
-        Renews watches expiring within WATCH_RENEW_BEFORE_HOURS.
+        Called on startup. Checks each account individually based on its
+        own watch_expiry timestamp — not a global fixed interval.
+        Renews accounts whose watch expires within WATCH_RENEW_BEFORE_HOURS.
+        Also immediately renews any account whose watch has already expired
+        (handles server downtime scenarios).
         """
         accounts = await self._load_active_oauth_accounts()
         logger.info("Watch sync: checking %d accounts", len(accounts))
 
-        sem = asyncio.Semaphore(10)
-        tasks = [self._renew_if_needed(acct, sem) for acct in accounts]
+        now = datetime.utcnow()
+        overdue  = []
+        upcoming = []
+
+        for acct in accounts:
+            expiry_raw = acct.get("watch_expiry")
+            if not expiry_raw:
+                overdue.append(acct)  # never registered
+                continue
+            try:
+                expiry = datetime.fromisoformat(expiry_raw)
+                if expiry.tzinfo:
+                    expiry = expiry.replace(tzinfo=None)
+            except Exception:
+                overdue.append(acct)
+                continue
+
+            renew_at = expiry - timedelta(hours=cfg.WATCH_RENEW_BEFORE_HOURS)
+            if now >= renew_at:
+                if now >= expiry:
+                    overdue.append(acct)   # already expired — renew immediately
+                else:
+                    upcoming.append(acct)  # expiring soon — renew now
+            # else: still valid, skip
+
+        if overdue:
+            logger.warning("Watch sync: %d accounts have expired/missing watches — renewing immediately",
+                           len(overdue))
+        if upcoming:
+            logger.info("Watch sync: %d accounts expiring soon — renewing", len(upcoming))
+
+        to_renew = overdue + upcoming
+        if not to_renew:
+            logger.info("Watch sync: all watches valid")
+            return
+
+        sem = asyncio.Semaphore(5)
+        tasks = [self._register_by_snap_sem(acct, sem) for acct in to_renew]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _register_by_snap_sem(self, snap: dict, sem: asyncio.Semaphore) -> None:
+        async with sem:
+            await self._register_by_snap(snap)
+
+    async def run_scheduler(self) -> None:
+        """
+        Per-account renewal scheduler.
+        Checks each account individually and renews based on its own expiry.
+        Runs hourly — lightweight check, only renews when actually needed.
+        This replaces the old global 6-day interval.
+        """
+        logger.info("Watch scheduler started (hourly per-account check)")
+        while True:
+            await asyncio.sleep(3600)  # check every hour
+            try:
+                await self.sync_all_watches()
+            except Exception as e:
+                logger.error("Watch scheduler error: %s", e)
 
     async def run_watchdog(self) -> None:
         """
@@ -101,26 +159,6 @@ class WatchManager:
 
         if renewed:
             logger.info("Watchdog: renewed %d watches", renewed)
-
-    async def _renew_if_needed(self, acct: dict, sem: asyncio.Semaphore) -> None:
-        async with sem:
-            provider = acct.get("provider", "")
-            expiry_raw = acct.get("watch_expiry")
-            if not expiry_raw:
-                # No watch yet — register
-                await self._register_by_snap(acct)
-                return
-
-            try:
-                expiry = datetime.fromisoformat(expiry_raw)
-                if expiry.tzinfo:
-                    expiry = expiry.replace(tzinfo=None)
-            except Exception:
-                expiry = datetime.utcnow()
-
-            renew_threshold = datetime.utcnow() + timedelta(hours=cfg.WATCH_RENEW_BEFORE_HOURS)
-            if expiry <= renew_threshold:
-                await self._register_by_snap(acct)
 
     async def _register_by_snap(self, snap: dict) -> None:
         provider = snap.get("provider", "")
