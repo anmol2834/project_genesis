@@ -85,7 +85,14 @@ class OutlookAdapter:
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
         if resp.status_code != 200:
-            raise ValueError("Failed to exchange authorization code with Microsoft")
+            error_detail = ""
+            try:
+                err_json = resp.json()
+                error_detail = f": {err_json.get('error')} — {err_json.get('error_description', '')[:200]}"
+            except Exception:
+                error_detail = f": HTTP {resp.status_code}"
+            logger.error("Microsoft token exchange failed%s", error_detail)
+            raise ValueError(f"Failed to exchange authorization code with Microsoft{error_detail}")
         td = resp.json()
         access_token = td.get("access_token")
         if not access_token:

@@ -1,10 +1,11 @@
 """
 emailservice — Inbox API
 Reads from the NEW normalized es_messages + es_conversations tables.
-AI context: fetches last N messages dynamically (no JSONB arrays).
+All es_messages queries are scoped to the last 24 hours (ephemeral retention).
 """
 from __future__ import annotations
 import sys, os, logging
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,6 +20,14 @@ from models.messages import EmailMessage
 
 logger = logging.getLogger("emailservice.inbox")
 router = APIRouter(prefix="/email/inbox", tags=["inbox"])
+
+# All message queries are bounded to this window — matches pg_cron retention period
+_RETENTION_WINDOW = timedelta(hours=24)
+
+
+def _cutoff() -> datetime:
+    """UTC cutoff for the 24h retention window."""
+    return datetime.utcnow() - _RETENTION_WINDOW
 
 
 def _fmt_conv(conv: EmailConversation, messages: list) -> dict:
@@ -166,7 +175,7 @@ async def list_threads(
                 except Exception as e:
                     logger.warning("Failed to commit rebuilt conversations: %s", e)
 
-            # Fetch last 20 messages per thread (dynamic — no JSONB)
+            # Fetch last 20 messages per thread — scoped to 24h retention window
             threads = []
             for conv in convs:
                 msgs = (await db.execute(
@@ -174,6 +183,7 @@ async def list_threads(
                     .where(and_(
                         EmailMessage.user_id == user_id,
                         EmailMessage.thread_id == conv.thread_id,
+                        EmailMessage.created_at >= _cutoff(),
                     ))
                     .order_by(desc(EmailMessage.timestamp))
                     .limit(20)
@@ -210,6 +220,7 @@ async def get_thread(
                 .where(and_(
                     EmailMessage.user_id == user_id,
                     EmailMessage.thread_id == thread_id,
+                    EmailMessage.created_at >= _cutoff(),
                 ))
                 .order_by(EmailMessage.timestamp)
                 .limit(limit)
@@ -254,10 +265,13 @@ async def _rebuild_conversations_from_messages(db, user_id: UUID) -> list:
     import uuid as _uuid
     from datetime import datetime
 
-    # Fetch all messages for this user, ordered by time
+    # Fetch all messages for this user within the 24h retention window
     all_msgs = (await db.execute(
         select(EmailMessage)
-        .where(EmailMessage.user_id == user_id)
+        .where(and_(
+            EmailMessage.user_id == user_id,
+            EmailMessage.created_at >= _cutoff(),
+        ))
         .order_by(EmailMessage.timestamp)
     )).scalars().all()
 

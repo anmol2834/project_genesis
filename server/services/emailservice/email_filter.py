@@ -252,15 +252,15 @@ def should_filter_pre_db(msg: dict) -> bool:
     Zero-leak guarantee: final filter check before database insertion.
     Reuses the same O(1) logic — no additional cost.
     Called by StorageWorker just before store_message_with_retry().
+    label_ids and snippet are top-level fields on the message dict
+    (set during fetch, not stored in DB).
     """
-    label_ids = None
-    metadata  = msg.get("metadata") or {}
-    if isinstance(metadata, dict):
-        label_ids = metadata.get("label_ids")
+    label_ids = msg.get("label_ids")
+    snippet   = (msg.get("snippet") or "")[:200]
 
     return should_filter(
-        subject   = msg.get("subject", ""),
-        from_email= msg.get("from_email", ""),
-        snippet   = (metadata.get("snippet") or "")[:200],
-        label_ids = label_ids,
+        subject    = msg.get("subject", ""),
+        from_email = msg.get("from_email", ""),
+        snippet    = snippet,
+        label_ids  = label_ids,
     )

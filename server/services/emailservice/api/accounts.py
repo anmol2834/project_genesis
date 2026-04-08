@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, func
@@ -17,6 +17,11 @@ from dependencies import get_current_user
 
 logger = logging.getLogger("emailservice.accounts")
 router = APIRouter(prefix="/email", tags=["email-accounts"])
+
+_RETENTION_WINDOW = timedelta(hours=24)
+
+def _cutoff() -> datetime:
+    return datetime.utcnow() - _RETENTION_WINDOW
 
 
 def _fmt_account(a: EmailAccount, emails_processed: int = 0) -> dict:
@@ -68,7 +73,8 @@ async def list_accounts(current_user: dict = Depends(get_current_user)):
             try:
                 count_result = await db.execute(
                     select(func.count(EmailMessage.id)).where(
-                        EmailMessage.email_account_id == a.id
+                        EmailMessage.email_account_id == a.id,
+                        EmailMessage.created_at >= _cutoff(),
                     )
                 )
                 processed_map[str(a.id)] = count_result.scalar() or 0
@@ -95,7 +101,8 @@ async def get_account(account_id: UUID, current_user: dict = Depends(get_current
         try:
             count_result = await db.execute(
                 select(func.count(EmailMessage.id)).where(
-                    EmailMessage.email_account_id == account.id
+                    EmailMessage.email_account_id == account.id,
+                    EmailMessage.created_at >= _cutoff(),
                 )
             )
             emails_processed = count_result.scalar() or 0

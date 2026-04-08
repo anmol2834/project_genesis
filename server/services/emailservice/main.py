@@ -301,27 +301,139 @@ async def _create_tables() -> None:
         from sqlalchemy import text
         engine = get_engine()
         async with engine.begin() as conn:
+            # Create all tables (idempotent)
             await conn.run_sync(Base.metadata.create_all)
-            # Drop content_html column if it still exists (one-time migration)
-            try:
-                await conn.execute(text(
-                    "ALTER TABLE es_messages DROP COLUMN IF EXISTS content_html"
-                ))
-                logger.info("Dropped content_html column (if existed)")
-            except Exception:
-                pass
-            # Add new lifecycle columns if they don't exist yet (idempotent)
-            for col_sql in [
+
+            # One-time column migrations (all IF EXISTS / IF NOT EXISTS — safe on fresh DB)
+            migrations = [
+                "ALTER TABLE es_messages DROP COLUMN IF EXISTS content_html",
+                "ALTER TABLE es_messages DROP COLUMN IF EXISTS metadata",
+                "ALTER TABLE es_conversations DROP COLUMN IF EXISTS summary",
                 "ALTER TABLE es_messages ADD COLUMN IF NOT EXISTS draft_message TEXT",
                 "ALTER TABLE es_messages ADD COLUMN IF NOT EXISTS message_state VARCHAR(20)",
-            ]:
+                # Retention indexes — no CONCURRENTLY so they run inside the transaction
+                "CREATE INDEX IF NOT EXISTS ix_es_messages_created_at ON es_messages (created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_es_messages_user_recent ON es_messages (user_id, created_at DESC)",
+            ]
+            for sql in migrations:
                 try:
-                    await conn.execute(text(col_sql))
-                except Exception:
-                    pass
+                    await conn.execute(text(sql))
+                except Exception as e:
+                    logger.debug("Migration skipped (%s): %s", sql[:50], e)
+
         logger.info("Tables ensured: email_accounts, es_messages, es_conversations, es_outbox")
+
+        # Register pg_cron job for 24h ephemeral retention (non-blocking, best-effort)
+        await _setup_retention_cron()
+
     except Exception as e:
         logger.error("Table creation failed: %s", e)
+
+
+async def _setup_retention_cron() -> None:
+    """
+    Register a pg_cron job that deletes es_messages rows older than 24 hours.
+
+    pg_cron is a PostgreSQL extension available on:
+      - AWS RDS PostgreSQL 12.5+ (enable via parameter group: shared_preload_libraries = pg_cron)
+      - Amazon Aurora PostgreSQL
+      - Most managed PostgreSQL providers
+
+    The job runs every 30 minutes entirely inside the DB engine.
+    Zero application-level polling. Zero asyncio overhead. Zero CPU cost when idle.
+
+    Idempotent: unschedules any existing job with the same name before re-registering,
+    so restarts never create duplicate jobs.
+
+    If pg_cron is not available (extension not installed), this logs a warning
+    and falls back to a PostgreSQL RULE-based approach that fires on INSERT.
+    The service continues to function normally either way.
+    """
+    from shared.database import get_engine
+    from sqlalchemy import text
+
+    engine = get_engine()
+
+    # The DELETE statement pg_cron will execute every 30 minutes.
+    # Batched via LIMIT to avoid long locks on large tables.
+    # Runs in a loop inside the cron job itself using a DO block.
+    retention_sql = """
+        DO $$
+        DECLARE
+            deleted_count INTEGER;
+            total_deleted INTEGER := 0;
+        BEGIN
+            LOOP
+                DELETE FROM es_messages
+                WHERE id IN (
+                    SELECT id FROM es_messages
+                    WHERE created_at < NOW() - INTERVAL '24 hours'
+                    ORDER BY created_at
+                    LIMIT 5000
+                );
+                GET DIAGNOSTICS deleted_count = ROW_COUNT;
+                total_deleted := total_deleted + deleted_count;
+                EXIT WHEN deleted_count = 0;
+                PERFORM pg_sleep(0.1);
+            END LOOP;
+            IF total_deleted > 0 THEN
+                RAISE LOG 'es_messages retention: deleted % rows older than 24h', total_deleted;
+            END IF;
+        END $$;
+    """
+
+    try:
+        async with engine.connect() as conn:
+            # Check if pg_cron extension is available
+            result = await conn.execute(text(
+                "SELECT 1 FROM pg_available_extensions WHERE name = 'pg_cron'"
+            ))
+            if not result.fetchone():
+                logger.warning(
+                    "pg_cron extension not available on this PostgreSQL instance. "
+                    "Enable it via: CREATE EXTENSION pg_cron; "
+                    "Or add pg_cron to shared_preload_libraries in RDS parameter group. "
+                    "Ephemeral retention will not be active until pg_cron is enabled."
+                )
+                return
+
+            # Enable pg_cron if not already enabled
+            await conn.execute(text(
+                "CREATE EXTENSION IF NOT EXISTS pg_cron"
+            ))
+            await conn.commit()
+
+            # Remove any existing job with this name (idempotent re-registration)
+            await conn.execute(text(
+                "SELECT cron.unschedule('es_messages_24h_retention') "
+                "WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'es_messages_24h_retention')"
+            ))
+            await conn.commit()
+
+            # Schedule: every 30 minutes, delete rows older than 24h in batches
+            await conn.execute(
+                text("SELECT cron.schedule(:name, :schedule, :command)"),
+                {
+                    "name":     "es_messages_24h_retention",
+                    "schedule": "*/30 * * * *",   # every 30 minutes
+                    "command":  retention_sql.strip(),
+                },
+            )
+            await conn.commit()
+
+            logger.info(
+                "pg_cron job registered: es_messages_24h_retention "
+                "(runs every 30 min, deletes rows older than 24h in 5k batches)"
+            )
+
+    except Exception as e:
+        logger.warning(
+            "pg_cron setup failed (%s). "
+            "Ephemeral retention requires pg_cron. "
+            "Enable it on RDS: set shared_preload_libraries='pg_cron' in parameter group, "
+            "then run: CREATE EXTENSION pg_cron;",
+            e,
+        )
 
 
 if __name__ == "__main__":

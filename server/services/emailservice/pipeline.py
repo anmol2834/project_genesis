@@ -193,9 +193,10 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
         # Filter + store via durable store_ready queue
         store_events = []
         for msg in messages:
-            # Full filter with all available metadata (O(1)/O(bounded))
-            label_ids = (msg.get("metadata") or {}).get("label_ids")
-            snippet   = (msg.get("metadata") or {}).get("snippet", "")
+            # label_ids and snippet are top-level fields on the message dict
+            # (set by _fetch_gmail_message) — no metadata dict needed
+            label_ids = msg.get("label_ids")
+            snippet   = msg.get("snippet", "")
             if should_filter(
                 subject    = msg.get("subject", ""),
                 from_email = msg.get("from_email", ""),
@@ -307,7 +308,6 @@ async def store_message_with_retry(msg: dict) -> bool:
             "status":           MessageStatus.RECEIVED.value,
             "is_read":          False,
             "has_attachments":  bool(msg.get("has_attachments", False)),
-            "metadata":         msg.get("metadata") or {},
         }
     except Exception as e:
         logger.error("Row build failed for msg %s: %s", msg.get("message_id", "?"), e)
@@ -587,7 +587,10 @@ async def _fetch_gmail_message(token: str, email: str, msg_id: str):
         "content":         content or msg.get("snippet", "(no content)"),
         "timestamp":       ts,
         "has_attachments": _has_attachments(msg.get("payload", {})),
-        "metadata":        {"label_ids": labels, "snippet": msg.get("snippet", "")},
+        # label_ids and snippet kept as top-level for in-flight filtering only
+        # (not persisted to DB — metadata column removed)
+        "label_ids":       labels,
+        "snippet":         msg.get("snippet", ""),
     }
 
 
@@ -662,7 +665,6 @@ async def _fetch_outlook_message(token: str, message_id: str):
         "content":         strip_reply_chain(raw_content),
         "timestamp":       ts,
         "has_attachments": m.get("hasAttachments", False),
-        "metadata":        {},
     }
 
 

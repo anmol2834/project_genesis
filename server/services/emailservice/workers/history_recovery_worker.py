@@ -298,7 +298,7 @@ class HistoryRecoveryWorker:
             "content":         content or msg.get("snippet", "(no content)"),
             "timestamp":       ts,
             "has_attachments": _has_attachments(msg.get("payload", {})),
-            "metadata":        {"label_ids": labels},
+            "label_ids":       labels,
         }
 
     async def _load_gmail_accounts(self) -> list[dict]:

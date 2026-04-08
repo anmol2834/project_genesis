@@ -82,8 +82,6 @@ class EmailMessage(Base):
     is_read          = Column(Boolean, default=False, nullable=False)
     has_attachments  = Column(Boolean, default=False, nullable=False)
 
-    msg_metadata     = Column("metadata", JSONB, nullable=True, default=dict)
-
     created_at       = Column(DateTime, nullable=False, server_default=func.now())
 
     __table_args__ = (
@@ -92,8 +90,12 @@ class EmailMessage(Base):
         Index("ix_es_messages_unread",     "user_id", "is_read", "timestamp"),
         Index("ix_es_messages_direction",  "user_id", "direction", "timestamp"),
         Index("ix_es_messages_account",    "email_account_id", "timestamp"),
-        # Fast draft lookup: find all messages with pending drafts
         Index("ix_es_messages_draft",      "user_id", "message_state"),
+        # ── Ephemeral retention indexes ───────────────────────────────────────
+        # ix_es_messages_created_at  — used by pg_cron DELETE (WHERE created_at < cutoff)
+        # ix_es_messages_user_recent — used by inbox/AI queries (WHERE user_id + created_at range)
+        Index("ix_es_messages_created_at",  "created_at"),
+        Index("ix_es_messages_user_recent", "user_id", "created_at"),
     )
 
     def __repr__(self) -> str:

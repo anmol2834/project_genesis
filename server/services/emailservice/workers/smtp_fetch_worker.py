@@ -316,7 +316,6 @@ def _parse_raw_email(raw: bytes) -> Optional[dict]:
             "content":         content.strip() or "(no content)",
             "timestamp":       ts,
             "has_attachments": any(part.get_filename() for part in msg.walk() if part.get_filename()),
-            "metadata":        {},
         }
     except Exception as e:
         logger.error("Email parse error: %s", e)

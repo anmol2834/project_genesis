@@ -162,7 +162,6 @@ class OutlookFetchWorker(BaseWorker):
             "content":         body_content if body_type == "text" else _html_to_text(body_content),
             "timestamp":       ts,
             "has_attachments": m.get("hasAttachments", False),
-            "metadata":        {"internet_message_id": m.get("internetMessageId", "")},
         }
 
 

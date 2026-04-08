@@ -403,8 +403,9 @@ async def send_draft(req: SendDraftRequest):
     if not await _check_limit(req.email_account_id):
         # Enqueue to deferred outbox instead of failing
         from draft_manager import DraftManager
-        metadata = msg.msg_metadata or {}
-        headers  = metadata.get("headers", {})
+        # Reconstruct reply headers from message fields (no metadata needed)
+        to_email_deferred = (msg.from_email if msg.direction == MessageDirection.INCOMING
+                             else (msg.to_emails[0] if msg.to_emails else ""))
         dm = DraftManager()
         await dm._enqueue_deferred(
             message_id=req.message_id,
@@ -412,10 +413,9 @@ async def send_draft(req: SendDraftRequest):
             email_account_id=req.email_account_id,
             thread_id=msg.thread_id or req.message_id,
             provider=msg.provider,
-            in_reply_to=headers.get("message_id", req.message_id),
-            references=headers.get("references", ""),
-            to_email=(msg.from_email if msg.direction == MessageDirection.INCOMING
-                      else (msg.to_emails[0] if msg.to_emails else "")),
+            in_reply_to=msg.message_id,
+            references=msg.thread_id or msg.message_id,
+            to_email=to_email_deferred,
             from_email=from_email,
             subject=msg.subject or "",
             draft_text=msg.draft_message,
@@ -434,9 +434,7 @@ async def send_draft(req: SendDraftRequest):
             success=True, sent_at=datetime.utcnow().isoformat(), error="deferred_daily_limit"
         )
 
-    # ── Build send request from stored message metadata ───────────────────────
-    metadata = msg.msg_metadata or {}
-    headers  = metadata.get("headers", {})
+    # ── Build send request from message fields (no metadata needed) ───────────
     to_email = (msg.from_email if msg.direction == MessageDirection.INCOMING
                 else (msg.to_emails[0] if isinstance(msg.to_emails, list) and msg.to_emails else ""))
 
@@ -445,8 +443,8 @@ async def send_draft(req: SendDraftRequest):
         email_account_id=req.email_account_id,
         user_id=req.user_id,
         thread_id=msg.thread_id or req.message_id,
-        in_reply_to=headers.get("message_id", req.message_id),
-        references=headers.get("references", msg.thread_id or req.message_id),
+        in_reply_to=msg.message_id,
+        references=msg.thread_id or msg.message_id,
         conversation_id="",
         to=to_email,
         from_email=from_email,
