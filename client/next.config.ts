@@ -6,6 +6,9 @@ const nextConfig: NextConfig = {
   experimental: {
     optimizePackageImports: ['@mui/material', '@mui/icons-material'],
   },
+  logging: {
+    fetches: { fullUrl: false },
+  },
 };
 
 export default nextConfig;

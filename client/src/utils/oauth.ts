@@ -69,11 +69,8 @@ export async function initiateOAuth(provider: 'gmail' | 'outlook'): Promise<void
       params.set('access_type', 'offline');
       params.set('prompt', 'consent');
     } else {
-      // Outlook: PKCE flow (recommended by Microsoft, no client_secret on frontend)
-      const { codeVerifier, codeChallenge } = await generatePKCE();
-      sessionStorage.setItem('oauth_code_verifier', codeVerifier);
-      params.set('code_challenge', codeChallenge);
-      params.set('code_challenge_method', 'S256');
+      // Outlook: standard confidential client flow.
+      // client_secret is held securely on the backend — no PKCE needed.
       params.set('prompt', 'consent');
     }
 
