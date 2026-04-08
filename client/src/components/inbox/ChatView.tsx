@@ -13,6 +13,8 @@ import EmojiEmotionsRoundedIcon from '@mui/icons-material/EmojiEmotionsRounded';
 import FormatBoldRoundedIcon from '@mui/icons-material/FormatBoldRounded';
 import LocalFireDepartmentRoundedIcon from '@mui/icons-material/LocalFireDepartmentRounded';
 import { Conversation, Message, LeadTag } from './inboxData';
+import { emailInboxApi } from '@/services/endpoints/emailInbox';
+import { useAuth } from '@/contexts/AuthContext';
 
 const LEAD_TAG_CONFIG: Record<LeadTag, { label: string; color: string; bg: string }> = {
   hot:  { label: 'Hot Lead',  color: '#ef4444', bg: 'rgba(239,68,68,0.12)'  },
@@ -151,13 +153,13 @@ export default function ChatView({ conversation, onBack }: Props) {
   const [showTyping, setShowTyping] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [draft, setDraft] = useState<string | null>(conversation.draft ?? null);
+  const [draftSending, setDraftSending] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const tagInfo = LEAD_TAG_CONFIG[conversation.leadTag];
+  const { user } = useAuth();
 
   useEffect(() => {
-    // Sync messages whenever the conversation updates (SSE pushes new messages
-    // by updating the thread in React Query cache → new conversation prop)
     setMessages(conversation.messages);
     setShowTyping(false);
     setInput('');
@@ -181,6 +183,29 @@ export default function ChatView({ conversation, onBack }: Props) {
     setInput('');
     setShowTyping(true);
     setTimeout(() => setShowTyping(false), 2600);
+  };
+
+  const handleSendDraft = async () => {
+    if (!conversation.draftMessageId || !user?.user_id) return;
+    setDraftSending(true);
+    try {
+      // Find the email_account_id from the conversation messages
+      const accountId = conversation.messages.find(m => m.message_id)?.message_id
+        ? '' : '';  // will be resolved server-side via message_id lookup
+      await emailInboxApi.sendDraft({
+        message_id:       conversation.draftMessageId,
+        user_id:          user.user_id,
+        email_account_id: '',  // server resolves from message_id + user_id
+      });
+      if (draft) {
+        sendMessage(draft);
+      }
+      setDraft(null);
+    } catch (err) {
+      console.error('[ChatView] Draft send failed:', err);
+    } finally {
+      setDraftSending(false);
+    }
   };
 
   const canSend = input.trim().length > 0;
@@ -334,12 +359,10 @@ export default function ChatView({ conversation, onBack }: Props) {
           }}>
             <Box
               component="button"
-              onClick={() => {
-                sendMessage(draft);
-                setDraft(null);
-              }}
+              onClick={handleSendDraft}
+              disabled={draftSending}
               sx={{
-                flex: 1, border: 'none', cursor: 'pointer',
+                flex: 1, border: 'none', cursor: draftSending ? 'not-allowed' : 'pointer',
                 py: 0.65, borderRadius: '8px',
                 background: isDark
                   ? 'linear-gradient(135deg, #7c3aed, #c084fc)'
@@ -347,17 +370,18 @@ export default function ChatView({ conversation, onBack }: Props) {
                 color: '#fff',
                 fontSize: '0.72rem', fontWeight: 700,
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0.5,
+                opacity: draftSending ? 0.7 : 1,
                 transition: 'opacity 0.15s ease, transform 0.15s ease',
-                '&:hover': { opacity: 0.9, transform: 'scale(1.01)' },
+                '&:hover': { opacity: draftSending ? 0.7 : 0.9, transform: draftSending ? 'none' : 'scale(1.01)' },
                 '&:active': { transform: 'scale(0.98)' },
               }}
             >
               <SendRoundedIcon sx={{ fontSize: 12 }} />
-              Yes, Send
+              {draftSending ? 'Sending…' : 'Yes, Send'}
             </Box>
             <Box
               component="button"
-              onClick={() => { setInput(draft); setDraft(null); }}
+              onClick={() => { setInput(draft ?? ''); setDraft(null); }}
               sx={{
                 px: 1.5, border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : 'rgba(15,23,42,0.12)'}`,
                 cursor: 'pointer', py: 0.65, borderRadius: '8px',

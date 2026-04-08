@@ -9,6 +9,10 @@ export interface Message {
   text: string;
   time: string;
   status?: 'sent' | 'delivered' | 'read';
+  // Draft fields (populated on incoming messages with AI drafts)
+  draft_message?: string;
+  message_id?: string;
+  message_state?: 'received' | 'drafted' | 'queued' | 'sent' | 'failed';
 }
 
 export interface Conversation {
@@ -25,6 +29,8 @@ export interface Conversation {
   leadTag: LeadTag;
   priority: 'high' | 'medium' | 'low';
   draft?: string;
+  // For send-draft API call
+  draftMessageId?: string;
   messages: Message[];
 }
 

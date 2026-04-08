@@ -20,6 +20,9 @@ export interface InboxMessage {
   direction:       'incoming' | 'outgoing';
   is_read:         boolean;
   has_attachments: boolean;
+  // Draft & lifecycle
+  draft_message:   string | null;
+  message_state:   'received' | 'drafted' | 'queued' | 'sent' | 'failed' | null;
   // Aliases provided by backend for compatibility
   from:            string;
   to:              string[];
@@ -72,4 +75,10 @@ export const emailInboxApi = {
   /** Mark thread as read */
   markRead: (threadId: string) =>
     post<{ status: string }>(`${BASE}/threads/${threadId}/read`),
+
+  /** Send a stored AI draft (user clicks "Send" on a pending draft) */
+  sendDraft: (payload: { message_id: string; user_id: string; email_account_id: string }) =>
+    post<{ success: boolean; provider_message_id?: string; sent_at: string; error?: string }>(
+      '/email-service/email/send-draft', payload
+    ),
 };

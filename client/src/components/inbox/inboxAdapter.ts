@@ -184,12 +184,19 @@ export function threadToConversation(thread: InboxThread): Conversation {
   );
 
   const messages: Message[] = sorted.map((m: InboxMessage, idx) => ({
-    id:     `${thread.thread_id}-${idx}`,
-    role:   toRole(m.direction),
-    text:   cleanContent(m.content),
-    time:   formatTime(m.timestamp),
-    status: m.direction === 'outgoing' ? 'read' : undefined,
-  })).filter(m => m.text.length > 0);  // skip empty messages after cleaning
+    id:            `${thread.thread_id}-${idx}`,
+    role:          toRole(m.direction),
+    text:          cleanContent(m.content),
+    time:          formatTime(m.timestamp),
+    status:        m.direction === 'outgoing' ? 'read' : undefined,
+    // Pass through draft fields for the ChatView draft banner
+    draft_message: m.draft_message ?? undefined,
+    message_id:    m.message_id,
+    message_state: m.message_state ?? undefined,
+  })).filter(m => m.text.length > 0 || m.draft_message);  // keep messages with drafts even if content empty
+
+  // Find the latest pending draft across all messages in this thread
+  const draftMsg = sorted.find(m => m.draft_message && m.message_state === 'drafted');
 
   const latestMsg = sorted[sorted.length - 1];
   const snippet   = thread.snippet
@@ -210,5 +217,8 @@ export function threadToConversation(thread: InboxThread): Conversation {
     leadTag:     tag,
     priority:    tag === 'hot' ? 'high' : tag === 'warm' ? 'medium' : 'low',
     messages,
+    // Expose draft for the ChatView draft banner
+    draft:          draftMsg?.draft_message ?? undefined,
+    draftMessageId: draftMsg?.message_id ?? undefined,
   };
 }
