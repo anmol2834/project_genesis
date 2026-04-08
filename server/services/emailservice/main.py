@@ -111,6 +111,12 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_watch_manager_instance.run_watchdog())
             logger.info("Watch heartbeat watchdog started")
 
+            # Deferred send scheduler (event-driven, zero idle cost)
+            from workers.deferred_scheduler import DeferredScheduler
+            _deferred_scheduler = DeferredScheduler()
+            asyncio.create_task(_deferred_scheduler.start())
+            logger.info("DeferredScheduler started")
+
             # Drain webhook fallback queue periodically
             asyncio.create_task(_drain_webhook_fallback())
 
@@ -209,7 +215,6 @@ app.include_router(send_reply_router)
 app.include_router(accounts_router)
 app.include_router(oauth_config_router)
 
-
 # ── Health + Stats ────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -291,6 +296,7 @@ async def _create_tables() -> None:
         from models.email_account  import EmailAccount   # noqa
         from models.messages       import EmailMessage   # noqa
         from models.conversations  import EmailConversation  # noqa
+        from models.outbox         import EsOutbox       # noqa
         from shared.database.postgres import Base
         from sqlalchemy import text
         engine = get_engine()
@@ -304,7 +310,16 @@ async def _create_tables() -> None:
                 logger.info("Dropped content_html column (if existed)")
             except Exception:
                 pass
-        logger.info("Tables ensured: email_accounts, es_messages, es_conversations")
+            # Add new lifecycle columns if they don't exist yet (idempotent)
+            for col_sql in [
+                "ALTER TABLE es_messages ADD COLUMN IF NOT EXISTS draft_message TEXT",
+                "ALTER TABLE es_messages ADD COLUMN IF NOT EXISTS message_state VARCHAR(20)",
+            ]:
+                try:
+                    await conn.execute(text(col_sql))
+                except Exception:
+                    pass
+        logger.info("Tables ensured: email_accounts, es_messages, es_conversations, es_outbox")
     except Exception as e:
         logger.error("Table creation failed: %s", e)
 

@@ -161,20 +161,34 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
             *[_fetch_gmail_message_safe(token, email_address, mid, sem) for mid in new_ids],
             return_exceptions=True,
         )
-        messages = [m for m in results if m and not isinstance(m, Exception)]
 
-        # Log any individual message fetch failures for traceability
+        # Separate: real messages | filtered/skipped | hard errors | transient errors
+        messages  = [m for m in results if isinstance(m, dict)]
+        filtered  = sum(1 for m in results if m == "FILTERED")
         exceptions = [r for r in results if isinstance(r, Exception)]
+        fetch_failures = sum(1 for r in results if r is None)
+
         if exceptions:
-            logger.warning("Gmail message fetch: %d/%d failed for %s | errors: %s",
+            logger.warning("Gmail message fetch: %d/%d raised exceptions for %s | errors: %s",
                            len(exceptions), len(new_ids), email_address,
                            [str(e)[:80] for e in exceptions[:3]])
 
-        if not messages:
+        if filtered:
+            logger.debug("Gmail: %d/%d messages filtered/skipped for %s historyId=%s",
+                         filtered, len(new_ids), email_address, history_id)
+
+        # Only retry if ALL messages were actual fetch failures (not filtered)
+        if not messages and fetch_failures > 0 and filtered == 0:
             logger.warning("Gmail: all %d messages failed to fetch for %s historyId=%s — event will retry",
                            len(new_ids), email_address, history_id)
-            # Don't advance cursor — retry will re-fetch these message IDs
             return False  # → DLQ retry
+
+        # If everything was filtered (e.g. all SENT/DRAFT), advance cursor and succeed
+        if not messages:
+            logger.debug("Gmail: all %d messages filtered for %s historyId=%s — advancing cursor",
+                         len(new_ids), email_address, history_id)
+            await advance_history_cursor(snap["id"], history_id, email_address)
+            return True
 
         # Filter + store via durable store_ready queue
         store_events = []
@@ -326,7 +340,9 @@ async def store_message_with_retry(msg: dict) -> bool:
                     pg_insert(EmailConversation.__table__)
                     .values([conv_row])
                     .on_conflict_do_update(
-                        index_elements=["user_id", "thread_id"],
+                        # Use constraint name — more reliable than index_elements
+                        # when the table was created before the constraint was added.
+                        constraint="uq_es_conversations_user_thread",
                         set_={
                             "last_message_id": pg_insert(EmailConversation.__table__).excluded.last_message_id,
                             "last_message_at": pg_insert(EmailConversation.__table__).excluded.last_message_at,
@@ -337,7 +353,29 @@ async def store_message_with_retry(msg: dict) -> bool:
                         },
                     )
                 )
-                await session.execute(conv_stmt)
+                try:
+                    await session.execute(conv_stmt)
+                except Exception as conv_err:
+                    # Constraint may not exist yet (table created before migration).
+                    # Fall back to index_elements — PostgreSQL will find the unique index.
+                    logger.debug("conv upsert constraint fallback for %s: %s",
+                                 row["thread_id"], conv_err)
+                    conv_stmt2 = (
+                        pg_insert(EmailConversation.__table__)
+                        .values([conv_row])
+                        .on_conflict_do_update(
+                            index_elements=["user_id", "thread_id"],
+                            set_={
+                                "last_message_id": pg_insert(EmailConversation.__table__).excluded.last_message_id,
+                                "last_message_at": pg_insert(EmailConversation.__table__).excluded.last_message_at,
+                                "message_count":   EmailConversation.__table__.c.message_count + 1,
+                                "participants":    pg_insert(EmailConversation.__table__).excluded.participants,
+                                "is_read":         False,
+                                "updated_at":      datetime.utcnow(),
+                            },
+                        )
+                    )
+                    await session.execute(conv_stmt2)
                 await session.commit()
 
             M.db_writes.labels(table="es_messages", status="ok").inc(1)
@@ -367,19 +405,42 @@ async def _publish_ai_event(user_id: str, message_id: str, thread_id: str,
                              provider: str, event_id: str) -> None:
     """
     Publish to ai_events stream for async automation handoff.
-    automation-service consumes this stream directly — no HTTP call.
+    Includes automation_enabled flag so AIHandoffWorker can route to
+    draft storage vs immediate send.
     """
     try:
+        # Load automation_enabled from account snapshot (L1 cache — zero DB cost on hot path)
+        automation_enabled = True  # default: send
+        try:
+            from token_cache import get_account_snapshot
+            from models.email_account import EmailAccount
+            from sqlalchemy import select as sa_select
+            async with get_db_session() as _s:
+                _r = await _s.execute(
+                    sa_select(EmailAccount.automation_enabled, EmailAccount.id,
+                              EmailAccount.email_address, EmailAccount.daily_sent_count,
+                              EmailAccount.daily_send_limit)
+                    .where(EmailAccount.user_id == UUID(user_id),
+                           EmailAccount.is_active == True)
+                    .limit(1)
+                )
+                _row = _r.first()
+                if _row:
+                    automation_enabled = bool(_row[0])
+        except Exception:
+            pass  # fail open — default to automation_enabled=True
+
         from stream_client import publish as _pub
         await _pub(
             cfg.TOPIC_AI_EVENTS,
             {
-                "event_id":   event_id,
-                "user_id":    user_id,
-                "message_id": message_id,
-                "thread_id":  thread_id,
-                "provider":   provider,
-                "ts":         time.time(),
+                "event_id":          event_id,
+                "user_id":           user_id,
+                "message_id":        message_id,
+                "thread_id":         thread_id,
+                "provider":          provider,
+                "automation_enabled": automation_enabled,
+                "ts":                time.time(),
             },
             partition_key=user_id,
         )
@@ -474,33 +535,44 @@ async def _fetch_gmail_message(token: str, email: str, msg_id: str):
         )
     except Exception as e:
         logger.error("Message fetch error %s: %s", msg_id, e)
-        return None
+        return None  # transient network error → caller counts as failure
+
+    if resp.status_code == 404:
+        # Message deleted or not yet visible (race condition on SENT messages).
+        # Return sentinel "FILTERED" so caller doesn't count this as a failure.
+        logger.debug("Message %s not found (404) — likely deleted or SENT race condition", msg_id)
+        return "FILTERED"
+
+    if resp.status_code == 403:
+        # Insufficient permissions for this specific message (e.g. delegated account).
+        logger.debug("Message %s forbidden (403) — skipping", msg_id)
+        return "FILTERED"
 
     if resp.status_code != 200:
-        return None
+        logger.warning("Message fetch HTTP %d for %s — will retry", resp.status_code, msg_id)
+        return None  # real error → caller counts as failure
 
     msg    = resp.json()
     labels = msg.get("labelIds", [])
 
     # Stage 1: O(1) label check BEFORE any content parsing
-    # Rejects CATEGORY_PROMOTIONS, CATEGORY_UPDATES, SPAM, TRASH, DRAFT instantly
     if should_filter_by_labels(labels):
-        return None  # drop — never parse content for filtered emails
+        return "FILTERED"  # sentinel — not a failure
 
     if any(l in labels for l in ("DRAFT", "TRASH", "SPAM")):
-        return None
+        return "FILTERED"
 
     hdrs    = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
     snippet = msg.get("snippet", "")
 
-    # Stage 2-4: sender + subject + snippet check (all O(1)/O(bounded))
+    # Stage 2-4: sender + subject + snippet check
     if should_filter(
         subject    = hdrs.get("Subject", ""),
         from_email = _parse_email(hdrs.get("From", "")),
         snippet    = snippet,
         label_ids  = labels,
     ):
-        return None  # drop — no content fetch needed
+        return "FILTERED"
 
     content = _extract_text(msg.get("payload", {}))
     ts      = datetime.utcfromtimestamp(int(msg.get("internalDate", 0)) / 1000)

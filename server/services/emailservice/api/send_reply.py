@@ -1,5 +1,8 @@
 """
 emailservice — Send Reply API (standalone)
+Endpoints:
+  POST /email/send-reply  — send a reply immediately (automation or manual)
+  POST /email/send-draft  — send a stored draft (user clicks "Send" in UI)
 """
 from __future__ import annotations
 import asyncio, base64, uuid, logging
@@ -14,7 +17,7 @@ from uuid import UUID
 from shared.database import get_db_session
 from shared.cache import get_redis
 from token_cache import get_account_snapshot, get_fresh_token
-from models.messages import EmailMessage, MessageDirection, MessageStatus
+from models.messages import EmailMessage, MessageDirection, MessageStatus, MessageState
 from models.conversations import EmailConversation
 from models.email_account import EmailAccount
 from encryption import decrypt_token
@@ -51,6 +54,13 @@ class SendReplyResponse(BaseModel):
 
 @router.post("/send-reply", response_model=SendReplyResponse)
 async def send_reply(req: SendReplyRequest):
+    """
+    Send a reply. Called by automation-service after AI generates a reply.
+    Checks automation_enabled on the account:
+      - True  + within limit → send immediately
+      - True  + over limit   → enqueue to deferred outbox
+      - False                → store as draft (no send)
+    """
     dedup_key = f"es:sent:{req.email_account_id}:{req.in_reply_to}"
     try:
         redis = await get_redis()
@@ -67,11 +77,67 @@ async def send_reply(req: SendReplyRequest):
 
     from_email = req.from_email if "@" in req.from_email else snap["email_address"]
 
-    if not await _check_limit(req.email_account_id):
-        return SendReplyResponse(success=True, thread_id=req.thread_id,
-            in_reply_to=req.in_reply_to, conversation_id=req.conversation_id,
-            sent_at=datetime.utcnow().isoformat(), error="deferred_daily_limit")
+    # ── Check automation_enabled ──────────────────────────────────────────────
+    automation_enabled = True
+    try:
+        async with get_db_session() as _s:
+            _r = await _s.execute(
+                select(EmailAccount.automation_enabled)
+                .where(EmailAccount.id == UUID(req.email_account_id))
+            )
+            _row = _r.first()
+            if _row is not None:
+                automation_enabled = bool(_row[0])
+    except Exception:
+        pass
 
+    if not automation_enabled:
+        # Store as draft on the source message row — do NOT send
+        from draft_manager import DraftManager
+        # Find the source message_id from idempotency_key or in_reply_to
+        source_msg_id = req.idempotency_key or req.in_reply_to
+        await DraftManager()._store_draft(
+            message_id=source_msg_id,
+            user_id=req.user_id,
+            email_account_id=req.email_account_id,
+            draft_text=req.body_text,
+        )
+        logger.info("send_reply: automation disabled — stored draft | msg=%s", source_msg_id[:12])
+        return SendReplyResponse(
+            success=True, thread_id=req.thread_id,
+            in_reply_to=req.in_reply_to, conversation_id=req.conversation_id,
+            sent_at=datetime.utcnow().isoformat(), error="draft_stored",
+        )
+
+    # ── Check daily limit ─────────────────────────────────────────────────────
+    if not await _check_limit(req.email_account_id):
+        from draft_manager import DraftManager
+        from datetime import timedelta
+        dm = DraftManager()
+        _, reset_time = await dm._check_and_reserve_send_slot(req.email_account_id)
+        source_msg_id = req.idempotency_key or req.in_reply_to
+        await dm._enqueue_deferred(
+            message_id=source_msg_id,
+            user_id=req.user_id,
+            email_account_id=req.email_account_id,
+            thread_id=req.thread_id,
+            provider=req.provider,
+            in_reply_to=req.in_reply_to,
+            references=req.references,
+            to_email=req.to,
+            from_email=from_email,
+            subject=req.subject,
+            draft_text=req.body_text,
+            scheduled_send_time=reset_time,
+        )
+        logger.info("send_reply: daily limit reached — deferred | msg=%s", source_msg_id[:12])
+        return SendReplyResponse(
+            success=True, thread_id=req.thread_id,
+            in_reply_to=req.in_reply_to, conversation_id=req.conversation_id,
+            sent_at=datetime.utcnow().isoformat(), error="deferred_daily_limit",
+        )
+
+    # ── Send immediately ──────────────────────────────────────────────────────
     provider_key = req.provider.lower().strip()
     provider_msg_id = None
     last_error = None
@@ -264,3 +330,183 @@ async def _send_outlook(snap: dict, req: SendReplyRequest, from_email: str) -> s
     if resp.status_code not in (200, 202):
         raise RuntimeError(f"Outlook send failed ({resp.status_code}): {resp.text[:200]}")
     return f"outlook-{uuid.uuid4()}"
+
+
+# ── Send Draft endpoint ───────────────────────────────────────────────────────
+
+class SendDraftRequest(BaseModel):
+    """
+    User clicks "Send" on a pending draft in the inbox UI.
+    The draft_message is already stored on the incoming message row.
+    We just need the message_id to look it up + account context to send.
+    """
+    message_id:       str = Field(..., description="Incoming message_id whose draft to send")
+    user_id:          str = Field(...)
+    email_account_id: str = Field(...)
+
+
+class SendDraftResponse(BaseModel):
+    success:             bool
+    provider_message_id: Optional[str] = None
+    sent_at:             str
+    error:               Optional[str] = None
+
+
+@router.post("/send-draft", response_model=SendDraftResponse)
+async def send_draft(req: SendDraftRequest):
+    """
+    Send the AI-generated draft stored on an incoming message row.
+    Idempotent: repeated calls return success without re-sending.
+    Lifecycle: DRAFTED → SENT (updates message_state on the incoming row).
+    """
+    # ── Load the incoming message with its draft ──────────────────────────────
+    async with get_db_session() as session:
+        result = await session.execute(
+            select(EmailMessage).where(
+                EmailMessage.message_id == req.message_id,
+                EmailMessage.user_id == UUID(req.user_id),
+            )
+        )
+        msg = result.scalar_one_or_none()
+
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    if not msg.draft_message:
+        raise HTTPException(status_code=400, detail="No draft found for this message")
+
+    # Idempotency: already sent
+    if msg.message_state == MessageState.SENT:
+        return SendDraftResponse(
+            success=True, sent_at=datetime.utcnow().isoformat(), error="already_sent"
+        )
+
+    # ── Dedup via Redis ───────────────────────────────────────────────────────
+    dedup_key = f"es:draft_sent:{req.email_account_id}:{req.message_id}"
+    try:
+        redis = await get_redis()
+        if await redis.exists(dedup_key):
+            return SendDraftResponse(
+                success=True, sent_at=datetime.utcnow().isoformat(), error="duplicate_skipped"
+            )
+    except Exception:
+        pass
+
+    # ── Load account ──────────────────────────────────────────────────────────
+    snap = await _load_snap(req.email_account_id, req.user_id)
+    if not snap:
+        raise HTTPException(status_code=404, detail="Email account not found")
+
+    from_email = snap["email_address"]
+
+    # ── Check daily limit — defer if over ────────────────────────────────────
+    if not await _check_limit(req.email_account_id):
+        # Enqueue to deferred outbox instead of failing
+        from draft_manager import DraftManager
+        metadata = msg.msg_metadata or {}
+        headers  = metadata.get("headers", {})
+        dm = DraftManager()
+        await dm._enqueue_deferred(
+            message_id=req.message_id,
+            user_id=req.user_id,
+            email_account_id=req.email_account_id,
+            thread_id=msg.thread_id or req.message_id,
+            provider=msg.provider,
+            in_reply_to=headers.get("message_id", req.message_id),
+            references=headers.get("references", ""),
+            to_email=(msg.from_email if msg.direction == MessageDirection.INCOMING
+                      else (msg.to_emails[0] if msg.to_emails else "")),
+            from_email=from_email,
+            subject=msg.subject or "",
+            draft_text=msg.draft_message,
+            scheduled_send_time=await dm._check_and_reserve_send_slot(req.email_account_id)[1],
+        )
+        # Update state to QUEUED
+        async with get_db_session() as session:
+            await session.execute(
+                sa_update(EmailMessage)
+                .where(EmailMessage.message_id == req.message_id,
+                       EmailMessage.user_id == UUID(req.user_id))
+                .values(message_state=MessageState.QUEUED)
+            )
+            await session.commit()
+        return SendDraftResponse(
+            success=True, sent_at=datetime.utcnow().isoformat(), error="deferred_daily_limit"
+        )
+
+    # ── Build send request from stored message metadata ───────────────────────
+    metadata = msg.msg_metadata or {}
+    headers  = metadata.get("headers", {})
+    to_email = (msg.from_email if msg.direction == MessageDirection.INCOMING
+                else (msg.to_emails[0] if isinstance(msg.to_emails, list) and msg.to_emails else ""))
+
+    send_req = SendReplyRequest(
+        provider=msg.provider,
+        email_account_id=req.email_account_id,
+        user_id=req.user_id,
+        thread_id=msg.thread_id or req.message_id,
+        in_reply_to=headers.get("message_id", req.message_id),
+        references=headers.get("references", msg.thread_id or req.message_id),
+        conversation_id="",
+        to=to_email,
+        from_email=from_email,
+        subject=f"Re: {msg.subject}" if msg.subject and not msg.subject.startswith("Re:") else (msg.subject or ""),
+        body_text=msg.draft_message,
+    )
+
+    # ── Send ──────────────────────────────────────────────────────────────────
+    provider_key = msg.provider.lower()
+    provider_msg_id = None
+    last_error = None
+
+    for attempt in range(3):
+        try:
+            if provider_key == "gmail":
+                provider_msg_id = await _send_gmail(snap, send_req, from_email)
+            elif provider_key == "outlook":
+                provider_msg_id = await _send_outlook(snap, send_req, from_email)
+            else:
+                provider_msg_id = await _send_smtp(snap, send_req, from_email)
+            break
+        except Exception as e:
+            last_error = str(e)
+            if attempt < 2:
+                await asyncio.sleep([1, 2, 4][attempt])
+
+    if not provider_msg_id:
+        # Mark as FAILED
+        async with get_db_session() as session:
+            await session.execute(
+                sa_update(EmailMessage)
+                .where(EmailMessage.message_id == req.message_id,
+                       EmailMessage.user_id == UUID(req.user_id))
+                .values(message_state=MessageState.FAILED)
+            )
+            await session.commit()
+        return SendDraftResponse(
+            success=False, sent_at=datetime.utcnow().isoformat(), error=last_error
+        )
+
+    # ── Mark sent + set dedup key ─────────────────────────────────────────────
+    try:
+        redis = await get_redis()
+        await redis.setex(dedup_key, 86400, "1")
+    except Exception:
+        pass
+
+    async with get_db_session() as session:
+        await session.execute(
+            sa_update(EmailMessage)
+            .where(EmailMessage.message_id == req.message_id,
+                   EmailMessage.user_id == UUID(req.user_id))
+            .values(message_state=MessageState.SENT, draft_message=None)
+        )
+        await session.commit()
+
+    await _inc_sent(req.email_account_id)
+
+    logger.info("Draft sent | msg=%s provider_msg=%s", req.message_id[:12], provider_msg_id[:12])
+    return SendDraftResponse(
+        success=True, provider_message_id=provider_msg_id,
+        sent_at=datetime.utcnow().isoformat(),
+    )

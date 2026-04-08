@@ -90,6 +90,9 @@ def _fmt_msg(m: EmailMessage) -> dict:
         "direction":       direction,
         "is_read":         m.is_read,
         "has_attachments": m.has_attachments,
+        # Draft & lifecycle fields
+        "draft_message":   m.draft_message,
+        "message_state":   m.message_state.value if m.message_state else None,
         # Aliases for client compatibility
         "from":            m.from_email,
         "to":              m.to_emails or [],
@@ -126,8 +129,9 @@ async def list_threads(
             # This handles the case where es_conversations rows were never created
             # (e.g. first run before the upsert logic was in place).
             if not convs:
-                logger.warning(
-                    "es_conversations empty for user %s — rebuilding from es_messages", user_id
+                logger.info(
+                    "es_conversations empty for user %s — rebuilding from es_messages (one-time recovery)",
+                    user_id
                 )
                 convs = await _rebuild_conversations_from_messages(db, user_id)
                 total = len(convs)
