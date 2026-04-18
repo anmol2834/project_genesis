@@ -364,10 +364,10 @@ def _build_search_text(
       - Minimum 10 words for embedding quality
 
     Examples:
-      product:  "AgriFly Pro is an Agriculture Drone priced at ₹2500,
-                 used for crop monitoring and spraying. Currently active."
-      contact:  "Customer Support - Amit Sharma handles customer support.
-                 Contact: support@skyforgedrones.com, +91-9876543210.
+      product:  "Fleet Management Pro is a Software Service priced at ₹5000,
+                 used for vehicle tracking and route optimization. Currently active."
+      contact:  "Customer Support - John Smith handles customer support.
+                 Contact: support@example.com, +1-555-123-4567.
                  Available 9 AM - 6 PM."
       offer:    "Student Offer provides 25% discount for students on
                  training programs. Valid until 2026-09-30."
@@ -751,20 +751,44 @@ def _extract_keywords(data: Dict[str, Any], title: str) -> List[str]:
                     "coupon", "voucher", "offer", "discount"):
             _add_kw(syn)
 
-    # Product synonyms based on category
+    # Product synonyms based on category — GENERIC, works for ANY business
+    # We do NOT hardcode domain-specific synonyms (drone, agriculture, etc.)
+    # because this system serves any business in the world.
+    # Instead, we expand based on the actual category field value dynamically.
     cat = str(data.get("category", "")).lower()
-    if "drone" in cat or "drone" in title.lower():
-        for syn in ("uav", "unmanned aerial", "aerial vehicle", "quadcopter",
-                    "multirotor", "flying device"):
-            _add_kw(syn)
-    if "software" in cat or "software" in title.lower():
+    subcat = str(data.get("subcategory", "")).lower()
+
+    # Software/digital product synonyms
+    if any(w in cat or w in subcat for w in ("software", "saas", "app", "digital", "platform")):
         for syn in ("app", "application", "platform", "tool", "system",
-                    "saas", "digital", "web app"):
+                    "saas", "digital", "web app", "solution"):
             _add_kw(syn)
-    if "agriculture" in cat or "agri" in title.lower():
-        for syn in ("farming", "crop", "field", "agricultural", "agri",
-                    "precision farming", "farm tech"):
+
+    # Physical product / hardware synonyms
+    if any(w in cat or w in subcat for w in ("hardware", "device", "equipment", "machine", "instrument")):
+        for syn in ("device", "equipment", "machine", "unit", "instrument",
+                    "apparatus", "gadget", "hardware"):
             _add_kw(syn)
+
+    # Service synonyms
+    if any(w in cat or w in subcat for w in ("service", "consulting", "support", "maintenance")):
+        for syn in ("service", "consulting", "support", "assistance",
+                    "maintenance", "solution", "offering"):
+            _add_kw(syn)
+
+    # Training/education synonyms
+    if any(w in cat or w in subcat for w in ("training", "course", "education", "learning")):
+        for syn in ("training", "course", "workshop", "program", "certification",
+                    "learning", "education", "tutorial"):
+            _add_kw(syn)
+
+    # Add the actual category/subcategory words as keywords
+    # This covers ANY domain (drone, pharma, retail, fintech, etc.) automatically
+    for cat_field in (cat, subcat):
+        if cat_field and cat_field not in ("product_service", "uncategorized", ""):
+            for word in re.split(r"[\s\-_/]+", cat_field):
+                if len(word) > 2:
+                    _add_kw(word)
 
     # ── Category-level keywords ───────────────────────────────────────────
     category_kw_map = {

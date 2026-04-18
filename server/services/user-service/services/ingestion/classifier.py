@@ -45,7 +45,7 @@ CATEGORY_PROTOTYPES: Dict[str, List[str]] = {
     "delivery_shipping": [
         "delivery timeline shipping charges serviceable locations",
         "tracking options return replacement process logistics",
-        "free shipping above order value pan-india delivery days",
+        "free shipping above order value nationwide delivery days",
         "return window refund shipping policy courier partner",
     ],
     "company_info": [

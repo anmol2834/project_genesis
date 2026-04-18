@@ -149,6 +149,18 @@ async def run_file_pipeline(
     # ── Step 8: Update source stats ───────────────────────────────────────
     await _update_source_stats(source_id, len(payloads), payloads, session)
 
+    # Commit everything before scheduling analytics (analytics opens its own session)
+    await session.commit()
+
+    # ── Step 9: Compute + store analytics object in Qdrant ────────────────
+    # Opens its OWN fresh session — never reuses the pipeline session.
+    # asyncpg connections are not safe for concurrent use across tasks.
+    asyncio.create_task(_compute_and_store_analytics(
+        source_id=source_id,
+        user_id=user_id,
+        new_payloads=qdrant_payloads,
+    ))
+
     logger.info(f"Pipeline complete: {len(entry_ids)} entries stored")
     return {
         "accepted":  len(entry_ids),
@@ -216,6 +228,14 @@ async def run_manual_pipeline(
     qdrant_point_ids = await asyncio.to_thread(upsert_entries, qdrant_payloads, user_id)
     await _update_qdrant_ids(entry_ids, qdrant_point_ids, session)
     await _update_source_stats(source_id, 1, [payload], session)
+    await session.commit()
+
+    # Compute + store analytics after manual entry (own fresh session)
+    asyncio.create_task(_compute_and_store_analytics(
+        source_id=source_id,
+        user_id=user_id,
+        new_payloads=qdrant_payloads,
+    ))
 
     return {"accepted": 1, "rejected": 0, "errors": [], "entry_ids": entry_ids}
 
@@ -236,7 +256,7 @@ async def run_update_pipeline(
     from .classifier        import classify_text, merge_category
     from .normalizer        import normalize_row, build_entry_payload
     from .embedding_service import upsert_entries
-    from models.data_entry  import UserDataEntry, UserDataVersion
+    from models.data_entry  import UserDataEntry
 
     result = await session.execute(
         select(UserDataEntry).where(
@@ -273,26 +293,6 @@ async def run_update_pipeline(
     )
     payload["title"] = title
 
-    # Version snapshot before update
-    version_num = (entry.version or 1) + 1
-    version = UserDataVersion(
-        entry_id        = entry.id,
-        user_id         = user_id,
-        version         = entry.version or 1,
-        structured_data = entry.structured_data,
-        raw_data        = entry.raw_data,
-        search_text     = entry.search_text,
-        quality_score   = entry.quality_score,
-        category        = entry.category,
-        subtype         = entry.subtype,
-        title           = entry.title,
-        ai_tags         = entry.ai_tags,
-        entities        = entry.entities,
-        change_summary  = f"Updated to version {version_num}",
-        changed_fields  = list(updates.keys()),
-    )
-    session.add(version)
-
     # Update entry fields
     entry.structured_data      = payload["structured_data"]
     entry.search_text          = payload["search_text"]
@@ -304,7 +304,6 @@ async def run_update_pipeline(
     entry.subtype              = subtype
     entry.title                = payload["title"]
     entry.category             = final_cat
-    entry.version              = version_num
     entry.classification_meta  = {
         "user_category":   user_category,
         "ai_category":     ai_cat,
@@ -326,7 +325,7 @@ async def run_update_pipeline(
     }]
     await asyncio.to_thread(upsert_entries, qdrant_payloads, user_id)
 
-    logger.info(f"Entry {entry_id} updated to v{version_num}, Qdrant synced")
+    logger.info(f"Entry {entry_id} updated, Qdrant synced")
     return True
 
 
@@ -351,7 +350,7 @@ async def _insert_entries_pg(
     is_raw_retained and raw_reference are always written into
     classification_meta for full observability — no data is silently lost.
     """
-    from models.data_entry import UserDataEntry, UserDataVersion
+    from models.data_entry import UserDataEntry
 
     entry_ids = []
     now = datetime.utcnow()
@@ -361,35 +360,20 @@ async def _insert_entries_pg(
         if hasattr(cat_val, "value"):
             cat_val = cat_val.value
 
-        # ── Raw retention decision ────────────────────────────────────────
         meta        = payload.get("classification_meta") or {}
         ai_conf     = float(meta.get("ai_confidence", 0.0))
-        row_index   = meta.get("row_index")          # set by run_file_pipeline
+        row_index   = meta.get("row_index")
         store_raw   = ai_conf < RAW_RETENTION_CONFIDENCE_THRESHOLD
-
         raw_to_store = payload.get("raw_data") if store_raw else None
 
-        # Build enriched classification_meta with retention audit fields
         enriched_meta = {
             **meta,
             "is_raw_retained": store_raw,
-            "raw_reference": {
-                "source_id": source_id,
-                "row_index": row_index,   # None for manual entries
-            },
+            "raw_reference": {"source_id": source_id, "row_index": row_index},
         }
-        # Remove internal row_index from top-level meta (it's in raw_reference now)
         enriched_meta.pop("row_index", None)
 
-        # ── Enterprise logging ────────────────────────────────────────────
         entry_uuid = uuid.uuid4()
-        logger.info(
-            f"[raw_retention] entry={entry_uuid} "
-            f"confidence={ai_conf:.4f} "
-            f"store_raw={store_raw} "
-            f"decision={'RETAIN raw_data' if store_raw else 'SKIP raw_data (high confidence)'}"
-        )
-
         entry = UserDataEntry(
             id                  = entry_uuid,
             user_id             = user_id,
@@ -398,7 +382,7 @@ async def _insert_entries_pg(
             subtype             = payload.get("subtype"),
             title               = payload["title"],
             structured_data     = payload["structured_data"],
-            raw_data            = raw_to_store,          # NULL when high confidence
+            raw_data            = raw_to_store,
             search_text         = payload["search_text"],
             ai_tags             = payload.get("ai_tags", []),
             ai_relevance        = payload.get("ai_tags", []),
@@ -414,27 +398,6 @@ async def _insert_entries_pg(
         )
         session.add(entry)
         entry_ids.append(str(entry.id))
-
-        # Version snapshot — always stores raw_data regardless of retention policy
-        # (version history is the safety net for reprocessing)
-        version = UserDataVersion(
-            entry_id        = entry.id,
-            user_id         = user_id,
-            version         = 1,
-            structured_data = payload["structured_data"],
-            raw_data        = payload.get("raw_data"),   # always stored in version
-            search_text     = payload["search_text"],
-            quality_score   = payload.get("quality_score", 0.0),
-            category        = cat_val,
-            subtype         = payload.get("subtype"),
-            title           = entry.title,
-            ai_tags         = payload.get("ai_tags", []),
-            entities        = payload.get("entities", []),
-            change_summary  = "Initial ingestion",
-            changed_fields  = [],
-            created_at      = now,
-        )
-        session.add(version)
 
     await session.flush()
     logger.info(f"Inserted {len(entry_ids)} entries into PostgreSQL")
@@ -474,3 +437,100 @@ async def _update_source_stats(
     source.last_sync_at     = datetime.utcnow()
     source.ingestion_status = IngestionStatus.completed
     source.status           = "active"
+
+
+async def _compute_and_store_analytics(
+    source_id: str,
+    user_id: str,
+    new_payloads: List[Dict[str, Any]],
+) -> None:
+    """
+    Compute analytics from ALL entries for this source and upsert to Qdrant.
+    Runs as a background task — doesn't block the ingestion response.
+
+    CRITICAL: Opens its OWN fresh DB session via get_db_session.
+    Never reuses the pipeline session — asyncpg connections are not safe
+    for concurrent use across tasks (causes InterfaceError).
+
+    Waits 500ms before querying so the pipeline's commit is visible.
+    """
+    await asyncio.sleep(0.5)   # let pipeline commit propagate
+
+    try:
+        from shared.database import get_db_session
+        from models.data_entry import UserDataEntry, UserDataSource
+        from sqlalchemy import select
+        from .analytics_engine import compute_source_analytics, upsert_analytics_to_qdrant
+
+        async with get_db_session() as session:
+            # Get source name
+            source_result = await session.execute(
+                select(UserDataSource.name).where(UserDataSource.id == source_id)
+            )
+            source_name = source_result.scalar_one_or_none() or "Unknown Source"
+
+            # Fetch all existing entries for this source
+            entries_result = await session.execute(
+                select(
+                    UserDataEntry.structured_data,
+                    UserDataEntry.category,
+                    UserDataEntry.quality_score,
+                    UserDataEntry.title,
+                ).where(
+                    UserDataEntry.source_id  == source_id,
+                    UserDataEntry.user_id    == user_id,
+                    UserDataEntry.is_deleted == False,
+                )
+            )
+            existing_entries = [
+                {
+                    "structured_data": row.structured_data or {},
+                    "attributes":      (row.structured_data or {}).get("attributes", {}),
+                    "category":        str(row.category.value if hasattr(row.category, "value") else row.category),
+                    "quality_score":   float(row.quality_score or 0),
+                    "title":           row.title or "",
+                }
+                for row in entries_result.fetchall()
+            ]
+
+        # If DB returned nothing yet (race), fall back to new_payloads only
+        if not existing_entries:
+            for p in new_payloads:
+                existing_entries.append({
+                    "structured_data": p.get("structured_data") or {},
+                    "attributes":      p.get("attributes") or {},
+                    "category":        str(p.get("category", "")),
+                    "quality_score":   float(p.get("quality_score") or 0),
+                    "title":           p.get("title") or "",
+                })
+
+        if not existing_entries:
+            return
+
+        # Determine primary category
+        cat_counts: Dict[str, int] = {}
+        for e in existing_entries:
+            cat = e.get("category", "")
+            if cat and cat != "data_analytics":
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+        primary_cat = max(cat_counts, key=cat_counts.get) if cat_counts else ""
+
+        # Compute analytics (pure Python — no DB needed)
+        analytics = compute_source_analytics(
+            entries=existing_entries,
+            source_id=source_id,
+            source_name=source_name,
+            category_hint=primary_cat,
+        )
+
+        if analytics:
+            await asyncio.to_thread(
+                upsert_analytics_to_qdrant, analytics, user_id, source_id
+            )
+            logger.info(
+                f"Analytics stored | source={source_id[:8]} user={user_id[:8]} "
+                f"entries={len(existing_entries)} category={primary_cat}"
+            )
+
+    except Exception as e:
+        logger.warning(f"Analytics computation failed (non-critical): {e}", exc_info=True)

@@ -13,7 +13,6 @@ from shared.celery import get_celery_app
 from shared.logger import get_logger
 from shared.config import get_config
 from shared.vector_db import upsert_vectors
-from sentence_transformers import SentenceTransformer
 from typing import List, Dict
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
@@ -22,16 +21,45 @@ logger = get_logger(__name__)
 celery_app = get_celery_app()
 config = get_config()
 
-_model = None
-_engine = None
+_st_model  = None   # SentenceTransformers fallback
+_engine    = None
+
+_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+_EMBED_MODEL     = "nomic-embed-text"
+_EMBED_DIM       = 768
 
 
-def get_embedding_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        _model = SentenceTransformer('all-MiniLM-L6-v2')
-        logger.info("Embedding model loaded")
-    return _model
+def _embed_text(text: str) -> List[float]:
+    """
+    Embed using nomic-embed-text via Ollama (dim=768).
+    Falls back to all-mpnet-base-v2 (SentenceTransformers, dim=768) if Ollama unavailable.
+    """
+    try:
+        import httpx
+        resp = httpx.post(
+            f"{_OLLAMA_BASE_URL}/api/embeddings",
+            json={"model": _EMBED_MODEL, "prompt": text[:512]},
+            timeout=10.0,
+        )
+        if resp.status_code == 200:
+            vec = resp.json().get("embedding", [])
+            if vec and len(vec) == _EMBED_DIM:
+                return vec
+    except Exception:
+        pass
+
+    # Fallback: all-mpnet-base-v2 (dim=768, matches nomic-embed-text)
+    global _st_model
+    if _st_model is None:
+        from sentence_transformers import SentenceTransformer
+        _st_model = SentenceTransformer("all-mpnet-base-v2")
+        logger.info("Embedding fallback: all-mpnet-base-v2 loaded (dim=768)")
+    return _st_model.encode(text).tolist()
+
+
+def get_embedding_model():
+    """Backward-compat shim — returns None (we use _embed_text directly)."""
+    return None
 
 
 def get_sync_engine():
@@ -169,13 +197,12 @@ def run_embedding_update_sync(user_id: str, changed_fields: List[str]) -> dict:
     logger.info(f"Affected vector types: {affected_types}")
     
     try:
-        model = get_embedding_model()
         chunks_to_update = [build_vector_chunk(t, user_data) for t in affected_types]
-        
+
         vectors = [
             {
                 "id": f"{user_id}_{chunk['type']}",
-                "vector": model.encode(chunk["content"]).tolist(),
+                "vector": _embed_text(chunk["content"]),
                 "payload": {
                     "user_id": user_id,
                     "type": chunk["type"],
