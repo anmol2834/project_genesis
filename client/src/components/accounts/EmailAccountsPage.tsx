@@ -489,7 +489,7 @@ function ConnectModal({ open, onClose, isDark, theme }: {
               <Box sx={{ display: 'flex', gap: 0.75 }}>
                 {['TLS', 'SSL', 'None'].map((enc) => (
                   <Box key={enc} component="button" onClick={() => setSmtp(s => ({ ...s, encryption: enc }))} sx={{
-                    px: 1.25, py: 0.5, borderRadius: '7px', border: 'none', cursor: 'pointer',
+                    px: 1.25, py: 0.5, borderRadius: '7px', cursor: 'pointer',
                     fontSize: '0.7rem', fontWeight: 600,
                     background: smtp.encryption === enc
                       ? isDark ? 'rgba(129,140,248,0.2)' : alpha(theme.palette.primary.main, 0.1)

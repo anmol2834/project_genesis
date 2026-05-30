@@ -80,7 +80,7 @@ function LiveInboxDemo() {
           <Box key={c} sx={{ width: { xs: 8, sm: 10 }, height: { xs: 8, sm: 10 }, borderRadius: '50%', background: c, flexShrink: 0 }} />
         ))}
         <Box sx={{ flex: 1, mx: { xs: 1, sm: 2 }, height: 20, borderRadius: '6px', background: alpha(theme.palette.text.primary, 0.05), display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <Typography sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>inbox.mailflow.ai</Typography>
+          <Typography sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>inbox.proxipilot.ai</Typography>
         </Box>
       </Box>
 
@@ -304,6 +304,8 @@ export default function HeroSection() {
                 Start for free
               </Button>
               <Button
+                component={NextLink}
+                href="/waitlist"
                 variant="outlined"
                 size="large"
                 sx={{
@@ -313,7 +315,7 @@ export default function HeroSection() {
                   px: { xs: 2.5, sm: 3 },
                 }}
               >
-                Watch demo
+                Join Waitlist
               </Button>
             </Box>
           </motion.div>
@@ -322,7 +324,7 @@ export default function HeroSection() {
             <Box sx={{ display: 'flex', gap: { xs: 2.5, sm: 3 }, flexWrap: 'wrap' }}>
               {[
                 { value: '<25ms', label: 'Response time' },
-                { value: '10K+', label: 'Concurrent users' },
+                { value: '5K+', label: 'Concurrent users' },
                 { value: '80%',  label: 'Less manual work' },
               ].map((stat) => (
                 <Box key={stat.label}>

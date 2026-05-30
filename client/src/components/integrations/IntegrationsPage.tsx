@@ -9,7 +9,6 @@ import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import SyncRoundedIcon from '@mui/icons-material/SyncRounded';
 import LinkOffRoundedIcon from '@mui/icons-material/LinkOffRounded';
 import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
-import ArrowForwardRoundedIcon from '@mui/icons-material/ArrowForwardRounded';
 import LockRoundedIcon from '@mui/icons-material/LockRounded';
 import VerifiedRoundedIcon from '@mui/icons-material/VerifiedRounded';
 import TuneRoundedIcon from '@mui/icons-material/TuneRounded';
@@ -24,20 +23,12 @@ import DnsRoundedIcon from '@mui/icons-material/DnsRounded';
 import ShieldRoundedIcon from '@mui/icons-material/ShieldRounded';
 import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
 import VisibilityOffRoundedIcon from '@mui/icons-material/VisibilityOffRounded';
-import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
-import PauseCircleRoundedIcon from '@mui/icons-material/PauseCircleRounded';
-import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
-import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import UploadFileRoundedIcon from '@mui/icons-material/UploadFileRounded';
-import WarningAmberRoundedIcon from '@mui/icons-material/WarningAmberRounded';
-import { lightGradients, darkGradients } from '@/theme/palette';
 import {
   INTEGRATIONS, CATEGORIES, CONNECT_STEPS,
   type Integration, type CategoryId,
 } from './integrationsData';
-import { ACCOUNTS, STATUS_CONFIG } from '../accounts/accountsData';
 import CSVImportModal from '../shared/CSVImportModal';
-import { useAccounts } from '@/hooks/queries/useAccounts';
 
 // ── Animated counter ──────────────────────────────────────────────────────────
 function CountUp({ target, suffix = '' }: { target: number; suffix?: string }) {
@@ -98,7 +89,7 @@ function IntegrationLogo({ integration, size = 40 }: { integration: Integration;
 
 // ── Compact action button ─────────────────────────────────────────────────────
 function Btn({
-  label, color = '#818cf8', onClick, icon: Icon, danger = false, isDark, theme, size = 'sm', fullWidth = false,
+  label, color = '#818cf8', onClick, icon: Icon, danger = false, isDark, size = 'sm', fullWidth = false,
 }: {
   label: string; color?: string; onClick?: () => void; icon?: React.ElementType;
   danger?: boolean; isDark: boolean; theme: Theme; size?: 'sm' | 'xs' | 'md'; fullWidth?: boolean;
@@ -152,15 +143,18 @@ function ConnectModal({
   isDark: boolean; theme: Theme;
 }) {
   const [step, setStep] = useState(0);
-  const grad = isDark ? darkGradients : lightGradients;
 
-  useEffect(() => { if (open) setStep(0); }, [open]);
   if (!integration) return null;
 
   const isLast = step === CONNECT_STEPS.length - 1;
 
+  const handleClose = () => {
+    setStep(0);
+    onClose();
+  };
+
   return (
-    <Modal open={open} onClose={onClose}>
+    <Modal open={open} onClose={handleClose}>
       <Box sx={{
         position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
         width: { xs: '92vw', sm: 480 }, borderRadius: '20px', outline: 'none',
@@ -184,7 +178,7 @@ function ConnectModal({
             </Typography>
             <Typography sx={{ fontSize: '0.65rem', color: 'text.disabled', mt: 0.1 }}>{integration.description}</Typography>
           </Box>
-          <IconButton size="small" onClick={onClose} sx={{ color: 'text.disabled', p: 0.5 }}>
+          <IconButton size="small" onClick={handleClose} sx={{ color: 'text.disabled', p: 0.5 }}>
             <CloseRoundedIcon sx={{ fontSize: 16 }} />
           </IconButton>
         </Box>
@@ -234,7 +228,7 @@ function ConnectModal({
                 What {integration.name} does
               </Typography>
               <Typography sx={{ fontSize: '0.74rem', color: 'text.secondary', lineHeight: 1.7, mb: 1.5 }}>
-                {integration.description} This integration enables real-time data sync, automated lead ingestion, and workflow triggers directly inside MailFlowAI.
+                {integration.description} This integration enables real-time data sync, automated lead ingestion, and workflow triggers directly inside Proxipilot.
               </Typography>
               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.6 }}>
                 {['Automatic lead sync', 'Real-time event triggers', 'Bidirectional data flow'].map(f => (
@@ -288,7 +282,7 @@ function ConnectModal({
                 Authorize {integration.name}
               </Typography>
               <Typography sx={{ fontSize: '0.7rem', color: 'text.disabled', textAlign: 'center', mb: 2, lineHeight: 1.6 }}>
-                You'll be redirected to {integration.name} to authorize access. This uses secure OAuth 2.0.
+                You&apos;ll be redirected to {integration.name} to authorize access. This uses secure OAuth 2.0.
               </Typography>
               <Btn label={`Continue with ${integration.name}`} color={integration.color} icon={OpenInNewRoundedIcon} isDark={isDark} theme={theme} size="md" fullWidth />
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mt: 1.5 }}>
@@ -338,7 +332,7 @@ function ConnectModal({
           <Btn
             label={isLast ? '✓ Finish setup' : 'Continue →'}
             color={isLast ? '#34d399' : integration.color}
-            onClick={() => isLast ? onClose() : setStep(s => s + 1)}
+            onClick={() => isLast ? handleClose() : setStep(s => s + 1)}
             isDark={isDark} theme={theme} size="md"
           />
         </Box>
@@ -356,8 +350,12 @@ function EmailConnectModal({ open, onClose, isDark, theme }: {
   const [smtp, setSmtp] = useState({ name: '', email: '', host: '', port: '587', user: '', pass: '', encryption: 'TLS' });
 
   const inputSx = {
-    px: 1.25, py: 0.85, borderRadius: '9px', fontSize: '0.8rem',
-    color: 'text.primary', flex: 1,
+    px: 1.25,
+    py: 0.85,
+    borderRadius: '9px',
+    fontSize: '0.8rem',
+    color: 'text.primary',
+    flex: 1,
     background: isDark ? 'rgba(255,255,255,0.04)' : alpha(theme.palette.text.primary, 0.03),
     border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : theme.palette.divider}`,
     '& input::placeholder': { color: theme.palette.text.disabled, opacity: 1 },
@@ -455,7 +453,7 @@ function EmailConnectModal({ open, onClose, isDark, theme }: {
             </Box>
             <Box>
               <Typography sx={{ fontSize: '0.65rem', fontWeight: 600, color: 'text.secondary', mb: 0.5 }}>Password / App Password</Typography>
-              <Box sx={{ ...inputSx, display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Box sx={{ ...inputSx, display: 'flex', alignItems: 'center', gap: 0.5, px: 1.25, py: 0.85 }}>
                 <InputBase type={showPass ? 'text' : 'password'} value={smtp.pass} onChange={e => setSmtp(s => ({ ...s, pass: e.target.value }))} placeholder="••••••••••••"
                   sx={{ flex: 1, fontSize: '0.8rem', color: 'text.primary', '& input::placeholder': { color: theme.palette.text.disabled, opacity: 1 } }} />
                 <IconButton size="small" onClick={() => setShowPass(v => !v)} sx={{ p: 0.25, color: 'text.disabled' }}>
@@ -468,7 +466,7 @@ function EmailConnectModal({ open, onClose, isDark, theme }: {
               <Box sx={{ display: 'flex', gap: 0.75 }}>
                 {['TLS', 'SSL', 'None'].map(enc => (
                   <Box key={enc} component="button" onClick={() => setSmtp(s => ({ ...s, encryption: enc }))} sx={{
-                    px: 1.25, py: 0.5, borderRadius: '7px', border: 'none', cursor: 'pointer', fontSize: '0.7rem', fontWeight: 600,
+                    px: 1.25, py: 0.5, borderRadius: '7px', cursor: 'pointer', fontSize: '0.7rem', fontWeight: 600,
                     background: smtp.encryption === enc ? (isDark ? 'rgba(129,140,248,0.2)' : alpha(theme.palette.primary.main, 0.1)) : (isDark ? 'rgba(255,255,255,0.05)' : alpha(theme.palette.text.primary, 0.04)),
                     color: smtp.encryption === enc ? (isDark ? '#818cf8' : theme.palette.primary.main) : theme.palette.text.secondary,
                     border: `1px solid ${smtp.encryption === enc ? (isDark ? 'rgba(129,140,248,0.3)' : alpha(theme.palette.primary.main, 0.25)) : (isDark ? 'rgba(255,255,255,0.08)' : theme.palette.divider)}`,
@@ -505,86 +503,6 @@ function EmailConnectModal({ open, onClose, isDark, theme }: {
     </Modal>
   );
 }
-
-// ── Email Provider Section — synced with Email Accounts page ──────────────────
-function EmailProviderSection({ isDark, theme, onOpenConnect }: {
-  isDark: boolean; theme: Theme; onOpenConnect: () => void;
-}) {
-  const cat = CATEGORIES.find(c => c.id === 'email')!;
-  const color = cat.color;
-
-  // Use real account data from React Query — same source as EmailAccountsPage
-  const { data: accountsData } = useAccounts();
-  const allAccounts = accountsData?.all ?? [];
-
-  const gmailAccounts   = allAccounts.filter(a => a.provider === 'gmail');
-  const outlookAccounts = allAccounts.filter(a => a.provider === 'outlook');
-  const hasGmail   = gmailAccounts.some(a => a.connection_status === 'connected');
-  const hasOutlook = outlookAccounts.some(a => a.connection_status === 'connected');
-  const connectedCount  = (hasGmail ? 1 : 0) + (hasOutlook ? 1 : 0);
-
-  const providers = [
-    { id: 'gmail',   name: 'Gmail',       color: '#EA4335', bgColor: '#fef2f2', description: 'Send and receive emails via Google Workspace accounts.', connected: hasGmail,   accounts: gmailAccounts.map(a => ({ email: a.email_address, lastSync: a.last_synced_at ?? 'Never' })),   popular: true  },
-    { id: 'outlook', name: 'Outlook',     color: '#0078D4', bgColor: '#eff6ff', description: 'Connect Microsoft 365 and Outlook accounts for outreach.', connected: hasOutlook, accounts: outlookAccounts.map(a => ({ email: a.email_address, lastSync: a.last_synced_at ?? 'Never' })), popular: false },
-    { id: 'smtp',    name: 'Custom SMTP', color: '#64748b', bgColor: '#f8fafc', description: 'Connect any email provider via SMTP/IMAP credentials.',    connected: false,       accounts: [],              popular: false },
-  ];
-  return (
-    <Box sx={{ mb: 2 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, mb: 0.75, px: 0.25 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, flex: 1 }}>
-          <Box sx={{ width: 6, height: 6, borderRadius: '50%', background: color, boxShadow: `0 0 6px ${alpha(color, 0.6)}`, flexShrink: 0 }} />
-          <Typography sx={{ fontSize: '0.62rem', fontWeight: 800, letterSpacing: '0.09em', textTransform: 'uppercase', color, flexShrink: 0 }}>{cat.label}</Typography>
-          <Typography sx={{ fontSize: '0.6rem', color: 'text.disabled', display: { xs: 'none', sm: 'block' }, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>· {cat.description}</Typography>
-        </Box>
-        {connectedCount > 0 && (
-          <Box sx={{ px: 0.65, py: 0.15, borderRadius: '5px', flexShrink: 0, background: alpha('#34d399', isDark ? 0.15 : 0.1), border: `1px solid ${alpha('#34d399', 0.25)}` }}>
-            <Typography sx={{ fontSize: '0.58rem', fontWeight: 700, color: '#34d399', whiteSpace: 'nowrap' }}>{connectedCount} connected</Typography>
-          </Box>
-        )}
-      </Box>
-      <Box sx={{ borderRadius: '14px', overflow: 'hidden', border: `1px solid ${isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.07)'}`, background: isDark ? 'linear-gradient(145deg, rgba(30,41,59,0.6) 0%, rgba(15,23,42,0.4) 100%)' : 'linear-gradient(145deg, rgba(255,255,255,0.85) 0%, rgba(248,250,252,0.65) 100%)', backdropFilter: 'blur(12px)' }}>
-        {providers.map((p, i) => (
-          <Box key={p.id} sx={{
-            display: 'flex', alignItems: 'center', gap: { xs: 1, sm: 1.5 },
-            px: { xs: 1.25, sm: 1.5 }, py: 1,
-            borderBottom: i < providers.length - 1 ? `1px solid ${isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'}` : 'none',
-            transition: 'background 0.15s ease',
-            '&:hover': { background: isDark ? 'rgba(255,255,255,0.025)' : 'rgba(0,0,0,0.018)' },
-          }}>
-            <Box sx={{ width: 36, height: 36, borderRadius: '9px', flexShrink: 0, background: p.bgColor, border: `1.5px solid ${alpha(p.color, 0.2)}`, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: `0 2px 8px ${alpha(p.color, 0.15)}` }}>
-              <Typography sx={{ fontSize: '0.72rem', fontWeight: 900, color: p.color }}>{p.name.slice(0, 2).toUpperCase()}</Typography>
-            </Box>
-            <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'nowrap', overflow: 'hidden' }}>
-                <Typography sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.primary', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</Typography>
-                <Box sx={{ display: 'flex', gap: 0.4, flexShrink: 0 }}>
-                  {p.popular && <GlowChip label="Popular" color="#fbbf24" isDark={isDark} />}
-                  {p.connected && p.accounts.length > 0 && <GlowChip label={`${p.accounts.length} acct`} color="#34d399" isDark={isDark} />}
-                </Box>
-              </Box>
-              <Typography sx={{ fontSize: '0.65rem', color: 'text.disabled', mt: 0.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {p.connected && p.accounts.length > 0 ? p.accounts.map(a => a.email).join(', ') : p.description}
-              </Typography>
-            </Box>
-            {p.connected && p.accounts[0] && (
-              <Box sx={{ display: { xs: 'none', lg: 'flex' }, alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
-                <SyncRoundedIcon sx={{ fontSize: 11, color: 'text.disabled' }} />
-                <Typography sx={{ fontSize: '0.62rem', color: 'text.disabled' }}>{p.accounts[0].lastSync}</Typography>
-              </Box>
-            )}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
-              <StatusDot status={p.connected ? 'connected' : 'disconnected'} isDark={isDark} />
-              {p.connected
-                ? <Btn label="Manage" color={p.color} icon={TuneRoundedIcon} onClick={onOpenConnect} isDark={isDark} theme={theme} size="xs" />
-                : <Btn label="Connect" color={p.color} icon={AddRoundedIcon} onClick={onOpenConnect} isDark={isDark} theme={theme} size="xs" />}
-            </Box>
-          </Box>
-        ))}
-      </Box>
-    </Box>
-  );
-}
-
 
 // ── Manage panel (slide-in) ───────────────────────────────────────────────────
 function ManagePanel({
@@ -837,7 +755,6 @@ function CategorySection({
 export default function IntegrationsPage() {
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
-  const grad = isDark ? darkGradients : lightGradients;
 
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<CategoryId | 'all'>('all');
@@ -965,7 +882,7 @@ export default function IntegrationsPage() {
             <Box sx={{ display: 'flex', gap: 0.4, flexWrap: 'wrap' }}>
               {[{ id: 'all' as const, label: 'All', color: '#818cf8' }, ...CATEGORIES.map(c => ({ id: c.id, label: c.label, color: c.color }))].map(cat => (
                 <Box key={cat.id} component="button" onClick={() => setActiveCategory(cat.id)} sx={{
-                  px: 1, py: 0.45, borderRadius: '8px', border: 'none', cursor: 'pointer',
+                  px: 1, py: 0.45, borderRadius: '8px', cursor: 'pointer',
                   background: activeCategory === cat.id ? alpha(cat.color, isDark ? 0.2 : 0.12) : isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)',
                   color: activeCategory === cat.id ? cat.color : theme.palette.text.secondary,
                   fontSize: '0.68rem', fontWeight: activeCategory === cat.id ? 700 : 500,

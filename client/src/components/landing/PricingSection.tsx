@@ -2,8 +2,6 @@
 
 import { Box, Typography, Button, useTheme, alpha } from '@mui/material';
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
-import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
-import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import { motion } from 'framer-motion';
 import NextLink from 'next/link';
 import { FadeUp, StaggerContainer, fadeUp } from './motion';
@@ -11,61 +9,40 @@ import { lightGradients, darkGradients } from '@/theme/palette';
 
 const PLANS = [
   {
-    name: 'Free',
-    price: '$0',
-    period: 'forever',
-    tagline: 'Get started with AI email automation.',
-    cta: 'Start for free',
-    ctaVariant: 'outlined' as const,
+    name: 'Starter',
+    tagline: 'Perfect for individuals getting started.',
     highlight: false,
     features: [
-      { text: '500 emails / month',          included: true  },
-      { text: '1 connected mailbox',          included: true  },
-      { text: 'AI reply drafts',              included: true  },
-      { text: 'Smart filtering',              included: true  },
-      { text: 'Auto-reply mode',              included: false },
-      { text: 'Campaign inbox merge',         included: false },
-      { text: 'Analytics dashboard',          included: false },
-      { text: 'Priority support',             included: false },
+      'AI-powered email automation',
+      'Smart filtering & prioritization',
+      'Basic analytics dashboard',
+      'Email support',
     ],
   },
   {
-    name: 'Pro',
-    price: '$29',
-    period: 'per month',
+    name: 'Professional',
     tagline: 'For professionals who live in their inbox.',
-    cta: 'Start 14-day trial',
-    ctaVariant: 'contained' as const,
     highlight: true,
     badge: 'Most popular',
     features: [
-      { text: '25,000 emails / month',        included: true  },
-      { text: '5 connected mailboxes',        included: true  },
-      { text: 'AI reply drafts',              included: true  },
-      { text: 'Smart filtering',              included: true  },
-      { text: 'Auto-reply mode',              included: true  },
-      { text: 'Campaign inbox merge',         included: true  },
-      { text: 'Analytics dashboard',          included: true  },
-      { text: 'Priority support',             included: false },
+      'Everything in Starter',
+      'Advanced AI reply modes',
+      'Campaign inbox merge',
+      'Priority support',
+      'Custom integrations',
     ],
   },
   {
     name: 'Enterprise',
-    price: 'Custom',
-    period: 'contact us',
     tagline: 'Unlimited scale with dedicated infrastructure.',
-    cta: 'Book a demo',
-    ctaVariant: 'outlined' as const,
     highlight: false,
     features: [
-      { text: 'Unlimited emails',             included: true  },
-      { text: 'Unlimited mailboxes',          included: true  },
-      { text: 'AI reply drafts',              included: true  },
-      { text: 'Smart filtering',              included: true  },
-      { text: 'Auto-reply mode',              included: true  },
-      { text: 'Campaign inbox merge',         included: true  },
-      { text: 'Analytics dashboard',          included: true  },
-      { text: 'Priority support',             included: true  },
+      'Everything in Professional',
+      'Unlimited mailboxes',
+      'Dedicated infrastructure',
+      'SLA guarantees',
+      'Custom AI training',
+      'White-label options',
     ],
   },
 ];
@@ -118,8 +95,8 @@ export default function PricingSection() {
                     flex: 1,
                     display: 'flex',
                     flexDirection: 'column',
-                    p: { xs: 2.5, sm: 2.75 },
-                    borderRadius: '14px',
+                    p: { xs: 2.5, sm: 3 },
+                    borderRadius: '16px',
                     border: plan.highlight
                       ? `2px solid ${theme.palette.primary.main}`
                       : `1px solid ${theme.palette.divider}`,
@@ -139,123 +116,121 @@ export default function PricingSection() {
                     },
                   }}
                 >
-                  {/* Highlight glow */}
                   {plan.highlight && (
                     <Box
                       sx={{
                         position: 'absolute', top: 0, left: 0, right: 0, height: 2,
-                        background: grad.primary, borderRadius: '14px 14px 0 0',
+                        background: grad.primary, borderRadius: '16px 16px 0 0',
                       }}
                     />
                   )}
 
-                  {/* Badge */}
                   {plan.badge && (
                     <Box
                       sx={{
-                        position: 'absolute', top: 12, right: 12,
-                        px: 1, py: 0.25, borderRadius: '5px',
+                        position: 'absolute', top: 14, right: 14,
+                        px: 1.25, py: 0.4, borderRadius: '6px',
                         background: grad.primary,
                       }}
                     >
-                      <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: '#fff', letterSpacing: '0.04em' }}>
+                      <Typography sx={{ fontSize: '0.65rem', fontWeight: 700, color: '#fff', letterSpacing: '0.04em' }}>
                         {plan.badge}
                       </Typography>
                     </Box>
                   )}
 
-                  {/* Plan name */}
-                  <Typography sx={{ fontWeight: 600, fontSize: '0.7rem', color: 'text.secondary', textTransform: 'uppercase', letterSpacing: '0.08em', mb: 1.25 }}>
+                  <Typography sx={{ fontWeight: 700, fontSize: '1.25rem', color: 'text.primary', mb: 1 }}>
                     {plan.name}
                   </Typography>
 
-                  {/* Price */}
-                  <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 0.5, mb: 0.4 }}>
-                    <Typography
-                      sx={{
-                        fontSize: '1.75rem',
-                        fontWeight: 700,
-                        lineHeight: 1,
-                        background: plan.highlight ? grad.primary : 'none',
-                        WebkitBackgroundClip: plan.highlight ? 'text' : 'unset',
-                        WebkitTextFillColor: plan.highlight ? 'transparent' : 'unset',
-                        backgroundClip: plan.highlight ? 'text' : 'unset',
-                        color: plan.highlight ? 'unset' : 'text.primary',
-                      }}
-                    >
-                      {plan.price}
-                    </Typography>
-                    <Typography sx={{ color: 'text.disabled', fontSize: '0.75rem' }}>
-                      {plan.period}
-                    </Typography>
-                  </Box>
-
-                  <Typography sx={{ color: 'text.secondary', fontSize: '0.8rem', lineHeight: 1.5, mb: 2 }}>
+                  <Typography sx={{ color: 'text.secondary', fontSize: '0.85rem', lineHeight: 1.5, mb: 3 }}>
                     {plan.tagline}
                   </Typography>
 
-                  {/* CTA */}
+                  <Box
+                    sx={{
+                      mb: 3,
+                      p: 2,
+                      borderRadius: '10px',
+                      background: isDark
+                        ? alpha(theme.palette.primary.main, 0.08)
+                        : alpha(theme.palette.primary.main, 0.05),
+                      border: `1px dashed ${alpha(theme.palette.primary.main, isDark ? 0.3 : 0.2)}`,
+                      textAlign: 'center',
+                    }}
+                  >
+                    <Typography
+                      sx={{
+                        fontSize: '1.5rem',
+                        fontWeight: 800,
+                        mb: 0.5,
+                        background: grad.primary,
+                        WebkitBackgroundClip: 'text',
+                        WebkitTextFillColor: 'transparent',
+                        backgroundClip: 'text',
+                      }}
+                    >
+                      Coming Soon
+                    </Typography>
+                    <Typography sx={{ color: 'text.disabled', fontSize: '0.75rem' }}>
+                      Pricing to be announced after launch
+                    </Typography>
+                  </Box>
+
+                  <Box sx={{ height: '1px', background: theme.palette.divider, mb: 2.5 }} />
+
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25, flex: 1 }}>
+                    {plan.features.map((feature) => (
+                      <Box key={feature} sx={{ display: 'flex', alignItems: 'flex-start', gap: 1 }}>
+                        <Box
+                          sx={{
+                            width: 18, height: 18, borderRadius: '50%', flexShrink: 0, mt: 0.15,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            background: alpha(theme.palette.success.main, isDark ? 0.18 : 0.10),
+                          }}
+                        >
+                          <CheckRoundedIcon sx={{ fontSize: 11, color: 'success.main' }} />
+                        </Box>
+                        <Typography
+                          sx={{
+                            fontSize: '0.85rem',
+                            color: 'text.primary',
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          {feature}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Box>
+
                   <Button
                     component={NextLink}
-                    href="/sign-up"
-                    variant={plan.ctaVariant}
+                    href="/waitlist"
+                    variant={plan.highlight ? 'contained' : 'outlined'}
                     fullWidth
-                    startIcon={plan.highlight ? <BoltRoundedIcon sx={{ fontSize: '14px !important' }} /> : undefined}
                     sx={{
-                      mb: 2,
-                      minHeight: 36,
+                      mt: 3,
+                      minHeight: 42,
                       fontWeight: 600,
-                      fontSize: '0.8rem',
-                      py: 0.75,
-                      ...(plan.ctaVariant === 'contained' && {
+                      fontSize: '0.875rem',
+                      py: 1,
+                      ...(plan.highlight && {
                         background: grad.primary,
                         boxShadow: isDark
                           ? '0 8px 24px rgba(129,140,248,0.28)'
                           : '0 8px 24px rgba(67,56,202,0.20)',
                         '&:hover': { filter: 'brightness(1.08)', transform: 'translateY(-1px)' },
                       }),
-                      ...(plan.ctaVariant === 'outlined' && {
+                      ...(!plan.highlight && {
                         borderColor: alpha(theme.palette.primary.main, isDark ? 0.35 : 0.30),
                         '&:hover': { borderColor: 'primary.main' },
                       }),
                       transition: 'all 0.2s ease',
                     }}
                   >
-                    {plan.cta}
+                    Join Waitlist
                   </Button>
-
-                  {/* Divider */}
-                  <Box sx={{ height: '1px', background: theme.palette.divider, mb: 2 }} />
-
-                  {/* Feature list */}
-                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, flex: 1 }}>
-                    {plan.features.map((f) => (
-                      <Box key={f.text} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <Box
-                          sx={{
-                            width: 16, height: 16, borderRadius: '50%', flexShrink: 0,
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            background: f.included
-                              ? alpha(theme.palette.success.main, isDark ? 0.18 : 0.10)
-                              : alpha(theme.palette.text.disabled, isDark ? 0.12 : 0.08),
-                          }}
-                        >
-                          {f.included
-                            ? <CheckRoundedIcon sx={{ fontSize: 10, color: 'success.main' }} />
-                            : <CloseRoundedIcon sx={{ fontSize: 10, color: 'text.disabled' }} />
-                          }
-                        </Box>
-                        <Typography
-                          sx={{
-                            fontSize: '0.8rem',
-                            color: f.included ? 'text.primary' : 'text.disabled',
-                          }}
-                        >
-                          {f.text}
-                        </Typography>
-                      </Box>
-                    ))}
-                  </Box>
                 </Box>
               </motion.div>
             ))}

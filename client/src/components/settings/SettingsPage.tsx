@@ -1386,7 +1386,7 @@ function AboutSection({ isDark, theme }: { isDark: boolean; theme: Theme }) {
         </Box>
         <Box sx={{ flex: 1 }}>
           <Typography sx={{ fontSize: '0.95rem', fontWeight: 800, letterSpacing: '-0.02em', color: 'text.primary' }}>
-            MailFlow<Box component="span" sx={{ color: 'primary.main' }}>AI</Box>
+            Proxipilot
           </Typography>
           <Typography sx={{ fontSize: '0.63rem', color: 'text.disabled' }}>Version 2.4.1 · Build 20260325 · GPT-4o</Typography>
         </Box>

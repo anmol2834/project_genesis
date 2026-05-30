@@ -165,7 +165,7 @@ export default function SignInForm() {
             Welcome back
           </Typography>
           <Typography sx={{ fontSize: '0.82rem', color: 'text.secondary', lineHeight: 1.5 }}>
-            Sign in to your MailFlowAI account
+            Sign in to your Proxipilot account
           </Typography>
         </Box>
 

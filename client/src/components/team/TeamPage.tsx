@@ -498,7 +498,7 @@ function EditMemberPanel({ member, isDark, theme, onClose }: {
               return (
                 <Box key={r} component="button" onClick={() => handleRoleChange(r)} sx={{
                   display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 0.5,
-                  p: 1.25, borderRadius: '10px', cursor: 'pointer', textAlign: 'left', border: 'none',
+                  p: 1.25, borderRadius: '10px', cursor: 'pointer', textAlign: 'left',
                   background: active ? isDark ? alpha(cfg.color, 0.14) : alpha(cfg.color, 0.09) : isDark ? 'rgba(255,255,255,0.03)' : alpha(theme.palette.text.primary, 0.02),
                   border: `1.5px solid ${active ? alpha(cfg.color, 0.4) : isDark ? 'rgba(255,255,255,0.07)' : theme.palette.divider}`,
                   transition: 'all 0.15s ease',
@@ -659,7 +659,7 @@ function InviteModal({ open, onClose, isDark, theme }: {
                 return (
                   <Box key={r} component="button" onClick={() => handleRoleChange(r)} sx={{
                     display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.4,
-                    p: 1, borderRadius: '10px', cursor: 'pointer', border: 'none',
+                    p: 1, borderRadius: '10px', cursor: 'pointer',
                     background: active ? isDark ? alpha(cfg.color, 0.14) : alpha(cfg.color, 0.09) : isDark ? 'rgba(255,255,255,0.03)' : alpha(theme.palette.text.primary, 0.02),
                     border: `1.5px solid ${active ? alpha(cfg.color, 0.4) : isDark ? 'rgba(255,255,255,0.07)' : theme.palette.divider}`,
                     transition: 'all 0.15s ease',

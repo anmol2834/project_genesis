@@ -91,7 +91,7 @@ function AIPanel() {
   const isDark = theme.palette.mode === 'dark';
   const gradients = isDark ? darkGradients : lightGradients;
   const [messages, setMessages] = useState<ChatMsg[]>([
-    { role: 'ai', text: 'Hi! I\'m your MailFlowAI assistant. Ask me anything about campaigns, email sync, or lead imports.' },
+    { role: 'ai', text: 'Hi! I\'m your Proxipilot assistant. Ask me anything about campaigns, email sync, or lead imports.' },
   ]);
   const [input, setInput] = useState('');
   const [typing, setTyping] = useState(false);
@@ -465,7 +465,7 @@ export default function HelpPage() {
                 All systems monitored 24/7. Subscribe to status updates at{' '}
                 <Box component="span" sx={{ color: isDark ? '#a5b4fc' : '#4338ca', cursor: 'pointer',
                   '&:hover': { textDecoration: 'underline' } }}>
-                  status.mailflowai.com
+                  status.Proxipilot.com
                 </Box>
               </Typography>
             </Box>

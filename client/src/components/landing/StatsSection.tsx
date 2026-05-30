@@ -9,8 +9,7 @@ import { lightGradients, darkGradients } from '@/theme/palette';
 const STATS = [
   { value: 87,  suffix: '%',  label: 'Faster processing',    desc: 'vs. legacy polling systems'       },
   { value: 25,  suffix: 'ms', label: 'End-to-end pipeline',  desc: 'Email arrival to reply ready'     },
-  { value: 10,  suffix: 'K+', label: 'Concurrent users',     desc: 'Without degradation'              },
-  { value: 80,  suffix: '%',  label: 'API cost reduction',   desc: 'Smart caching & batching'         },
+  { value: 5,   suffix: 'K+', label: 'Concurrent users',     desc: 'Without degradation'              },
 ];
 
 function AnimatedCounter({ target, suffix, duration = 1600 }: { target: number; suffix: string; duration?: number }) {
@@ -70,7 +69,7 @@ export default function StatsSection() {
           </Box>
         </FadeUp>
 
-        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, 1fr)' }, gap: { xs: 1.5, sm: 2, md: 3 } }}>
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(3, 1fr)' }, gap: { xs: 1.5, sm: 2, md: 3 }, maxWidth: 900, mx: 'auto' }}>
           {STATS.map((stat, i) => (
             <FadeUp key={stat.label} delay={i * 0.07}>
               <Box

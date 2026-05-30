@@ -291,7 +291,6 @@ export default function LottieLoader({
             }}
             rendererSettings={{
               preserveAspectRatio: 'xMidYMid meet',
-              clearCanvas: true,
               progressiveLoad: false,
               hideOnTransparent: true,
             }}

@@ -521,7 +521,7 @@ function FilterPanel({ filters, onChange, isDark, theme, onClose }: {
   isDark: boolean; theme: Theme; onClose: () => void;
 }) {
   const chipSx = (active: boolean) => ({
-    px: 1, py: 0.4, borderRadius: '7px', border: 'none', cursor: 'pointer',
+    px: 1, py: 0.4, borderRadius: '7px', cursor: 'pointer',
     fontSize: '0.68rem', fontWeight: active ? 700 : 500,
     background: active
       ? isDark ? 'rgba(129,140,248,0.2)' : alpha(theme.palette.primary.main, 0.1)
@@ -793,7 +793,7 @@ export default function ResearchPage() {
           {/* Filter toggle */}
           <Box component="button" onClick={() => setShowFilters(v => !v)} sx={{
             display: 'flex', alignItems: 'center', gap: 0.6,
-            px: 1.1, py: 0.5, borderRadius: '8px', border: 'none', cursor: 'pointer',
+            px: 1.1, py: 0.5, borderRadius: '8px', cursor: 'pointer',
             fontSize: '0.7rem', fontWeight: 600,
             background: showFilters || activeFilterCount > 0
               ? isDark ? 'rgba(129,140,248,0.2)' : alpha(theme.palette.primary.main, 0.1)
@@ -870,7 +870,7 @@ export default function ResearchPage() {
               ].map(({ label, icon: Icon, color }) => (
                 <Box key={label} component="button" sx={{
                   display: 'flex', alignItems: 'center', gap: 0.5,
-                  px: 1.25, py: 0.5, borderRadius: '8px', border: 'none', cursor: 'pointer',
+                  px: 1.25, py: 0.5, borderRadius: '8px', cursor: 'pointer',
                   fontSize: '0.7rem', fontWeight: 700, color,
                   background: alpha(color as string, isDark ? 0.12 : 0.08),
                   border: `1px solid ${alpha(color as string, 0.25)}`,

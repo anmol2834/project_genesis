@@ -2,6 +2,7 @@ import dynamic from 'next/dynamic';
 import Navbar from '@/components/landing/Navbar';
 import HeroSection from '@/components/landing/HeroSection';
 import Footer from '@/components/landing/Footer';
+import FloatingWaitlistButton from '@/components/landing/FloatingWaitlistButton';
 
 const HowItWorksSection = dynamic(() => import('@/components/landing/HowItWorksSection'));
 const AISection         = dynamic(() => import('@/components/landing/AISection'));
@@ -26,6 +27,7 @@ export default function LandingPage() {
         <CTASection />
       </main>
       <Footer />
+      <FloatingWaitlistButton />
     </>
   );
 }

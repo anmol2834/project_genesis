@@ -18,7 +18,12 @@ import type { ApiError } from '@/services/apiClient';
 export function useUpdateSettings() {
   const queryClient = useQueryClient();
 
-  return useMutation<UserSettings, ApiError, UpdateUserSettingsRequest>({
+  return useMutation<
+    UserSettings,
+    ApiError,
+    UpdateUserSettingsRequest,
+    { previousSettings: UserSettings | undefined }
+  >({
     mutationFn: settingsApi.updateSettings,
     
     // Optimistic update: Update UI immediately

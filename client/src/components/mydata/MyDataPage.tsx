@@ -83,9 +83,10 @@ function CountUp({ target, suffix = '' }: { target: number; suffix?: string }) {
 
 // ── Source status pill ────────────────────────────────────────────────────────
 function SourcePill({ status }: { status: DataSource['status'] }) {
-  const cfg = SOURCE_STATUS_CONFIG[status];
-  const Icon = status === 'connected' ? CheckCircleRoundedIcon
-    : status === 'syncing' ? SyncRoundedIcon
+  const mappedStatus = status === 'active' ? 'connected' : status === 'syncing' ? 'syncing' : 'paused';
+  const cfg = SOURCE_STATUS_CONFIG[mappedStatus];
+  const Icon = mappedStatus === 'connected' ? CheckCircleRoundedIcon
+    : mappedStatus === 'syncing' ? SyncRoundedIcon
     : PauseCircleRoundedIcon;
   return (
     <Box sx={{
@@ -95,7 +96,7 @@ function SourcePill({ status }: { status: DataSource['status'] }) {
     }}>
       <Icon sx={{
         fontSize: 8, color: cfg.color,
-        animation: status === 'syncing' ? 'spin 1.5s linear infinite' : 'none',
+        animation: mappedStatus === 'syncing' ? 'spin 1.5s linear infinite' : 'none',
         '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
       }} />
       <Typography sx={{ fontSize: '0.52rem', fontWeight: 700, color: cfg.color, letterSpacing: '0.04em' }}>
@@ -712,7 +713,7 @@ function SourcesView({ isDark, theme }: { isDark: boolean; theme: Theme }) {
                 </Box>
                 <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: aiColor, minWidth: 26 }}>{aiPct}%</Typography>
               </Box>
-              <SourcePill status={src.status === 'active' ? 'connected' : src.status === 'syncing' ? 'syncing' : 'paused'} />
+              <SourcePill status={src.status} />
               {/* Action buttons */}
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.4 }}>
                 <Tooltip title="Sync now" placement="top">

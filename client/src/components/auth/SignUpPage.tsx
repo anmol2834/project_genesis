@@ -96,7 +96,7 @@ export default function SignUpPage() {
               <BoltRoundedIcon sx={{ color: '#fff', fontSize: 14 }} />
             </Box>
             <Typography sx={{ fontWeight: 700, fontSize: '0.9rem', letterSpacing: '-0.02em', color: 'text.primary' }}>
-              MailFlow<Box component="span" sx={{ color: 'primary.main' }}>AI</Box>
+              Proxipilot
             </Typography>
           </Box>
 

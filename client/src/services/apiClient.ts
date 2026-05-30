@@ -4,7 +4,7 @@ import axios, { AxiosError, type AxiosInstance, type AxiosRequestConfig } from '
  * Centralized Axios instance.
  * All query/mutation hooks MUST use this — never raw fetch/axios in components.
  *
- * Auth: reads JWT from localStorage (key: 'mailflow_token').
+ * Auth: reads JWT from localStorage (key: 'Proxipilot_token').
  * Error: normalises server errors into a consistent ApiError shape.
  */
 
@@ -25,7 +25,7 @@ export const apiClient: AxiosInstance = axios.create({
 // ── Request interceptor: attach JWT ──────────────────────────────────────────
 apiClient.interceptors.request.use((config) => {
   if (typeof window !== 'undefined') {
-    // Try to get token from auth_tokens (new format) or mailflow_token (legacy)
+    // Try to get token from auth_tokens (new format) or Proxipilot_token (legacy)
     let token = null;
     
     // First try auth_tokens (AuthContext format)
@@ -39,9 +39,9 @@ apiClient.interceptors.request.use((config) => {
       }
     }
     
-    // Fallback to mailflow_token (legacy format)
+    // Fallback to Proxipilot_token (legacy format)
     if (!token) {
-      token = localStorage.getItem('mailflow_token');
+      token = localStorage.getItem('Proxipilot_token');
     }
     
     if (token) {
@@ -64,7 +64,7 @@ apiClient.interceptors.response.use(
 
     // 401 → clear token and redirect to sign-in
     if (status === 401 && typeof window !== 'undefined') {
-      localStorage.removeItem('mailflow_token');
+      localStorage.removeItem('Proxipilot_token');
       localStorage.removeItem('auth_tokens');
       localStorage.removeItem('auth_user');
       localStorage.removeItem('auth_token_expiry');

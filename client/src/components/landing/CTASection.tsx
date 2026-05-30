@@ -126,6 +126,8 @@ export default function CTASection() {
                 Start free — no credit card
               </Button>
               <Button
+                component={NextLink}
+                href="/waitlist"
                 variant="outlined"
                 size="large"
                 sx={{
@@ -138,7 +140,7 @@ export default function CTASection() {
                   '&:hover': { borderColor: 'primary.main' },
                 }}
               >
-                Book a demo
+                Join Waitlist
               </Button>
             </Box>
 

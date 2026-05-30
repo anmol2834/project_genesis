@@ -134,7 +134,7 @@ export default function AuthVisual() {
             <BoltRoundedIcon sx={{ color: '#fff', fontSize: 17 }} />
           </Box>
           <Typography sx={{ fontWeight: 700, fontSize: '1.05rem', letterSpacing: '-0.02em', color: 'text.primary' }}>
-            MailFlow<Box component="span" sx={{ color: 'primary.main' }}>AI</Box>
+            Proxipilot<Box component="span" sx={{ color: 'primary.main' }}></Box>
           </Typography>
         </Box>
         <Typography sx={{ fontSize: '0.78rem', color: 'text.secondary', maxWidth: 240, mx: 'auto', lineHeight: 1.5 }}>
@@ -228,7 +228,7 @@ export default function AuthVisual() {
                         <Typography sx={{ fontSize: '0.6rem', fontWeight: 700, color: '#10b981', textTransform: 'uppercase', letterSpacing: '0.06em' }}>AI Draft Ready</Typography>
                       </Box>
                       <Typography sx={{ fontSize: '0.68rem', color: 'text.secondary', lineHeight: 1.5 }}>
-                        "Thank you for reaching out. I'd be happy to discuss this further..."
+                        &quot;Thank you for reaching out. I&apos;d be happy to discuss this further...&quot;
                       </Typography>
                     </Box>
                   </motion.div>

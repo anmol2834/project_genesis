@@ -212,6 +212,7 @@ function HBarChart({ data, isDark, height = 140 }: {
 // ── Donut chart (SVG) ─────────────────────────────────────────────────────────
 function DonutChart({ data, size = 100 }: {
   data: { label: string; value: number; color: string }[];
+  size?: number;
 }) {
   const total = data.reduce((s, d) => s + d.value, 0);
   const r = size / 2 - 8;
@@ -374,7 +375,7 @@ function InsightsStrip({ isDark, theme }: { isDark: boolean; theme: Theme }) {
           return (
             <Box key={ins.id} component="button" onClick={() => setIdx(i)} sx={{
               display: 'flex', alignItems: 'center', gap: 0.5,
-              px: 0.9, py: 0.4, borderRadius: '7px', border: 'none', cursor: 'pointer',
+              px: 0.9, py: 0.4, borderRadius: '7px', cursor: 'pointer',
               background: active ? cfg.bg : 'transparent',
               border: `1px solid ${active ? alpha(cfg.color, 0.3) : 'transparent'}`,
               transition: 'all 0.15s ease', flexShrink: 0,

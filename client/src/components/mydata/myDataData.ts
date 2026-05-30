@@ -68,7 +68,7 @@ export const CATEGORY_CONFIG: Record<DataCategory, CategoryMeta> = {
     description: 'Descriptions, features, specs, variants, availability',
     guide: 'Add your products or services so the AI can describe them accurately in outreach. Include features, variants, and availability to maximize personalization.',
     exampleColumns: ['Product Name', 'Description', 'Features', 'Variants', 'Availability', 'Demo URL', 'Category'],
-    exampleEntry: 'Product Name: MailFlowAI Pro | Features: AI personalization, multi-inbox | Availability: In stock',
+    exampleEntry: 'Product Name: Proxipilot Pro | Features: AI personalization, multi-inbox | Availability: In stock',
   },
   pricing_payment: {
     label: 'Pricing & Payment',
@@ -118,7 +118,7 @@ export const CATEGORY_CONFIG: Record<DataCategory, CategoryMeta> = {
     description: 'About us, brand story, mission, certifications, media mentions',
     guide: 'Company context builds trust in cold outreach. Add your story, mission, and credibility signals so the AI can establish authority naturally.',
     exampleColumns: ['Company Name', 'Founded', 'Mission', 'Team Size', 'Headquarters', 'Certifications', 'Media Mentions', 'LinkedIn'],
-    exampleEntry: 'Company: MailFlowAI | Founded: 2023 | Mission: AI outreach for every sales team | 2,400+ customers',
+    exampleEntry: 'Company: Proxipilot | Founded: 2023 | Mission: AI outreach for every sales team | 2,400+ customers',
   },
   policies_legal: {
     label: 'Policies & Legal',
@@ -183,16 +183,16 @@ export const DATA_SOURCES: DataSource[] = [
 
 export const DATA_ENTRIES: DataEntry[] = [
   {
-    id: 'e1', title: 'MailFlowAI — Core Platform', category: 'product_service',
+    id: 'e1', title: 'Proxipilot — Core Platform', category: 'product_service',
     sourceId: 's1', sourceName: 'Manual Entry', sourceType: 'manual',
     qualityScore: 95, missingFields: [], usedIn: ['Q4 Enterprise Outreach', 'SaaS Decision Makers'],
     updatedAt: '2h ago', accentColor: '#818cf8',
     fields: [
-      { key: 'product_name',    label: 'Product Name',    value: 'MailFlowAI',                                    type: 'text',  aiRelevance: 'critical' },
+      { key: 'product_name',    label: 'Product Name',    value: 'Proxipilot',                                    type: 'text',  aiRelevance: 'critical' },
       { key: 'tagline',         label: 'Tagline',         value: 'AI-powered cold email automation at scale',     type: 'text',  aiRelevance: 'critical' },
       { key: 'key_features',    label: 'Key Features',    value: 'AI personalization, multi-inbox, smart replies, analytics', type: 'list', aiRelevance: 'critical' },
       { key: 'target_audience', label: 'Target Audience', value: 'Sales teams, SDRs, growth hackers, agencies',   type: 'text',  aiRelevance: 'high' },
-      { key: 'website',         label: 'Website',         value: 'https://mailflowai.com',                        type: 'url',   aiRelevance: 'medium' },
+      { key: 'website',         label: 'Website',         value: 'https://Proxipilot.com',                        type: 'url',   aiRelevance: 'medium' },
     ],
   },
   {
@@ -227,7 +227,7 @@ export const DATA_ENTRIES: DataEntry[] = [
     updatedAt: '1w ago', accentColor: '#f472b6',
     fields: [
       { key: 'phone',    label: 'Phone',         value: '+1-800-555-0100',              type: 'phone', aiRelevance: 'critical' },
-      { key: 'email',    label: 'Support Email', value: 'support@mailflowai.com',       type: 'email', aiRelevance: 'critical' },
+      { key: 'email',    label: 'Support Email', value: 'support@Proxipilot.com',       type: 'email', aiRelevance: 'critical' },
       { key: 'weekdays', label: 'Mon – Fri',     value: '9:00 AM – 6:00 PM (EST)',      type: 'time',  aiRelevance: 'high' },
       { key: 'timezone', label: 'Timezone',      value: 'Eastern Standard Time (UTC-5)', type: 'text', aiRelevance: 'high' },
     ],
@@ -238,10 +238,10 @@ export const DATA_ENTRIES: DataEntry[] = [
     qualityScore: 93, missingFields: ['funding_stage'], usedIn: ['Q4 Enterprise Outreach', 'SaaS Decision Makers', 'Cold Outbound'],
     updatedAt: '3d ago', accentColor: '#fb923c',
     fields: [
-      { key: 'company_name', label: 'Company Name', value: 'MailFlowAI Inc.',                                          type: 'text', aiRelevance: 'critical' },
+      { key: 'company_name', label: 'Company Name', value: 'Proxipilot Inc.',                                          type: 'text', aiRelevance: 'critical' },
       { key: 'mission',      label: 'Mission',      value: 'Make AI-powered outreach accessible to every sales team',  type: 'text', aiRelevance: 'high' },
       { key: 'customers',    label: 'Customers',    value: '2,400+ businesses across 40 countries',                    type: 'text', aiRelevance: 'high' },
-      { key: 'linkedin',     label: 'LinkedIn',     value: 'https://linkedin.com/company/mailflowai',                  type: 'url',  aiRelevance: 'medium' },
+      { key: 'linkedin',     label: 'LinkedIn',     value: 'https://linkedin.com/company/Proxipilot',                  type: 'url',  aiRelevance: 'medium' },
     ],
   },
 ];

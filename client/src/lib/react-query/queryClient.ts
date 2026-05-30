@@ -3,7 +3,7 @@ import { QueryClient } from '@tanstack/react-query';
 /**
  * Global QueryClient — single instance for the entire app.
  *
- * Tuning rationale (MailFlowAI):
+ * Tuning rationale (Proxipilot):
  *  - staleTime 5 min: most dashboard data (leads, campaigns, analytics) doesn't
  *    change second-by-second. Avoids redundant background fetches on tab focus.
  *  - gcTime 30 min: keeps cached data in memory so navigating back to a page

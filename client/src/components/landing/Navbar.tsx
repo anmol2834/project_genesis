@@ -7,7 +7,6 @@ import {
 } from '@mui/material';
 import LightModeRoundedIcon from '@mui/icons-material/LightModeRounded';
 import DarkModeRoundedIcon from '@mui/icons-material/DarkModeRounded';
-import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import MenuRoundedIcon from '@mui/icons-material/MenuRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import ArrowForwardRoundedIcon from '@mui/icons-material/ArrowForwardRounded';
@@ -78,6 +77,7 @@ export default function Navbar() {
           borderBottom: scrolled ? `1px solid ${theme.palette.divider}` : '1px solid transparent',
           transition: 'all 0.3s ease',
           boxShadow: 'none',
+          overflow: 'hidden',
         }}
       >
         <Toolbar
@@ -88,6 +88,7 @@ export default function Navbar() {
             px: { xs: 2, sm: 3, md: 4 },
             minHeight: { xs: 56, sm: 64 },
             justifyContent: 'space-between',
+            overflow: 'hidden',
           }}
         >
           {/* Logo */}
@@ -95,22 +96,30 @@ export default function Navbar() {
             <Box
               component="button"
               onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-              sx={{ display: 'flex', alignItems: 'center', gap: 0.75, background: 'none', border: 'none', cursor: 'pointer', p: 0 }}
+              sx={{ display: 'flex', alignItems: 'center', gap: 0, background: 'none', border: 'none', cursor: 'pointer', p: 0 }}
             >
               <Box
+                component="img"
+                src="/Proxipilot logo.svg"
+                alt="Proxipilot Logo"
                 sx={{
-                  width: { xs: 28, sm: 32 }, height: { xs: 28, sm: 32 },
-                  borderRadius: '8px', background: grad.primary,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                  width: { xs: 72, sm: 84, md: 96 }, 
+                  height: { xs: 72, sm: 84, md: 96 },
+                  flexShrink: 0,
+                  my: { xs: -1.5, sm: -2, md: -2.5 },
                 }}
-              >
-                <BoltRoundedIcon sx={{ color: '#fff', fontSize: { xs: 15, sm: 18 } }} />
-              </Box>
+              />
               <Box
                 component="span"
-                sx={{ fontWeight: 700, fontSize: { xs: '0.95rem', sm: '1.05rem' }, letterSpacing: '-0.02em', color: 'text.primary' }}
+                sx={{ 
+                  fontWeight: 700, 
+                  fontSize: { xs: '0.95rem', sm: '1.05rem' }, 
+                  letterSpacing: '-0.02em', 
+                  color: 'text.primary',
+                  ml: { xs: -3, sm: -3.5, md: -4 },
+                }}
               >
-                MailFlow<Box component="span" sx={{ color: 'primary.main' }}>AI</Box>
+                Proxipilot
               </Box>
             </Box>
           </motion.div>
@@ -225,12 +234,10 @@ export default function Navbar() {
       >
         {/* Drawer header */}
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 2.5, py: 1.5 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
-            <Box sx={{ width: 28, height: 28, borderRadius: '8px', background: grad.primary, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <BoltRoundedIcon sx={{ color: '#fff', fontSize: 15 }} />
-            </Box>
-            <Box component="span" sx={{ fontWeight: 700, fontSize: '0.95rem', letterSpacing: '-0.02em', color: 'text.primary' }}>
-              MailFlow<Box component="span" sx={{ color: 'primary.main' }}>AI</Box>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+            <Box component="img" src="/Proxipilot logo.svg" alt="Proxipilot Logo" sx={{ width: 64, height: 64, flexShrink: 0 }} />
+            <Box component="span" sx={{ fontWeight: 700, fontSize: '0.95rem', letterSpacing: '-0.02em', color: 'text.primary', ml: -2.5 }}>
+              Proxipilot
             </Box>
           </Box>
           <IconButton onClick={() => setDrawerOpen(false)} size="small" sx={{ color: 'text.secondary', width: 40, height: 40 }}>

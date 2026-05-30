@@ -19,7 +19,12 @@ export function useUpdateProfile() {
   const queryClient = useQueryClient();
   const { updateUser } = useAuth();
 
-  return useMutation<UpdateProfileResponse, ApiError, UpdateProfileRequest>({
+  return useMutation<
+    UpdateProfileResponse,
+    ApiError,
+    UpdateProfileRequest,
+    { previousProfile: UserProfile | undefined }
+  >({
     mutationFn: profileApi.updateProfile,
     
     // Optimistic update: Update UI immediately

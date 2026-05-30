@@ -5,8 +5,11 @@ import { AuthProvider } from '@/contexts/AuthContext';
 import '@/styles/globals.css';
 
 export const metadata: Metadata = {
-  title: 'Project Genesis',
+  title: 'Proxipilot',
   description: 'Next-generation mail automation platform',
+  icons: {
+    icon: '/Proxipilot-logo.ico',
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

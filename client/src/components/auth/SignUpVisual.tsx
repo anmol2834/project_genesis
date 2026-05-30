@@ -137,26 +137,33 @@ export default function SignUpVisual({ currentStep }: Props) {
   useEffect(() => {
     cancelRef.current = false;
 
-    // 1. Dim everything smoothly before resetting index
-    setTransitioning(true);
-
+    // Schedule state updates asynchronously to avoid cascading renders
     const init = setTimeout(() => {
-      setFeatureIdx(0);
-      setTransitioning(false);
+      // 1. Dim everything smoothly before resetting index
+      setTransitioning(true);
 
-      // 2. Start cycling after the fade-in settles
-      const cycle = async () => {
-        await sleep(2500); // first dwell
-        let i = 1;
-        while (!cancelRef.current) {
-          if (cancelRef.current) return;
-          setFeatureIdx(i % config.features.length);
-          await sleep(2500);
-          i++;
-        }
+      const reset = setTimeout(() => {
+        setFeatureIdx(0);
+        setTransitioning(false);
+
+        // 2. Start cycling after the fade-in settles
+        const cycle = async () => {
+          await sleep(2500); // first dwell
+          let i = 1;
+          while (!cancelRef.current) {
+            if (cancelRef.current) return;
+            setFeatureIdx(i % config.features.length);
+            await sleep(2500);
+            i++;
+          }
+        };
+        cycle();
+      }, 400); // matches the CSS opacity transition duration
+
+      return () => {
+        clearTimeout(reset);
       };
-      cycle();
-    }, 400); // matches the CSS opacity transition duration
+    }, 0);
 
     return () => {
       cancelRef.current = true;
@@ -234,7 +241,7 @@ export default function SignUpVisual({ currentStep }: Props) {
               <BoltRoundedIcon sx={{ color: '#fff', fontSize: 17 }} />
             </Box>
             <Typography sx={{ fontWeight: 700, fontSize: '1.05rem', letterSpacing: '-0.02em', color: 'text.primary' }}>
-              MailFlow<Box component="span" sx={{ color: 'primary.main' }}>AI</Box>
+              ProxiPilot
             </Typography>
           </Box>
           <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', maxWidth: 220, mx: 'auto', lineHeight: 1.5 }}>

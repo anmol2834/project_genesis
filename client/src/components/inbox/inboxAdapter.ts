@@ -188,7 +188,7 @@ export function threadToConversation(thread: InboxThread): Conversation {
     role:          toRole(m.direction),
     text:          cleanContent(m.content),
     time:          formatTime(m.timestamp),
-    status:        m.direction === 'outgoing' ? 'read' : undefined,
+    status:        m.direction === 'outgoing' ? ('read' as const) : undefined,
     // Pass through draft fields for the ChatView draft banner
     draft_message: m.draft_message ?? undefined,
     message_id:    m.message_id,

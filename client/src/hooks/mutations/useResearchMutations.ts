@@ -1,14 +1,13 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { researchEndpoints } from '@/services/endpoints/research';
-import { queryKeys } from '@/lib/react-query/queryKeys';
+import { researchApi } from '@/services/endpoints/research';
 
 export const useSaveResearch = () => {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: researchEndpoints.save,
+    mutationFn: (query: string) => researchApi.run(query),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.research.all });
+      // Invalidate research list if we add query keys for it later
     },
   });
 };
@@ -17,9 +16,9 @@ export const useDeleteResearch = () => {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: researchEndpoints.delete,
+    mutationFn: researchApi.delete,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.research.all });
+      // Invalidate research list if we add query keys for it later
     },
   });
 };

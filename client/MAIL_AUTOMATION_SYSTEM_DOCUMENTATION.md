@@ -1,4 +1,4 @@
-# MailFlowAI — Complete Client-Side Architecture Documentation
+# Proxipilot — Complete Client-Side Architecture Documentation
 
 > Last updated: March 2026 — reflects full current frontend implementation including React Query data layer
 
@@ -6,9 +6,9 @@
 
 ## 1. Executive Summary
 
-**MailFlowAI** is an enterprise-grade AI-powered mail automation SaaS. The frontend is a Next.js 14 App Router application with Material UI v5, TypeScript, TanStack Query v5, Axios, and a fully custom design system. It provides a complete dashboard for email outreach, lead pipelines, AI automation, analytics, team collaboration, integrations, billing, and support — all backed by a real API data layer.
+**Proxipilot** is an enterprise-grade AI-powered mail automation SaaS. The frontend is a Next.js 14 App Router application with Material UI v5, TypeScript, TanStack Query v5, Axios, and a fully custom design system. It provides a complete dashboard for email outreach, lead pipelines, AI automation, analytics, team collaboration, integrations, billing, and support — all backed by a real API data layer.
 
-**Product name**: MailFlowAI  
+**Product name**: Proxipilot  
 **Backend gateway**: `http://localhost:8000` (configurable via `NEXT_PUBLIC_API_URL`)
 
 ---
@@ -139,12 +139,12 @@ Centralized Axios instance. **All hooks must use this — never raw fetch/axios 
 
 **Request interceptor — JWT attachment**:
 1. Tries `auth_tokens` key in localStorage (new `AuthContext` format) → extracts `access_token`
-2. Falls back to `mailflow_token` key (legacy format)
+2. Falls back to `ProxiPilot_token` key (legacy format)
 3. Attaches as `Authorization: Bearer <token>`
 
 **Response interceptor — error normalization**:
 - Normalizes all errors to `{ message, status, code }` shape
-- On 401: clears all auth keys (`auth_tokens`, `auth_user`, `auth_token_expiry`, `mailflow_token`) and redirects to `/sign-in`
+- On 401: clears all auth keys (`auth_tokens`, `auth_user`, `auth_token_expiry`, `ProxiPilot_token`) and redirects to `/sign-in`
 
 **Typed helpers**: `get<T>()`, `post<T,B>()`, `put<T,B>()`, `patch<T,B>()`, `del<T>()`
 
@@ -439,7 +439,7 @@ apiClient interceptor  →  JWT attachment on every request
 | `auth_tokens` | `{ access_token, refresh_token, expires_in, token_type }` |
 | `auth_user` | Serialized `User` object |
 | `auth_token_expiry` | Unix timestamp (ms) of access token expiry |
-| `mailflow_token` | Legacy fallback (still supported by apiClient) |
+| `ProxiPilot_token` | Legacy fallback (still supported by apiClient) |
 
 ### 9.3 AuthContext Features
 
@@ -619,7 +619,7 @@ Required columns: `email`, `first_name`, `last_name` (company excluded for B2B/B
 | Optimistic updates on all write operations | Rollback on error |
 | Cache invalidation is surgical | Only invalidate affected queries |
 | Auth state = localStorage only | No API calls in `AuthContext` |
-| JWT dual-key support | `auth_tokens` (new) + `mailflow_token` (legacy) |
+| JWT dual-key support | `auth_tokens` (new) + `ProxiPilot_token` (legacy) |
 | Mobile overflow prevention | `overflowX: hidden` + `width: 100%` on all scroll roots |
 
 ---

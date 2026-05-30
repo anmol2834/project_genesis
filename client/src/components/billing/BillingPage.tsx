@@ -228,7 +228,7 @@ export default function BillingPage() {
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: 2 }}>
 
           {/* Current plan */}
-          <Box sx={{ borderRadius: '16px', overflow: 'hidden', border: `1px solid ${alpha(CURRENT_PLAN.color, isDark ? 0.3 : 0.2)}`, background: isDark ? `linear-gradient(145deg,${alpha(CURRENT_PLAN.color, 0.12)} 0%,rgba(15,23,42,0.5) 100%)` : `linear-gradient(145deg,${alpha(CURRENT_PLAN.color, 0.07)} 0%,rgba(248,250,252,0.8) 100%)`, backdropFilter: 'blur(12px)', position: 'relative', overflow: 'hidden' }}>
+          <Box sx={{ borderRadius: '16px', overflow: 'hidden', border: `1px solid ${alpha(CURRENT_PLAN.color, isDark ? 0.3 : 0.2)}`, background: isDark ? `linear-gradient(145deg,${alpha(CURRENT_PLAN.color, 0.12)} 0%,rgba(15,23,42,0.5) 100%)` : `linear-gradient(145deg,${alpha(CURRENT_PLAN.color, 0.07)} 0%,rgba(248,250,252,0.8) 100%)`, backdropFilter: 'blur(12px)', position: 'relative' }}>
             <Box sx={{ position: 'absolute', top: -30, right: -30, width: 120, height: 120, borderRadius: '50%', background: alpha(CURRENT_PLAN.color, isDark ? 0.12 : 0.08), filter: 'blur(30px)', pointerEvents: 'none' }} />
             <Box sx={{ px: 2, pt: 2, pb: 2, position: 'relative' }}>
               <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', mb: 1.5 }}>
