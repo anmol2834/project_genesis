@@ -6,7 +6,7 @@ import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded';
 import NextLink from 'next/link';
 import { lightGradients, darkGradients } from '@/theme/palette';
 
-const MotionBox = motion(Box);
+const MotionBox = motion.create(Box);
 
 export default function FloatingWaitlistButton() {
   const theme = useTheme();

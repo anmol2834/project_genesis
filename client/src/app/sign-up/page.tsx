@@ -1,10 +1,13 @@
 import type { Metadata } from 'next';
 import SignUpPage from '@/components/auth/SignUpPage';
+import { buildMetadata } from '@/lib/seo/metadata';
 
-export const metadata: Metadata = {
-  title: 'Create account — Proxipilot',
-  description: 'Set up your AI-powered email automation in minutes.',
-};
+export const metadata: Metadata = buildMetadata({
+  title: 'Create Account',
+  description: 'Create your Proxipilot account and set up AI-powered email automation in minutes.',
+  path: '/sign-up',
+  noIndex: true,
+});
 
 export default function Page() {
   return <SignUpPage />;

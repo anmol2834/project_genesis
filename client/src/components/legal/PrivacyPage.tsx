@@ -21,7 +21,7 @@ import ExpandMoreRoundedIcon from '@mui/icons-material/ExpandMoreRounded';
 import { useRouter } from 'next/navigation';
 import { lightGradients, darkGradients } from '@/theme/palette';
 
-const MotionBox = motion(Box);
+const MotionBox = motion.create(Box);
 
 interface Section {
   id: string;
