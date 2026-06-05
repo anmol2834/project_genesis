@@ -19,8 +19,9 @@ _ENV_FILE     = os.path.join(_SERVER_DIR, ".env")
 
 class GlobalConfig(BaseSettings):
     """
-    Global configuration class that loads from .env file
-    All services MUST use this configuration
+    Global configuration class that loads from .env file.
+    All services MUST use this configuration.
+    .env file values always win over system environment variables.
     """
     
     # ── Database Configuration ──────────────────────────────────────────────
@@ -51,7 +52,8 @@ class GlobalConfig(BaseSettings):
     CAMPAIGN_SERVICE_URL: str = Field(default="http://campaign-service:8000")
     LEADS_SERVICE_URL: str = Field(default="http://leads-service:8000")
     ANALYTICS_SERVICE_URL: str = Field(default="http://analytics-service:8000")
-    AUTOMATION_SERVICE_URL: str = Field(default="http://automation-service:8000")
+    AUTOMATION_SERVICE_URL: str = Field(default="http://automation-service:8009")
+    AUTOMATIONSERVICE_URL: str = Field(default="http://localhost:8010")
     RESEARCH_SERVICE_URL: str = Field(default="http://research-service:8000")
     NOTIFICATION_SERVICE_URL: str = Field(default="http://notification-service:8000")
     
@@ -130,7 +132,7 @@ class GlobalConfig(BaseSettings):
     QDRANT_URL: str = Field(default="http://qdrant:6333")
     QDRANT_GRPC_URL: str = Field(default="http://qdrant:6334")
     QDRANT_COLLECTION: str = Field(default="business_context")
-    QDRANT_VECTOR_SIZE: int = Field(default=384)
+    QDRANT_VECTOR_SIZE: int = Field(default=768)
     QDRANT_DISTANCE_METRIC: str = Field(default="Cosine")
 
     # ── LLM Configuration ──────────────────────────────────────────────────
@@ -192,15 +194,23 @@ class GlobalConfig(BaseSettings):
     UPSTASH_REDIS_REST_URL:   Optional[str] = Field(default=None)
     UPSTASH_REDIS_REST_TOKEN: Optional[str] = Field(default=None)
 
-    # ── Redis Streams URL (emailservice only — Upstash Redis) ─────────────────
-    # Separate from REDIS_URL (shared services use RedisLabs).
-    # emailservice uses this for Redis Streams pipeline (gmail_events, store_ready, etc.)
+    # ── Redis Streams URL — kept for backward compat, always equals REDIS_URL ──
+    # Do NOT use this field. Use REDIS_URL everywhere.
+    # Kept only so old env vars don't cause validation errors.
     REDIS_STREAMS_URL: Optional[str] = Field(default=None)
 
     # ── Kafka / Redis Streams (emailservice) ─────────────────────────────────
     KAFKA_BOOTSTRAP_SERVERS: Optional[str] = Field(default=None)
     KAFKA_SASL_USERNAME:     Optional[str] = Field(default=None)
     KAFKA_SASL_PASSWORD:     Optional[str] = Field(default=None)
+
+    def get_redis_url(self) -> str:
+        """
+        Single source of truth for Redis URL.
+        Always returns REDIS_URL — ignores REDIS_STREAMS_URL.
+        All services (emailservice, automation-service, etc.) use this.
+        """
+        return self.REDIS_URL
 
     # pydantic-settings v2: use model_config instead of inner class Config
     model_config = SettingsConfigDict(
@@ -210,6 +220,39 @@ class GlobalConfig(BaseSettings):
         extra="ignore",   # silently ignore undeclared env vars (service-specific keys)
     )
 
+
+# ── Force .env file values to override system environment variables ───────────
+# pydantic-settings v2 gives system env vars higher priority than .env file.
+# This causes stale system env vars (set in old terminal sessions) to override
+# the correct values in .env. We fix this by reading .env directly and
+# injecting its values into os.environ BEFORE GlobalConfig() is instantiated.
+# This ensures .env is always the source of truth.
+def _load_env_file_with_priority(env_file: str) -> None:
+    """Parse .env file and inject values into os.environ, overriding system env."""
+    _PRIORITY_KEYS = {
+        'REDIS_URL', 'CELERY_BROKER_URL', 'CELERY_RESULT_BACKEND',
+        'DATABASE_URL', 'MONGODB_URL', 'JWT_SECRET_KEY', 'ENCRYPTION_KEY',
+        'OPENAI_API_KEY',
+    }
+    try:
+        with open(env_file, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, _, val = line.partition('=')
+                key = key.strip()
+                val = val.strip()
+                # Remove surrounding quotes if present
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                    val = val[1:-1]
+                if key in _PRIORITY_KEYS and val:
+                    os.environ[key] = val
+    except Exception:
+        pass  # non-fatal — GlobalConfig will handle missing values
+
+
+_load_env_file_with_priority(_ENV_FILE)
 
 # Global configuration instance
 config = GlobalConfig()

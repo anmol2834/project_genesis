@@ -66,6 +66,9 @@ class EmailConnectionService:
         account.sync_status        = SyncStatus.IDLE
         account.is_active          = True
         account.last_error_message = None
+        # Always reset account_state to active on reconnect.
+        # This heals token_revoked, token_expired, and any other error state.
+        account.account_state      = "active"
 
         if data.get("provider_account_id"):
             account.provider_account_id = data["provider_account_id"]

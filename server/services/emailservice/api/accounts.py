@@ -26,6 +26,9 @@ def _cutoff() -> datetime:
 
 def _fmt_account(a: EmailAccount, emails_processed: int = 0) -> dict:
     """Serialize an EmailAccount to the full shape the client expects."""
+    account_state = getattr(a, "account_state", "active") or "active"
+    # Derive a human-readable status for the frontend
+    needs_reconnect = account_state == "token_revoked"
     return {
         "id":                  str(a.id),
         "user_id":             str(a.user_id),
@@ -34,6 +37,8 @@ def _fmt_account(a: EmailAccount, emails_processed: int = 0) -> dict:
         "provider":            a.provider.value if hasattr(a.provider, "value") else str(a.provider),
         "connection_status":   a.connection_status.value if hasattr(a.connection_status, "value") else str(a.connection_status),
         "sync_status":         "idle",   # emailservice uses event-driven model, not polling
+        "account_state":       account_state,
+        "needs_reconnect":     needs_reconnect,
         "daily_send_limit":    a.daily_send_limit,
         "daily_sent_count":    a.daily_sent_count,
         "warmup_enabled":      getattr(a, "warmup_enabled", False),

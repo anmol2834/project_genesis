@@ -47,7 +47,7 @@ async def push_to_recovery(event_type: str, payload: dict) -> None:
     """
     pushed_to_redis = False
     try:
-        redis = get_redis_client()
+        redis = await get_redis_client()
         await redis.xadd(
             RECOVERY_STREAM,
             {"type": event_type, "data": json.dumps(payload, default=str)},
@@ -123,7 +123,7 @@ class RecoveryWorker:
         Deletes messages after successful processing.
         """
         try:
-            redis = get_redis_client()
+            redis = await get_redis_client()
             # Read up to 100 messages at a time
             while True:
                 messages = await redis.xrange(RECOVERY_STREAM, "-", "+", count=100)

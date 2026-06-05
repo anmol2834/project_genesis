@@ -31,7 +31,7 @@ def get_qdrant_client() -> QdrantClient:
                 try:
                     _qdrant_client = QdrantClient(
                         url=config.QDRANT_URL,
-                        timeout=30,
+                        timeout=3,   # 3s — matches automationservice 3.5s asyncio timeout
                         prefer_grpc=False,
                     )
                     logger.info(f"Qdrant client created: {config.QDRANT_URL}")
@@ -72,7 +72,7 @@ def check_qdrant_health() -> bool:
 
 def create_collection(
     collection_name: str,
-    vector_size: int = 384,
+    vector_size: int = 768,
     distance: str = "Cosine",
 ) -> bool:
     try:

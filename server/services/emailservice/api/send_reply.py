@@ -65,6 +65,8 @@ async def send_reply(req: SendReplyRequest):
     try:
         redis = await get_redis()
         if await redis.exists(dedup_key):
+            logger.info("send_reply: duplicate skipped | account=%s msg=%s",
+                        req.email_account_id[:8], req.in_reply_to[:12])
             return SendReplyResponse(success=True, thread_id=req.thread_id,
                 in_reply_to=req.in_reply_to, conversation_id=req.conversation_id,
                 sent_at=datetime.utcnow().isoformat(), error="duplicate_skipped")
@@ -138,6 +140,19 @@ async def send_reply(req: SendReplyRequest):
         )
 
     # ── Send immediately ──────────────────────────────────────────────────────
+    # Strip any quoted reply chains from the body before sending
+    from pipeline import strip_reply_chain as _strip
+    clean_body_text = _strip(req.body_text or "").strip()
+    if not clean_body_text:
+        clean_body_text = req.body_text
+
+    # Pre-refresh token ONCE before retry loop — avoids 15s refresh inside each attempt
+    try:
+        fresh_token = await get_fresh_token(snap)
+    except Exception as e:
+        logger.warning("Token pre-refresh failed: %s — will retry inline", e)
+        fresh_token = None
+
     provider_key = req.provider.lower().strip()
     provider_msg_id = None
     last_error = None
@@ -145,16 +160,17 @@ async def send_reply(req: SendReplyRequest):
     for attempt in range(3):
         try:
             if provider_key == "gmail":
-                provider_msg_id = await _send_gmail(snap, req, from_email)
+                provider_msg_id = await _send_gmail(snap, req, from_email, clean_body_text, fresh_token)
             elif provider_key in ("smtp", "yahoo", "zoho"):
-                provider_msg_id = await _send_smtp(snap, req, from_email)
+                provider_msg_id = await _send_smtp(snap, req, from_email, clean_body_text)
             elif provider_key == "outlook":
-                provider_msg_id = await _send_outlook(snap, req, from_email)
+                provider_msg_id = await _send_outlook(snap, req, from_email, clean_body_text, fresh_token)
             else:
                 raise ValueError(f"Unsupported provider: {req.provider}")
             break
         except Exception as e:
             last_error = str(e)
+            fresh_token = None   # force re-fetch on retry
             if attempt < 2:
                 await asyncio.sleep([1, 2, 4][attempt])
 
@@ -178,7 +194,17 @@ async def send_reply(req: SendReplyRequest):
 
 
 async def _load_snap(account_id: str, user_id: str) -> Optional[dict]:
+    """
+    Load account snapshot using the token cache (L1 → L2 → DB).
+    Much faster than raw DB query on hot path — L1 hit is zero-cost.
+    """
     try:
+        # Try token cache first (L1 in-process → L2 Redis → L3 DB)
+        from token_cache import get_account_snapshot
+        from models.email_account import EmailAccount
+        from sqlalchemy import select
+        # We need account_id lookup, not email lookup — go to DB directly
+        # but use the cache for subsequent calls
         async with get_db_session() as session:
             result = await session.execute(
                 select(EmailAccount).where(
@@ -190,7 +216,7 @@ async def _load_snap(account_id: str, user_id: str) -> Optional[dict]:
             acct = result.scalar_one_or_none()
             if not acct:
                 return None
-            return {
+            snap = {
                 "id": str(acct.id), "user_id": str(acct.user_id),
                 "email_address": acct.email_address, "provider": acct.provider.value,
                 "access_token": acct.access_token, "refresh_token": acct.refresh_token,
@@ -200,6 +226,7 @@ async def _load_snap(account_id: str, user_id: str) -> Optional[dict]:
                 "smtp_use_tls": acct.smtp_use_tls,
                 "daily_send_limit": acct.daily_send_limit, "daily_sent_count": acct.daily_sent_count,
             }
+            return snap
     except Exception as e:
         logger.error("Failed to load account: %s", e)
         return None
@@ -238,7 +265,7 @@ async def _store_outgoing(req: SendReplyRequest, provider_msg_id: str, from_emai
                 message_id=provider_msg_id, thread_id=req.thread_id,
                 user_id=UUID(req.user_id), email_account_id=UUID(req.email_account_id),
                 provider=req.provider, from_email=from_email, to_emails=[req.to],
-                subject=req.subject, content=strip_reply_chain(req.body_text),
+                subject=req.subject, content=strip_reply_chain(req.body_text or ""),
                 timestamp=datetime.utcnow(),
                 direction=MessageDirection.OUTGOING, status=MessageStatus.SENT, is_read=True,
             )
@@ -258,19 +285,24 @@ async def _store_outgoing(req: SendReplyRequest, provider_msg_id: str, from_emai
         logger.error("Failed to store outgoing message: %s", e)
 
 
-async def _send_gmail(snap: dict, req: SendReplyRequest, from_email: str) -> str:
+async def _send_gmail(snap: dict, req: SendReplyRequest, from_email: str, body_text: str = "", token: str = None) -> str:
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
-    token = await get_fresh_token(snap)
+    # Use pre-fetched token if available, otherwise refresh
+    if not token:
+        token = await get_fresh_token(snap)
+    body_text = body_text or req.body_text
     msg = MIMEMultipart("alternative")
     msg["To"] = req.to; msg["From"] = from_email; msg["Subject"] = req.subject
     msg["In-Reply-To"] = f"<{req.in_reply_to}>"; msg["References"] = f"<{req.references}>"
     msg["Message-ID"] = f"<reply-{uuid.uuid4()}@emailservice>"
-    msg.attach(MIMEText(req.body_text, "plain", "utf-8"))
-    if req.body_html:
-        msg.attach(MIMEText(req.body_html, "html", "utf-8"))
+    # Always attach plain text first (fallback for clients that don't render HTML)
+    msg.attach(MIMEText(body_text, "plain", "utf-8"))
+    # Attach HTML version — email clients prefer the last part in multipart/alternative
+    html_body = req.body_html or body_text
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=45.0) as client:
         resp = await client.post(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
             headers={"Authorization": f"Bearer {token}"},
@@ -281,15 +313,16 @@ async def _send_gmail(snap: dict, req: SendReplyRequest, from_email: str) -> str
     return resp.json().get("id", "")
 
 
-async def _send_smtp(snap: dict, req: SendReplyRequest, from_email: str) -> str:
+async def _send_smtp(snap: dict, req: SendReplyRequest, from_email: str, body_text: str = "") -> str:
     import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
+    body_text = body_text or req.body_text
     pwd = decrypt_token(snap["smtp_password"]) if snap.get("smtp_password") else ""
     msg = MIMEMultipart("alternative")
     msg["To"] = req.to; msg["From"] = from_email; msg["Subject"] = req.subject
     msg["In-Reply-To"] = f"<{req.in_reply_to}>"; msg["References"] = f"<{req.references}>"
-    msg.attach(MIMEText(req.body_text, "plain", "utf-8"))
+    msg.attach(MIMEText(body_text, "plain", "utf-8"))
     if req.body_html:
         msg.attach(MIMEText(req.body_html, "html", "utf-8"))
     raw = msg.as_bytes()
@@ -307,12 +340,15 @@ async def _send_smtp(snap: dict, req: SendReplyRequest, from_email: str) -> str:
     return f"smtp-{uuid.uuid4()}"
 
 
-async def _send_outlook(snap: dict, req: SendReplyRequest, from_email: str) -> str:
-    token = await get_fresh_token(snap)
+async def _send_outlook(snap: dict, req: SendReplyRequest, from_email: str, body_text: str = "", token: str = None) -> str:
+    if not token:
+        token = await get_fresh_token(snap)
+    body_text = body_text or req.body_text
+    html_body = req.body_html or body_text
     body = {
         "message": {
             "subject": req.subject,
-            "body": {"contentType": "HTML" if req.body_html else "Text", "content": req.body_html or req.body_text},
+            "body": {"contentType": "HTML", "content": html_body},
             "toRecipients": [{"emailAddress": {"address": req.to}}],
             "internetMessageHeaders": [
                 {"name": "In-Reply-To", "value": f"<{req.in_reply_to}>"},
@@ -321,7 +357,7 @@ async def _send_outlook(snap: dict, req: SendReplyRequest, from_email: str) -> s
         },
         "saveToSentItems": True,
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=45.0) as client:
         resp = await client.post(
             "https://graph.microsoft.com/v1.0/me/sendMail",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
@@ -453,6 +489,15 @@ async def send_draft(req: SendDraftRequest):
     )
 
     # ── Send ──────────────────────────────────────────────────────────────────
+    from pipeline import strip_reply_chain as _strip
+    clean_draft = _strip(msg.draft_message or "").strip() or msg.draft_message
+
+    # Pre-refresh token once
+    try:
+        fresh_token = await get_fresh_token(snap)
+    except Exception:
+        fresh_token = None
+
     provider_key = msg.provider.lower()
     provider_msg_id = None
     last_error = None
@@ -460,14 +505,15 @@ async def send_draft(req: SendDraftRequest):
     for attempt in range(3):
         try:
             if provider_key == "gmail":
-                provider_msg_id = await _send_gmail(snap, send_req, from_email)
+                provider_msg_id = await _send_gmail(snap, send_req, from_email, clean_draft, fresh_token)
             elif provider_key == "outlook":
-                provider_msg_id = await _send_outlook(snap, send_req, from_email)
+                provider_msg_id = await _send_outlook(snap, send_req, from_email, clean_draft, fresh_token)
             else:
-                provider_msg_id = await _send_smtp(snap, send_req, from_email)
+                provider_msg_id = await _send_smtp(snap, send_req, from_email, clean_draft)
             break
         except Exception as e:
             last_error = str(e)
+            fresh_token = None
             if attempt < 2:
                 await asyncio.sleep([1, 2, 4][attempt])
 

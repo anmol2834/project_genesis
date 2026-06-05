@@ -44,8 +44,11 @@ OUTBOX_ZSET = "es:outbox:schedule"
 RESET_ZSET  = "es:daily_reset:schedule"
 MAX_RETRIES = 5
 BATCH_SIZE  = 20   # max sends per wake cycle — prevents burst
-# Minimum sleep between cycles even if ZSET is empty
+# Minimum sleep between cycles when items ARE scheduled but not yet due
 MIN_SLEEP_S = 60.0
+# Sleep duration when ZSETs are completely empty — nothing to do
+# Reduces Redis commands from 4/min to 4/10min when no deferred sends exist
+IDLE_SLEEP_S = 600.0
 
 
 class DeferredScheduler:
@@ -70,8 +73,12 @@ class DeferredScheduler:
             try:
                 sleep_s = await self._compute_sleep()
                 if sleep_s > 0:
+                    # Sleep the EXACT computed duration.
+                    # Do NOT cap with MIN_SLEEP_S — that turns IDLE_SLEEP_S=600
+                    # into 60s polling and hammers Upstash every minute.
+                    # MIN_SLEEP_S is only used as an error-fallback in _compute_sleep().
                     logger.debug("DeferredScheduler: sleeping %.1fs until next due item", sleep_s)
-                    await asyncio.sleep(min(sleep_s, MIN_SLEEP_S))
+                    await asyncio.sleep(sleep_s)
                     continue
 
                 # Process due outbox items
@@ -109,12 +116,12 @@ class DeferredScheduler:
                     next_times.append(items[0][1])
 
             if not next_times:
-                return MIN_SLEEP_S  # nothing scheduled — sleep minimum
+                return IDLE_SLEEP_S  # nothing scheduled — sleep long (saves Redis quota)
 
             return max(0.0, min(next_times) - now)
         except Exception as e:
             logger.warning("DeferredScheduler: sleep compute failed: %s", e)
-            return MIN_SLEEP_S
+            return MIN_SLEEP_S  # on error, retry in 60s (not IDLE_SLEEP_S)
 
     # ── Outbox processing ─────────────────────────────────────────────────────
 

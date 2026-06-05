@@ -33,6 +33,34 @@ class SyncStatus(str, enum.Enum):
     FAILED  = "failed"
 
 
+class WatchStatus(str, enum.Enum):
+    ACTIVE  = "active"    # watch is registered and running
+    STOPPED = "stopped"   # watch was never started or was explicitly stopped
+    EXPIRED = "expired"   # watch expiry passed without renewal
+
+
+class AccountState(str, enum.Enum):
+    """
+    Account state machine — replaces the simple is_active boolean.
+
+    Transitions:
+      ACTIVE          → TOKEN_EXPIRED   (token refresh fails transiently)
+      ACTIVE          → TOKEN_REVOKED   (invalid_grant confirmed permanent)
+      TOKEN_EXPIRED   → ACTIVE          (token refresh succeeds on retry)
+      TOKEN_EXPIRED   → TOKEN_REVOKED   (invalid_grant after retry)
+      TOKEN_REVOKED   → ACTIVE          (user reconnects via OAuth)
+      ACTIVE          → WATCH_EXPIRED   (watch_expiry passed, auto-renews)
+      WATCH_EXPIRED   → ACTIVE          (watch renewed successfully)
+      any             → SYNC_REQUIRED   (history gap detected, needs replay)
+      SYNC_REQUIRED   → ACTIVE          (history replay complete)
+    """
+    ACTIVE        = "active"         # fully operational
+    TOKEN_EXPIRED = "token_expired"  # transient — retry token refresh
+    TOKEN_REVOKED = "token_revoked"  # permanent — user must reconnect via OAuth
+    WATCH_EXPIRED = "watch_expired"  # watch needs renewal (auto-heals)
+    SYNC_REQUIRED = "sync_required"  # history gap — needs replay (auto-heals)
+
+
 class EmailAccount(Base):
     __tablename__ = "email_accounts"
 
@@ -61,6 +89,11 @@ class EmailAccount(Base):
     last_synced_at      = Column(DateTime, nullable=True)
     last_history_id     = Column(String(64), nullable=True)
     watch_expiry        = Column(DateTime, nullable=True)
+    watch_status        = Column(String(20), default="stopped", nullable=False)
+    last_watch_started_at = Column(DateTime, nullable=True)
+    # account_state: self-healing state machine (replaces simple is_active boolean)
+    # is_active is kept for backward compat — always mirrors account_state == ACTIVE
+    account_state       = Column(String(20), default="active", nullable=False)
     is_active           = Column(Boolean, default=True, nullable=False)
     is_primary          = Column(Boolean, default=False, nullable=False)
     automation_enabled  = Column(Boolean, default=True, nullable=False)
@@ -71,7 +104,9 @@ class EmailAccount(Base):
         UniqueConstraint("user_id", "email_address", name="uq_email_accounts_user_email"),
         Index("ix_email_accounts_user_status", "user_id", "connection_status"),
         Index("ix_email_accounts_user_active", "user_id", "is_active"),
+        Index("ix_email_accounts_watch_status", "provider", "is_active", "watch_status"),
+        Index("ix_email_accounts_account_state", "provider", "account_state"),
     )
 
     def __repr__(self):
-        return f"<EmailAccount {self.email_address} [{self.provider}]>"
+        return f"<EmailAccount {self.email_address} [{self.provider}] state={self.account_state}>"

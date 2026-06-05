@@ -32,10 +32,18 @@ _config = get_config()
 async def lifespan(app: FastAPI):
     logger.info("emailservice starting on port %d...", cfg.SERVICE_PORT)
     await init_database()
-    # emailservice uses Upstash Redis Streams (REDIS_STREAMS_URL), not the
-    # shared RedisLabs instance (REDIS_URL) used by other services.
-    _streams_url = _config.REDIS_STREAMS_URL or _config.REDIS_URL
-    await init_redis(url=_streams_url)
+    # init_redis() always uses REDIS_URL from config — single source of truth.
+    await init_redis()
+    
+    # PRODUCTION FIX: Initialize Redis pool manager
+    from redis_pool_manager import patch_shared_cache, get_pool_stats
+    await patch_shared_cache()
+    logger.info("Redis pool manager initialized | %s", get_pool_stats())
+    
+    # PRODUCTION FIX: Start Gmail History Aggregator
+    from gmail_history_aggregator import start_aggregator, stop_aggregator, get_aggregator
+    await start_aggregator()
+    
     await _create_tables()
     try:
         await ensure_topics()
@@ -49,6 +57,11 @@ async def lifespan(app: FastAPI):
     async def _run_watch_sync():
         await asyncio.sleep(3)
         try:
+            # Invalidate all stale account snapshots from Redis before watch sync.
+            # This ensures pipeline.py reads fresh account state (including account_state)
+            # from DB instead of serving stale is_active=False from Redis cache.
+            await _invalidate_stale_account_cache()
+
             from workers.watch_manager import WatchManager
             wm = WatchManager()
             await wm.sync_all_watches()
@@ -155,6 +168,13 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("emailservice shutting down...")
+    
+    # PRODUCTION FIX: Stop aggregator first
+    try:
+        await stop_aggregator()
+    except Exception as e:
+        logger.warning("Aggregator stop error: %s", e)
+    
     for w in _pipeline_workers:
         try:
             await w.stop()
@@ -169,6 +189,11 @@ async def lifespan(app: FastAPI):
     if _recovery_worker:
         await _recovery_worker.close()
     await close_producer()
+    
+    # PRODUCTION FIX: Close Redis pool last
+    from redis_pool_manager import close_redis_pool
+    await close_redis_pool()
+    
     await close_database()
     await close_redis()
 
@@ -244,6 +269,8 @@ async def stats():
     from shared.database import get_db_session
     from sqlalchemy import text
     from stream_client import get_stream_lag
+    from gmail_history_aggregator import get_aggregator
+    from redis_pool_manager import get_pool_stats
     import config as cfg
 
     streams = [
@@ -280,6 +307,8 @@ async def stats():
         "timestamp": datetime.utcnow().isoformat(),
         "streams":   stream_stats,
         "db":        db_stats,
+        "aggregator": get_aggregator().get_stats(),
+        "redis_pool": get_pool_stats(),
     }
 
 
@@ -289,6 +318,40 @@ async def root():
 
 
 # ── Startup helpers ───────────────────────────────────────────────────────────
+
+async def _invalidate_stale_account_cache() -> None:
+    """
+    Invalidate all es:snap:* and es:watch_active:* keys in Redis on startup.
+
+    Why: Redis cache may contain stale account snapshots and watch markers from
+    the previous run. The DB is the source of truth. Clearing these keys forces:
+      - pipeline.process_gmail_event() to load fresh account_state from DB
+      - watch_manager to re-evaluate watch status from DB (not Redis marker)
+
+    Cost: O(N) SCAN + N DEL — runs once on startup, not on hot path.
+    At 10k accounts: ~10ms. At 100k accounts: ~100ms. Acceptable.
+    """
+    try:
+        from shared.cache import get_redis
+        redis = await get_redis()
+        deleted = 0
+        # Clear both snap cache and watch active markers
+        for pattern in ("es:snap:*", "es:watch_active:*"):
+            cursor = 0
+            while True:
+                cursor, keys = await redis.scan(cursor, match=pattern, count=500)
+                if keys:
+                    await redis.delete(*keys)
+                    deleted += len(keys)
+                if cursor == 0:
+                    break
+        if deleted:
+            logger.info("Startup cache invalidation: cleared %d stale Redis keys (snap + watch_active)", deleted)
+        else:
+            logger.debug("Startup cache invalidation: no stale keys found")
+    except Exception as e:
+        logger.warning("Startup cache invalidation failed (non-critical): %s", e)
+
 
 async def _create_tables() -> None:
     try:
@@ -311,9 +374,37 @@ async def _create_tables() -> None:
                 "ALTER TABLE es_conversations DROP COLUMN IF EXISTS summary",
                 "ALTER TABLE es_messages ADD COLUMN IF NOT EXISTS draft_message TEXT",
                 "ALTER TABLE es_messages ADD COLUMN IF NOT EXISTS message_state VARCHAR(20)",
+                # watch_status + last_watch_started_at — new columns for watch recovery system
+                "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS watch_status VARCHAR(20) DEFAULT 'stopped'",
+                "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS last_watch_started_at TIMESTAMP",
+                "CREATE INDEX IF NOT EXISTS ix_email_accounts_watch_status ON email_accounts (provider, is_active, watch_status)",
+                # account_state — self-healing state machine (replaces simple is_active boolean)
+                # Backfill: accounts with is_active=False and invalid_grant error → token_revoked
+                #           accounts with is_active=True → active
+                "ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS account_state VARCHAR(20) DEFAULT 'active'",
+                "CREATE INDEX IF NOT EXISTS ix_email_accounts_account_state ON email_accounts (provider, account_state)",
+                # Backfill existing rows
+                "UPDATE email_accounts SET account_state = 'token_revoked' WHERE is_active = FALSE AND last_error_message LIKE '%invalid_grant%'",
+                "UPDATE email_accounts SET account_state = 'active' WHERE is_active = TRUE AND account_state = 'active'",
                 # Retention indexes — no CONCURRENTLY so they run inside the transaction
                 "CREATE INDEX IF NOT EXISTS ix_es_messages_created_at ON es_messages (created_at)",
                 "CREATE INDEX IF NOT EXISTS ix_es_messages_user_recent ON es_messages (user_id, created_at DESC)",
+                # Clear stale draft_message on rows that already have a sent reply in the same thread
+                # This fixes rows where send_timeout fallback stored a draft but the reply was later sent
+                """
+                UPDATE es_messages m
+                SET draft_message = NULL, message_state = NULL
+                WHERE m.draft_message IS NOT NULL
+                  AND m.message_state = 'drafted'
+                  AND EXISTS (
+                    SELECT 1 FROM es_messages sent
+                    WHERE sent.thread_id = m.thread_id
+                      AND sent.user_id   = m.user_id
+                      AND sent.direction = 'OUTGOING'
+                      AND sent.status    = 'SENT'
+                      AND sent.timestamp > m.timestamp
+                  )
+                """,
             ]
             for sql in migrations:
                 try:

@@ -35,8 +35,9 @@ SERVICE_REGISTRY = {
     "user-service": {
         "url": config.USER_SERVICE_URL or "http://localhost:8002",
         "prefix": "/user-service",
-        "timeout": 30.0,
+        "timeout": 120.0,   # 120s — ML model loading (e5-base-v2) takes ~30s on first call
         "retry": 1,
+        "circuit_breaker_threshold": 10,  # higher threshold — ML service is slow but not broken
     },
     "business-service": {
         "url": config.BUSINESS_SERVICE_URL or "http://localhost:8003",
@@ -80,6 +81,12 @@ SERVICE_REGISTRY = {
         "timeout": 10.0,
         "retry": 2,
     },
+    "automationservice": {
+        "url": "http://localhost:8010",
+        "prefix": "/automationservice",
+        "timeout": 120.0,
+        "retry": 1,
+    },
     "research-service": {
         "url": config.RESEARCH_SERVICE_URL or "http://localhost:8010",
         "prefix": "/research-service",
@@ -119,47 +126,51 @@ async def close_http_client():
 class CircuitBreaker:
     """Circuit breaker pattern for service resilience"""
     
-    def __init__(self, failure_threshold: int = 5, timeout: int = 60):
+    def __init__(self, failure_threshold: int = 5, timeout: int = 30):
         self.failure_threshold = failure_threshold
         self.timeout = timeout
         self.failures: Dict[str, int] = {}
         self.last_failure_time: Dict[str, datetime] = {}
         self.open_circuits: Dict[str, bool] = {}
     
+    def _get_threshold(self, service_name: str) -> int:
+        """Get per-service failure threshold (falls back to default)."""
+        svc = SERVICE_REGISTRY.get(service_name, {})
+        return svc.get("circuit_breaker_threshold", self.failure_threshold)
+
     async def is_open(self, service_name: str) -> bool:
         """Check if circuit is open for a service"""
-        if service_name not in self.open_circuits:
+        if not self.open_circuits.get(service_name):
             return False
         
-        if not self.open_circuits[service_name]:
+        # Check if timeout has passed — auto-reset
+        last = self.last_failure_time.get(service_name)
+        if last and datetime.utcnow() - last > timedelta(seconds=self.timeout):
+            self.open_circuits[service_name] = False
+            self.failures[service_name] = 0
+            logger.info(f"Circuit breaker reset for {service_name}")
             return False
-        
-        # Check if timeout has passed
-        if service_name in self.last_failure_time:
-            if datetime.utcnow() - self.last_failure_time[service_name] > timedelta(seconds=self.timeout):
-                # Reset circuit
-                self.open_circuits[service_name] = False
-                self.failures[service_name] = 0
-                logger.info(f"Circuit breaker reset for {service_name}")
-                return False
         
         return True
     
     async def record_success(self, service_name: str):
         """Record successful request"""
-        if service_name in self.failures:
-            self.failures[service_name] = 0
-        if service_name in self.open_circuits:
-            self.open_circuits[service_name] = False
+        self.failures[service_name] = 0
+        self.open_circuits[service_name] = False
     
     async def record_failure(self, service_name: str):
         """Record failed request"""
         self.failures[service_name] = self.failures.get(service_name, 0) + 1
         self.last_failure_time[service_name] = datetime.utcnow()
         
-        if self.failures[service_name] >= self.failure_threshold:
+        threshold = self._get_threshold(service_name)
+        if self.failures[service_name] >= threshold:
             self.open_circuits[service_name] = True
-            logger.error(f"Circuit breaker opened for {service_name} after {self.failures[service_name]} failures")
+            logger.error(
+                f"Circuit breaker opened for {service_name} "
+                f"after {self.failures[service_name]} failures "
+                f"(threshold={threshold})"
+            )
 
 circuit_breaker = CircuitBreaker()
 

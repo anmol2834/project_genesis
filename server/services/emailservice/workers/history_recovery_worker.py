@@ -25,7 +25,7 @@ import httpx
 
 import config as cfg
 from kafka_client import publish_batch
-from token_cache import get_account_snapshot, get_fresh_token
+from token_cache import get_account_snapshot, get_fresh_token, InvalidGrantError, TokenExpiredError
 from rate_limiter import get_rate_limiter
 from idempotency import get_idempotency_cache
 from shared.database import get_db_session
@@ -124,14 +124,20 @@ class HistoryRecoveryWorker:
             return interval_s
 
     async def run_once(self) -> None:
-        """Run one recovery pass across all active Gmail accounts."""
+        """
+        Run one recovery pass across Gmail accounts.
+
+        Processes:
+          - ACTIVE accounts: replay any missed messages since last cursor
+          - TOKEN_EXPIRED accounts: attempt token refresh, then replay if successful
+          - Skips TOKEN_REVOKED accounts (permanent failure, user must reconnect)
+        """
         accounts = await self._load_gmail_accounts()
         if not accounts:
             logger.info("HistoryRecovery: no accounts to check")
             return
 
         logger.info("HistoryRecovery: checking %d accounts", len(accounts))
-        # Max 4 concurrent — leaves DB connections for live webhook processing
         sem = asyncio.Semaphore(4)
         tasks = [self._recover_account(acct, sem) for acct in accounts]
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -154,15 +160,35 @@ class HistoryRecoveryWorker:
             if not snap or not snap.get("last_history_id"):
                 return
 
+            account_state = snap.get("account_state", "active")
+
+            # TOKEN_REVOKED: permanent — skip until user reconnects
+            if account_state == "token_revoked":
+                logger.debug("HistoryRecovery: skipping %s (token_revoked)", email)
+                return
+
             # Half-weight rate limit — don't compete with live fetch workers
             limiter = get_rate_limiter()
             await limiter.acquire_gmail(snap["user_id"], tokens=0.5)
 
             try:
                 token = await get_fresh_token(snap)
-            except Exception as e:
-                logger.error("Token refresh failed for %s: %s", email, e)
+            except InvalidGrantError as e:
+                logger.error("HistoryRecovery: token permanently revoked for %s — skipping: %s", email, e)
                 return
+            except TokenExpiredError as e:
+                logger.warning("HistoryRecovery: token still expired for %s — will retry next cycle: %s", email, e)
+                return
+            except Exception as e:
+                logger.error("HistoryRecovery: token refresh failed for %s: %s", email, e)
+                return
+
+            # If we got here with a valid token, restore account_state to active
+            if account_state == "token_expired":
+                from token_cache import _set_account_state
+                await _set_account_state(snap["id"], email, "active",
+                                         error_msg="Token refreshed successfully during history recovery.")
+                logger.info("HistoryRecovery: account %s restored to active state", email)
 
             message_ids = await self._fetch_ids_since(token, email, snap["last_history_id"])
             if not message_ids:
@@ -284,6 +310,12 @@ class HistoryRecoveryWorker:
         if any(lbl in labels for lbl in ("DRAFT", "TRASH", "SPAM")):
             return None
 
+        # Filter promotional/social/automated emails — same as live pipeline
+        # Saves Upstash bandwidth by not pushing large newsletter payloads to store_ready
+        if any(lbl in labels for lbl in ("CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL",
+                                          "CATEGORY_UPDATES", "CATEGORY_FORUMS")):
+            return None
+
         hdrs    = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
         content, _ = _extract_content(msg.get("payload", {}))  # discard HTML
         ts = datetime.utcfromtimestamp(int(msg.get("internalDate", 0)) / 1000)
@@ -302,9 +334,18 @@ class HistoryRecoveryWorker:
         }
 
     async def _load_gmail_accounts(self) -> list[dict]:
+        """
+        Load Gmail accounts eligible for history recovery.
+        Includes:
+          - ACTIVE accounts (normal recovery)
+          - TOKEN_EXPIRED accounts (attempt token refresh + replay)
+        Excludes:
+          - TOKEN_REVOKED accounts (permanent failure, user must reconnect)
+          - Accounts without last_history_id (nothing to replay from)
+        """
         try:
             from models.email_account import EmailAccount, EmailProvider
-            from sqlalchemy import select
+            from sqlalchemy import select, or_
             async with get_db_session() as session:
                 result = await session.execute(
                     select(
@@ -312,8 +353,17 @@ class HistoryRecoveryWorker:
                         EmailAccount.last_history_id, EmailAccount.last_synced_at,
                     ).where(
                         EmailAccount.provider == EmailProvider.GMAIL,
-                        EmailAccount.is_active == True,
                         EmailAccount.last_history_id.isnot(None),
+                        # Include active + token_expired (recoverable)
+                        # Exclude token_revoked (permanent) and is_active=False (admin disabled)
+                        or_(
+                            EmailAccount.account_state == "active",
+                            EmailAccount.account_state == "token_expired",
+                            EmailAccount.account_state == "sync_required",
+                            # Fallback for accounts without account_state column yet
+                            EmailAccount.account_state.is_(None),
+                        ),
+                        EmailAccount.is_active == True,
                     )
                 )
                 return [

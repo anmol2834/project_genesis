@@ -30,7 +30,7 @@ from uuid import UUID
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 import config as cfg
-from token_cache import get_account_snapshot, get_fresh_token, advance_history_cursor
+from token_cache import get_account_snapshot, get_fresh_token, advance_history_cursor, InvalidGrantError, TokenExpiredError
 from email_filter import should_filter, should_filter_by_labels
 from dedup import get_dedup
 from idempotency import get_idempotency_cache
@@ -93,8 +93,35 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
 
         # Load account
         snap = await get_account_snapshot(email_address)
-        if not snap or not snap.get("is_active"):
-            return True  # account not found/inactive — not a failure worth retrying
+        if not snap:
+            logger.warning(
+                "Gmail event skipped — account not found in DB | email=%s historyId=%s "
+                "ACTION REQUIRED: Connect this Gmail account via OAuth at /email/connect",
+                email_address, history_id,
+            )
+            return True  # not retryable — account doesn't exist
+
+        account_state = snap.get("account_state", "active")
+
+        # TOKEN_REVOKED: permanent failure — user must reconnect via OAuth
+        # is_active=False: explicitly deactivated by admin or user disconnect
+        if account_state == "token_revoked" or not snap.get("is_active", True):
+            logger.info(
+                "Gmail event skipped — account requires reconnect | email=%s historyId=%s "
+                "state=%s reason=%s",
+                email_address, history_id, account_state,
+                snap.get("last_error_message", "unknown"),
+            )
+            return True  # not retryable until user reconnects
+
+        # TOKEN_EXPIRED: transient failure — return False so event retries via DLQ
+        # The startup recovery will attempt token refresh and history replay
+        if account_state == "token_expired":
+            logger.warning(
+                "Gmail event deferred — token expired, will retry | email=%s historyId=%s",
+                email_address, history_id,
+            )
+            return False  # retryable — DLQ will retry after token recovery
 
         user_id = snap["user_id"]
 
@@ -102,12 +129,29 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
         await get_rate_limiter().acquire_gmail(user_id)
 
         # Get fresh token — always attempt refresh if expired
-        token = await get_fresh_token(snap)
+        try:
+            token = await get_fresh_token(snap)
+        except InvalidGrantError as e:
+            logger.error("Skipping %s permanently — %s", email_address, e)
+            return True  # not retryable — account is now token_revoked
+        except TokenExpiredError as e:
+            logger.warning("Token expired for %s — deferring to retry: %s", email_address, e)
+            return False  # retryable — DLQ will retry after token recovery
 
         # Fetch message IDs from Gmail History API
+        # CRITICAL: always use stored_id as start when available.
+        # stored_id is the last processed historyId — Gmail returns all messages
+        # added AFTER startHistoryId, so this is always correct.
+        # Only fall back to history_id-1 when there is NO stored cursor at all.
         stored_id = snap.get("last_history_id")
-        start_id  = stored_id if (stored_id and stored_id != history_id) \
-                    else str(max(1, int(history_id) - 1))
+        if stored_id:
+            start_id = stored_id
+        else:
+            # No cursor yet — start just before the incoming historyId
+            start_id = str(max(1, int(history_id) - 1))
+
+        logger.debug("Gmail history fetch | email=%s stored_cursor=%s webhook_historyId=%s start_id=%s",
+                     email_address, stored_id, history_id, start_id)
 
         message_ids, fetch_error, auth_error = await _fetch_message_ids(token, email_address, start_id)
 
@@ -119,7 +163,14 @@ async def process_gmail_event(pubsub_id: str, email_address: str, history_id: st
             await _invalidate(email_address)
             snap_fresh = await get_account_snapshot(email_address)
             if snap_fresh:
-                token_fresh = await get_fresh_token(snap_fresh)
+                try:
+                    token_fresh = await get_fresh_token(snap_fresh)
+                except InvalidGrantError as e:
+                    logger.error("Skipping %s permanently — %s", email_address, e)
+                    return True  # not retryable
+                except TokenExpiredError as e:
+                    logger.warning("Token still expired for %s after refresh — deferring: %s", email_address, e)
+                    return False  # retryable
                 message_ids, fetch_error, auth_error = await _fetch_message_ids(
                     token_fresh, email_address, start_id
                 )
@@ -352,9 +403,14 @@ async def store_message_with_retry(msg: dict) -> bool:
                             "updated_at":      datetime.utcnow(),
                         },
                     )
+                    .returning(EmailConversation.__table__.c.id)
                 )
+                conversation_id = ""
                 try:
-                    await session.execute(conv_stmt)
+                    conv_result = await session.execute(conv_stmt)
+                    conv_row_result = conv_result.first()
+                    if conv_row_result:
+                        conversation_id = str(conv_row_result[0])
                 except Exception as conv_err:
                     # Constraint may not exist yet (table created before migration).
                     # Fall back to index_elements — PostgreSQL will find the unique index.
@@ -374,21 +430,55 @@ async def store_message_with_retry(msg: dict) -> bool:
                                 "updated_at":      datetime.utcnow(),
                             },
                         )
+                        .returning(EmailConversation.__table__.c.id)
                     )
-                    await session.execute(conv_stmt2)
+                    try:
+                        conv_result2 = await session.execute(conv_stmt2)
+                        conv_row_result2 = conv_result2.first()
+                        if conv_row_result2:
+                            conversation_id = str(conv_row_result2[0])
+                    except Exception:
+                        pass  # conversation_id stays "" — automation falls back to thread_id
                 await session.commit()
 
             M.db_writes.labels(table="es_messages", status="ok").inc(1)
 
-            # Publish to ai_events stream for async automation handoff
+            # Publish to ai_events stream for async automation handoff.
             if msg.get("direction") == "incoming":
+                logger.info("Publishing ai_event for incoming msg=%s thread=%s",
+                            msg.get("message_id", "?")[:12], msg.get("thread_id", "?")[:12])
                 await _publish_ai_event(user_id, msg["message_id"],
                                         msg.get("thread_id", ""), provider,
-                                        msg.get("event_id", ""))
+                                        msg.get("event_id", ""),
+                                        conversation_id=conversation_id)
             return True
 
         except Exception as e:
-            delay = cfg.STORE_RETRY_BASE_DELAY_S * (2 ** attempt)
+            # For connection-level errors, invalidate the pool immediately
+            # so the next attempt gets a fresh connection.
+            # pool_pre_ping only validates before checkout — it doesn't help
+            # when a connection dies mid-operation.
+            err_str = str(type(e).__name__)
+            is_connection_error = (
+                "ConnectionDoesNotExist" in err_str or
+                "ConnectionDoesNotExistError" in str(e) or
+                "connection was closed" in str(e).lower() or
+                "connection lost" in str(e).lower() or
+                "server closed the connection" in str(e).lower()
+            )
+            if is_connection_error:
+                try:
+                    from shared.database import get_engine
+                    await get_engine().dispose()
+                    logger.info("DB pool recycled after connection drop | msg=%s attempt=%d",
+                                msg.get("message_id", "?")[:12], attempt + 1)
+                except Exception:
+                    pass
+                # Short delay for connection errors — pool will have fresh connections
+                delay = 0.1 * (2 ** attempt)   # 0.1s, 0.2s, 0.4s, ...
+            else:
+                delay = cfg.STORE_RETRY_BASE_DELAY_S * (2 ** attempt)
+
             logger.warning("DB write attempt %d/%d failed for msg %s: %s — retry in %.1fs",
                            attempt + 1, cfg.STORE_RETRY_MAX,
                            msg.get("message_id", "?"), e, delay)
@@ -402,24 +492,22 @@ async def store_message_with_retry(msg: dict) -> bool:
 
 
 async def _publish_ai_event(user_id: str, message_id: str, thread_id: str,
-                             provider: str, event_id: str) -> None:
+                             provider: str, event_id: str,
+                             conversation_id: str = "") -> None:
     """
     Publish to ai_events stream for async automation handoff.
-    Includes automation_enabled flag so AIHandoffWorker can route to
-    draft storage vs immediate send.
+    conversation_id is passed in directly from the store transaction — zero extra DB calls.
+    automation_enabled is loaded once from a lightweight DB query (accounts table, not messages).
     """
     try:
-        # Load automation_enabled from account snapshot (L1 cache — zero DB cost on hot path)
+        # Load automation_enabled from account (one query, indexed on user_id + is_active)
         automation_enabled = True  # default: send
         try:
-            from token_cache import get_account_snapshot
             from models.email_account import EmailAccount
             from sqlalchemy import select as sa_select
             async with get_db_session() as _s:
                 _r = await _s.execute(
-                    sa_select(EmailAccount.automation_enabled, EmailAccount.id,
-                              EmailAccount.email_address, EmailAccount.daily_sent_count,
-                              EmailAccount.daily_send_limit)
+                    sa_select(EmailAccount.automation_enabled)
                     .where(EmailAccount.user_id == UUID(user_id),
                            EmailAccount.is_active == True)
                     .limit(1)
@@ -434,13 +522,14 @@ async def _publish_ai_event(user_id: str, message_id: str, thread_id: str,
         await _pub(
             cfg.TOPIC_AI_EVENTS,
             {
-                "event_id":          event_id,
-                "user_id":           user_id,
-                "message_id":        message_id,
-                "thread_id":         thread_id,
-                "provider":          provider,
+                "event_id":           event_id,
+                "user_id":            user_id,
+                "message_id":         message_id,
+                "thread_id":          thread_id,
+                "conversation_id":    conversation_id,
+                "provider":           provider,
                 "automation_enabled": automation_enabled,
-                "ts":                time.time(),
+                "ts":                 time.time(),
             },
             partition_key=user_id,
         )

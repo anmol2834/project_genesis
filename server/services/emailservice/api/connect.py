@@ -33,7 +33,14 @@ async def connect_email(body: ConnectEmailRequest, current_user: dict = Depends(
         logger.exception("Email connection failed for user %s: %s", user_id, e)
         raise HTTPException(status_code=500, detail="Email connection failed. Please try again.")
 
+    # Self-healing reconnect: reset account_state to active and is_active to True.
+    # This handles the case where the account was previously in token_revoked state
+    # (e.g. app was in testing mode, token expired after 7 days, user re-authorized).
+    # After reconnect, the full pipeline resumes automatically.
+    # CRITICAL: await this synchronously to ensure state is reset before returning
+    await _restore_account_on_reconnect(account)
     asyncio.create_task(_register_watch(account))
+
     return ConnectEmailResponse(
         status="success",
         message="Email account connected successfully",
@@ -44,6 +51,44 @@ async def connect_email(body: ConnectEmailRequest, current_user: dict = Depends(
             account_id=account.id,
         ),
     )
+
+
+async def _restore_account_on_reconnect(account) -> None:
+    """
+    Reset account_state to 'active' and is_active to True on reconnect.
+    Evicts stale Redis cache so next pipeline call reads fresh state.
+
+    This is the self-healing path: user reconnects via OAuth →
+    account_state=active → pipeline resumes → history replay catches missed emails.
+    """
+    try:
+        from models.email_account import EmailAccount
+        from sqlalchemy import update as sa_update
+        from shared.database import get_db_session
+        from token_cache import invalidate
+
+        async with get_db_session() as session:
+            await session.execute(
+                sa_update(EmailAccount)
+                .where(EmailAccount.id == account.id)
+                .values(
+                    account_state="active",
+                    is_active=True,
+                    last_error_message=None,
+                )
+            )
+            await session.commit()
+
+        # Evict stale snap from all cache layers
+        await invalidate(account.email_address)
+
+        logger.info(
+            "Account restored to active state on reconnect | email=%s",
+            account.email_address,
+        )
+    except Exception as e:
+        logger.error("Failed to restore account state on reconnect for %s: %s",
+                     account.email_address, e)
 
 
 async def _register_watch(account) -> None:

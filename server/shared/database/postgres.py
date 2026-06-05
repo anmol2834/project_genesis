@@ -41,14 +41,22 @@ def get_engine():
         if "rds.amazonaws.com" in config.DATABASE_URL:
             connect_args["ssl"] = "require"
 
+        # asyncpg-specific: set statement_timeout and command_timeout
+        # to prevent hanging queries from blocking the pool
+        connect_args["command_timeout"] = 30   # max 30s per query
+        connect_args["server_settings"] = {
+            "statement_timeout": "25000",   # 25s — slightly less than command_timeout
+            "idle_in_transaction_session_timeout": "10000",  # 10s idle-in-txn
+        }
+
         _engine = create_async_engine(
             config.DATABASE_URL,
             echo=False,
-            pool_size=15,        # was 5 — raised for concurrent webhook + task workload
-            max_overflow=10,     # was 3 — burst headroom
-            pool_timeout=10,     # was 30 — fail fast, don't queue for 30s
-            pool_pre_ping=True,  # recycle stale connections
-            pool_recycle=1800,   # prevent AWS RDS 8h idle timeout
+            pool_size=15,
+            max_overflow=10,
+            pool_timeout=10,
+            pool_pre_ping=True,
+            pool_recycle=900,    # was 1800 — recycle every 15min to prevent stale connections
             poolclass=AsyncAdaptedQueuePool,
             connect_args=connect_args,
         )

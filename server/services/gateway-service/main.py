@@ -152,6 +152,40 @@ async def root():
     }
 
 
+@app.get("/gateway/status")
+async def gateway_status():
+    """
+    Show circuit breaker state for all services.
+    Useful for debugging 503 errors.
+    """
+    from router import circuit_breaker, SERVICE_REGISTRY
+    status_map = {}
+    for svc_name in SERVICE_REGISTRY:
+        is_open = await circuit_breaker.is_open(svc_name)
+        status_map[svc_name] = {
+            "circuit_open": is_open,
+            "failures": circuit_breaker.failures.get(svc_name, 0),
+            "threshold": circuit_breaker._get_threshold(svc_name),
+            "last_failure": circuit_breaker.last_failure_time.get(svc_name, None),
+        }
+    return {"circuits": status_map}
+
+
+@app.post("/gateway/reset/{service_name}")
+async def reset_circuit(service_name: str):
+    """
+    Manually reset circuit breaker for a service.
+    Use when a service recovers but circuit is still open.
+    """
+    from router import circuit_breaker, SERVICE_REGISTRY
+    if service_name not in SERVICE_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
+    circuit_breaker.open_circuits[service_name] = False
+    circuit_breaker.failures[service_name] = 0
+    logger.info(f"Circuit breaker manually reset for {service_name}")
+    return {"success": True, "service": service_name, "message": "Circuit breaker reset"}
+
+
 # ── Catch-all route for service forwarding ───────────────────────────────────
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def gateway_router(request: Request):

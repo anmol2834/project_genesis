@@ -23,6 +23,7 @@ from fastapi.responses import PlainTextResponse
 import config as cfg
 from stream_client import publish
 from shared.cache import get_redis_client
+from gmail_history_aggregator import get_aggregator
 
 logger = logging.getLogger("emailservice.webhooks")
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -97,24 +98,18 @@ async def gmail_webhook(request: Request):
         # Generate a global event_id for end-to-end idempotency tracking
         event_id = f"gmail:{pubsub_id}"
 
+        logger.info("Gmail webhook received | email=%s historyId=%s pubsub_id=%s",
+                    email_address, history_id, pubsub_id)
+
         # Update last-seen timestamp for the heartbeat watchdog
         asyncio.create_task(_touch_account_heartbeat(email_address))
 
-        # Enqueue to stream — this is the ONLY thing the webhook does
-        await _enqueue(
-            cfg.TOPIC_GMAIL_RAW,
-            {
-                "event_id":     event_id,
-                "pubsub_id":    pubsub_id,
-                "email_address": email_address,
-                "history_id":   history_id,
-                "publish_time": message.get("publishTime", ""),
-                "enqueued_at":  time.time(),
-            },
-            partition_key=email_address,
-        )
+        # PRODUCTION FIX: Use aggregator instead of direct XADD
+        # This solves the event storm problem by coalescing notifications
+        aggregator = get_aggregator()
+        await aggregator.ingest(email_address, history_id, pubsub_id)
 
-        logger.debug("Gmail webhook enqueued | email=%s historyId=%s event_id=%s",
+        logger.debug("Gmail webhook aggregated | email=%s historyId=%s event_id=%s",
                      email_address, history_id, event_id)
         return {"status": "accepted", "event_id": event_id}
 

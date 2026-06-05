@@ -1,5 +1,6 @@
 """
-Redis Connection Module — Upstash-compatible (rediss:// SSL)
+Redis Connection Module — Upstash TCP/TLS (rediss://)
+All services use REDIS_URL from .env — single source of truth.
 """
 import redis.asyncio as redis
 from redis.asyncio.connection import ConnectionPool
@@ -13,20 +14,20 @@ logger = logging.getLogger(__name__)
 _redis_pool:   Optional[ConnectionPool] = None
 _redis_client: Optional[redis.Redis]    = None
 _init_lock = asyncio.Lock()
+_initialized_url: Optional[str] = None   # track which URL was used
 
 
 def _build_pool_sync(url: str, max_connections: int = 20) -> ConnectionPool:
     """
     Build connection pool from the given Redis URL.
-    rediss:// → SSL is handled automatically by redis-py from the URL scheme.
-    Do NOT pass ssl=True separately — it conflicts with the URL-based SSL setup.
+    rediss:// → SSL handled automatically by redis-py from the URL scheme.
     """
     return ConnectionPool.from_url(
         url,
         encoding="utf-8",
         decode_responses=True,
-        max_connections=20,
-        socket_timeout=15,           # must be > XREADGROUP block time (8s) + network headroom
+        max_connections=max_connections,
+        socket_timeout=15,
         socket_connect_timeout=10,
         socket_keepalive=True,
         retry_on_timeout=True,
@@ -36,45 +37,43 @@ def _build_pool_sync(url: str, max_connections: int = 20) -> ConnectionPool:
 async def init_redis(url: Optional[str] = None) -> bool:
     """
     Initialise Redis connection pool.
-
-    Args:
-        url: Override Redis URL. If None, uses REDIS_STREAMS_URL (if set) or
-             REDIS_URL from config. Pass explicitly when a service needs a
-             specific Redis instance (e.g. emailservice → Upstash Streams).
+    Always uses REDIS_URL from config — the single source of truth.
+    The url parameter is accepted for backward compat but REDIS_URL always wins.
     """
-    global _redis_pool, _redis_client
+    global _redis_pool, _redis_client, _initialized_url
     async with _init_lock:
         if _redis_client is not None:
             return True
+        # Always use REDIS_URL from config — never use system env vars directly
         cfg = get_config()
-        # Resolution order: explicit arg → REDIS_STREAMS_URL (if caller is emailservice)
-        # → REDIS_URL (shared default)
-        resolved_url = url or cfg.REDIS_URL
+        resolved_url = cfg.REDIS_URL   # single source of truth
         for attempt in range(3):
             try:
                 _redis_pool   = _build_pool_sync(resolved_url, 20)
                 _redis_client = redis.Redis(connection_pool=_redis_pool)
-                await asyncio.wait_for(_redis_client.ping(), timeout=8.0)
-                logger.info("Redis initialised successfully (url=%s)", resolved_url[:40])
+                await asyncio.wait_for(_redis_client.ping(), timeout=10.0)
+                _initialized_url = resolved_url
+                logger.info("Redis connected | url=%s", resolved_url[:60])
                 return True
             except asyncio.TimeoutError:
                 logger.warning("Redis init timeout (attempt %d/3)", attempt + 1)
+                _redis_pool = _redis_client = None
             except Exception as e:
                 logger.warning("Redis init failed (attempt %d/3): %s", attempt + 1, e)
+                _redis_pool = _redis_client = None
             if attempt < 2:
                 await asyncio.sleep(1)
-        logger.error("Redis unavailable after 3 attempts — starting without Redis cache")
-        _redis_pool = _redis_client = None
+        logger.error("Redis unavailable after 3 attempts — url=%s", resolved_url[:60])
         return False
 
 
 def get_redis_client() -> redis.Redis:
     global _redis_client, _redis_pool
     if _redis_client is None:
-        url = get_config().REDIS_URL
+        url = get_config().REDIS_URL   # always REDIS_URL — single source of truth
         _redis_pool   = _build_pool_sync(url, 10)
         _redis_client = redis.Redis(connection_pool=_redis_pool)
-        logger.info("Redis fallback client created")
+        logger.info("Redis client created | url=%s", url[:60])
     return _redis_client
 
 

@@ -130,8 +130,8 @@ _subtype_embeddings: Dict[str, Dict[str, np.ndarray]] = {}
 def _get_model():
     global _model
     if _model is None:
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("intfloat/e5-base-v2")
+        from services.ingestion.model_singleton import get_shared_model
+        _model = get_shared_model()
         logger.info("Classifier: e5-base-v2 loaded")
     return _model
 

@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+import asyncio
 import sys
 import os
 
@@ -43,12 +44,34 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Qdrant collection init failed (non-fatal): {e}")
 
+    # Pre-warm the e5-base-v2 model in background so first upload is fast
+    # Without this, the first file upload triggers a ~30s model load which
+    # causes the gateway to time out and open the circuit breaker.
+    asyncio.create_task(_warmup_ml_model())
+
     logger.info("User Service started successfully")
     yield
     logger.info("User Service shutting down...")
     await close_database()
     await close_redis()
     logger.info("User Service shut down successfully")
+
+
+async def _warmup_ml_model() -> None:
+    """
+    Pre-load the e5-base-v2 model at startup.
+    Runs in background — doesn't block startup.
+    Without this, the first upload request triggers model loading (~30s),
+    causing the gateway to time out and open the circuit breaker.
+    """
+    import asyncio
+    await asyncio.sleep(2)  # let startup complete first
+    try:
+        from services.ingestion.model_singleton import get_shared_model
+        await asyncio.to_thread(get_shared_model)
+        logger.info("ML model (e5-base-v2) pre-warmed successfully")
+    except Exception as e:
+        logger.warning(f"ML model warmup failed (non-fatal): {e}")
 
 
 app = FastAPI(

@@ -137,6 +137,9 @@ async def run_file_pipeline(
     entry_ids = await _insert_entries_pg(payloads, source_id, user_id, source_type, session)
 
     # ── Step 6: Qdrant embed + upsert (enterprise payload) ────────────────
+    # NOTE: upsert_entries runs in a thread and takes ~20s for 100 rows.
+    # The pipeline session connection may be recycled by the pool during this
+    # time. _update_qdrant_ids opens its OWN fresh session to avoid this.
     qdrant_payloads = [
         {**p, "entry_id": eid, "source_id": source_id, "updated_at": datetime.utcnow().isoformat()}
         for p, eid in zip(payloads, entry_ids)
@@ -144,12 +147,14 @@ async def run_file_pipeline(
     qdrant_point_ids = await asyncio.to_thread(upsert_entries, qdrant_payloads, user_id)
 
     # ── Step 7: Store Qdrant point IDs back in Postgres ───────────────────
+    # Opens its own fresh session — avoids stale connection after long upsert
     await _update_qdrant_ids(entry_ids, qdrant_point_ids, session)
 
     # ── Step 8: Update source stats ───────────────────────────────────────
+    # Opens its own fresh session — same reason
     await _update_source_stats(source_id, len(payloads), payloads, session)
 
-    # Commit everything before scheduling analytics (analytics opens its own session)
+    # Commit the pipeline session (covers _insert_entries_pg flush)
     await session.commit()
 
     # ── Step 9: Compute + store analytics object in Qdrant ────────────────
@@ -409,13 +414,39 @@ async def _update_qdrant_ids(
     qdrant_point_ids: List[str],
     session,
 ) -> None:
+    """
+    Write Qdrant point IDs back to PostgreSQL.
+
+    Opens a FRESH session instead of reusing the pipeline session.
+    The pipeline session may have its underlying asyncpg connection recycled
+    by the pool during the long upsert_entries() call (~20s for 100 rows).
+    Reusing a recycled connection causes InterfaceError: connection is closed.
+    """
+    import uuid as _uuid
+    from shared.database import get_db_session
     from models.data_entry import UserDataEntry
-    for entry_id, point_id in zip(entry_ids, qdrant_point_ids):
-        await session.execute(
-            update(UserDataEntry)
-            .where(UserDataEntry.id == entry_id)
-            .values(qdrant_point_id=point_id)
-        )
+
+    if not entry_ids or not qdrant_point_ids:
+        return
+
+    try:
+        async with get_db_session() as fresh_session:
+            for entry_id, point_id in zip(entry_ids, qdrant_point_ids):
+                try:
+                    eid = _uuid.UUID(entry_id) if isinstance(entry_id, str) else entry_id
+                except ValueError:
+                    logger.warning(f"Invalid UUID for entry_id: {entry_id}")
+                    continue
+                await fresh_session.execute(
+                    update(UserDataEntry)
+                    .where(UserDataEntry.id == eid)
+                    .values(qdrant_point_id=point_id, updated_at=datetime.utcnow())
+                )
+            await fresh_session.commit()
+        logger.info(f"Qdrant IDs written back for {len(entry_ids)} entries")
+    except Exception as e:
+        # Non-fatal: Qdrant IDs are cosmetic — data is already in Qdrant
+        logger.error(f"_update_qdrant_ids failed (non-fatal): {e}", exc_info=True)
 
 
 async def _update_source_stats(
@@ -424,19 +455,37 @@ async def _update_source_stats(
     payloads: List[Dict[str, Any]],
     session,
 ) -> None:
+    """
+    Update source stats. Uses a fresh session to avoid stale connection issues
+    after the long upsert_entries() call.
+    """
+    import uuid as _uuid
+    from shared.database import get_db_session
     from models.data_entry import UserDataSource, IngestionStatus
-    result = await session.execute(
-        select(UserDataSource).where(UserDataSource.id == source_id)
-    )
-    source = result.scalar_one_or_none()
-    if not source:
-        return
+
     ai_ready = sum(1 for p in payloads if p.get("quality_score", 0) >= 75)
-    source.total_records    = (source.total_records or 0) + new_count
-    source.ai_ready_count   = (source.ai_ready_count or 0) + ai_ready
-    source.last_sync_at     = datetime.utcnow()
-    source.ingestion_status = IngestionStatus.completed
-    source.status           = "active"
+
+    try:
+        async with get_db_session() as fresh_session:
+            try:
+                sid = _uuid.UUID(source_id) if isinstance(source_id, str) else source_id
+            except ValueError:
+                logger.warning(f"Invalid UUID for source_id: {source_id}")
+                return
+            result = await fresh_session.execute(
+                select(UserDataSource).where(UserDataSource.id == sid)
+            )
+            source = result.scalar_one_or_none()
+            if not source:
+                return
+            source.total_records    = (source.total_records or 0) + new_count
+            source.ai_ready_count   = (source.ai_ready_count or 0) + ai_ready
+            source.last_sync_at     = datetime.utcnow()
+            source.ingestion_status = IngestionStatus.completed
+            source.status           = "active"
+            await fresh_session.commit()
+    except Exception as e:
+        logger.error(f"_update_source_stats failed (non-fatal): {e}", exc_info=True)
 
 
 async def _compute_and_store_analytics(

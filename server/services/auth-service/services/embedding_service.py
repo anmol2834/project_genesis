@@ -1,10 +1,12 @@
 """
 Embedding Service
-Generates and stores user context embeddings in Qdrant
-Model: all-MiniLM-L6-v2 (384-dim vectors)
+Generates and stores user context embeddings in Qdrant.
+Model: nomic-embed-text via Ollama (dim=384, Cosine)
+
+Falls back to all-MiniLM-L6-v2 (SentenceTransformers) if Ollama is unavailable.
+Both produce dim=384 — Qdrant collection stays consistent.
 """
 
-from sentence_transformers import SentenceTransformer
 from typing import Dict, List
 import logging
 import sys
@@ -18,14 +20,43 @@ from shared.config import get_config
 logger = logging.getLogger(__name__)
 config = get_config()
 
-_model = None
+_OLLAMA_BASE_URL  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+_EMBED_MODEL      = "nomic-embed-text"
+_EMBED_DIM        = 768
+
+# SentenceTransformers fallback — must also be dim=768
+_st_model = None
 
 
-def get_embedding_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        _model = SentenceTransformer('all-MiniLM-L6-v2')
-    return _model
+def _embed_text(text: str) -> List[float]:
+    """
+    Embed text using nomic-embed-text via Ollama (dim=768).
+    Falls back to all-mpnet-base-v2 (SentenceTransformers, dim=768) if Ollama unavailable.
+    """
+    # Primary: Ollama nomic-embed-text
+    try:
+        import httpx
+        resp = httpx.post(
+            f"{_OLLAMA_BASE_URL}/api/embeddings",
+            json={"model": _EMBED_MODEL, "prompt": text[:512]},
+            timeout=10.0,
+        )
+        if resp.status_code == 200:
+            vec = resp.json().get("embedding", [])
+            if vec and len(vec) == _EMBED_DIM:
+                return vec
+            elif vec:
+                logger.warning("nomic-embed-text returned dim=%d, expected %d", len(vec), _EMBED_DIM)
+    except Exception as e:
+        logger.debug("Ollama embed unavailable (%s) — using SentenceTransformers fallback", e)
+
+    # Fallback: all-mpnet-base-v2 (dim=768, matches nomic-embed-text)
+    global _st_model
+    if _st_model is None:
+        from sentence_transformers import SentenceTransformer
+        _st_model = SentenceTransformer("all-mpnet-base-v2")
+        logger.info("Embedding fallback: all-mpnet-base-v2 loaded (dim=768)")
+    return _st_model.encode(text).tolist()
 
 
 def create_embedding_chunks(user_data: Dict) -> List[Dict]:
@@ -77,7 +108,6 @@ def generate_user_embeddings(user_id: str, user_data: Dict) -> bool:
     Returns True on success, False on any failure.
     """
     try:
-        model = get_embedding_model()
         chunks = create_embedding_chunks(user_data)
 
         # Ensure collection exists before upserting
@@ -90,7 +120,7 @@ def generate_user_embeddings(user_id: str, user_data: Dict) -> bool:
         vectors = [
             {
                 "id": f"{user_id}_{chunk['type']}",
-                "vector": model.encode(chunk["content"]).tolist(),
+                "vector": _embed_text(chunk["content"]),
                 "payload": {
                     "user_id": user_id,
                     "type": chunk["type"],

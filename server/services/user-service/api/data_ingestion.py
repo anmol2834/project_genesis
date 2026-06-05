@@ -182,7 +182,9 @@ async def _run_file_pipeline_bg(
                 source_type=source_type, session=session,
                 forced_category=forced_category,
             )
-            await session.commit()
+            # run_file_pipeline already calls session.commit() internally.
+            # Do NOT call commit() again here — it would operate on a
+            # closed/recycled connection and raise InterfaceError.
             logger.info(f"File pipeline done: {result['accepted']} accepted, {result['rejected']} rejected")
     except Exception as e:
         logger.error(f"File pipeline failed for source {source_id}: {e}", exc_info=True)
@@ -358,7 +360,7 @@ async def _run_sheets_pipeline_bg(source_id: str, user_id: str, rows: list) -> N
                 source_id=source_id, user_id=user_id,
                 source_type="google_sheets", session=session,
             )
-            await session.commit()
+            # run_file_pipeline already commits internally — do NOT commit again
             logger.info(f"Sheets webhook pipeline done: {result['accepted']} accepted")
     except Exception as e:
         logger.error(f"Sheets pipeline failed for source {source_id}: {e}", exc_info=True)

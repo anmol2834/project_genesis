@@ -45,8 +45,8 @@ _model = None
 def _get_model():
     global _model
     if _model is None:
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("intfloat/e5-base-v2")
+        from services.ingestion.model_singleton import get_shared_model
+        _model = get_shared_model()
         logger.info("Embedding service: e5-base-v2 loaded")
     return _model
 
@@ -127,6 +127,12 @@ def upsert_entries(entries: List[Dict[str, Any]], user_id: str) -> List[str]:
         point_ids.append(qdrant_id)
 
         # ── Enterprise payload ────────────────────────────────────────────
+        # Build RIE tags from structured_data + attributes
+        _attrs = entry.get("attributes") or {}
+        _struct = entry.get("structured_data") or {}
+        _merged = {**_attrs, **_struct}
+        _rie_tags = _build_rie_tags(entry, _merged)
+
         to_upsert.append(PointStruct(
             id=qdrant_id,
             vector=emb_vector,
@@ -153,7 +159,6 @@ def upsert_entries(entries: List[Dict[str, Any]], user_id: str) -> List[str]:
                 "keywords":       entry.get("keywords") or [],
 
                 # Typed attributes for filterable search (price, stock, supplier, etc.)
-                # Now includes: email, phone, working_hours, department, valid_until, description
                 "attributes":     entry.get("attributes") or {},
 
                 # Full structured data — preserved for LLM context (Phase 2 schema)
@@ -169,6 +174,17 @@ def upsert_entries(entries: List[Dict[str, Any]], user_id: str) -> List[str]:
 
                 # Timestamp (ISO string)
                 "updated_at":     entry.get("updated_at") or "",
+
+                # ── RIE Data Tags (Phase 2) ───────────────────────────────
+                # These power the Relevance Intelligence Engine filter.
+                # type: "product" | "service" | "software" | "contact" | "offer"
+                "rie_type":                  _rie_tags["type"],
+                # capabilities: list of use-case strings this item supports
+                "rie_capabilities":          _rie_tags["capabilities"],
+                # supports_customization: True if item can be customized
+                "rie_supports_customization": _rie_tags["supports_customization"],
+                # is_physical_product: True if item is a physical product (not software/service)
+                "rie_is_physical_product":   _rie_tags["is_physical_product"],
             },
         ))
 
@@ -259,6 +275,102 @@ def delete_source_entries(user_id: str, source_id: str) -> int:
     except Exception as exc:
         logger.error(f"Qdrant delete_source_entries failed: {exc}", exc_info=True)
         return 0
+
+
+# ── RIE Data Tags Builder (Phase 2) ──────────────────────────────────────────
+
+_CAPABILITY_PATTERNS = [
+    ("crop monitoring",             ["crop", "agriculture", "farm", "agri", "irrigation", "harvest"]),
+    ("delivery",                    ["deliver", "delivery", "package", "parcel", "logistics", "courier"]),
+    ("aerial mapping",              ["map", "mapping", "survey", "terrain", "topograph"]),
+    ("infrastructure inspection",   ["inspect", "inspection", "infrastructure", "bridge", "tower", "pipeline"]),
+    ("security surveillance",       ["security", "surveillance", "patrol", "guard", "watch"]),
+    ("search and rescue",           ["search", "rescue", "emergency", "disaster"]),
+    ("photography",                 ["photo", "photograph", "film", "video", "cinema", "media"]),
+    ("racing",                      ["race", "racing", "sport", "fpv", "freestyle"]),
+    ("fleet management",            ["fleet", "manage", "track", "gps", "telematics", "route"]),
+    ("training",                    ["train", "training", "learn", "course", "education"]),
+]
+
+_PHYSICAL_KEYWORDS = {
+    "drone", "uav", "aircraft", "hardware", "device", "equipment", "machine",
+    "robot", "vehicle", "unit", "sensor", "camera", "battery", "motor", "frame",
+    "propeller", "controller", "transmitter", "receiver", "gimbal",
+}
+_SOFTWARE_KEYWORDS = {
+    "software", "app", "application", "platform", "dashboard", "saas",
+    "subscription", "license", "api", "sdk", "plugin", "module", "system",
+}
+_SERVICE_KEYWORDS = {
+    "service", "support", "maintenance", "repair", "warranty", "consulting",
+    "training", "installation", "integration", "deployment", "managed",
+}
+_CUSTOMIZATION_KEYWORDS = {
+    "custom", "customiz", "bespoke", "tailor", "specific", "special",
+    "modify", "modif", "configure", "personaliz",
+}
+
+
+def _build_rie_tags(entry: dict, merged_data: dict) -> dict:
+    """
+    Build RIE data tags for a Qdrant payload entry.
+
+    Analyzes entry content to determine:
+      - type: "product" | "service" | "software" | "contact" | "offer"
+      - capabilities: list of use-case strings
+      - supports_customization: bool
+      - is_physical_product: bool
+
+    These tags power the Relevance Intelligence Engine filter in automationservice.
+    """
+    # Build searchable text from all fields
+    text_parts = [
+        str(entry.get("title") or ""),
+        str(entry.get("search_text") or ""),
+        str(merged_data.get("description") or ""),
+        str(merged_data.get("name") or ""),
+        str(merged_data.get("features") or ""),
+        str(merged_data.get("capabilities") or ""),
+        str(merged_data.get("use_cases") or ""),
+        str(entry.get("category") or ""),
+        str(entry.get("subtype") or ""),
+    ]
+    text = " ".join(t for t in text_parts if t).lower()
+
+    # Determine type
+    category = str(entry.get("category") or "").lower()
+    if category in ("contact_support", "contact", "support_contact"):
+        rie_type = "contact"
+    elif any(w in text for w in _SOFTWARE_KEYWORDS):
+        rie_type = "software"
+    elif any(w in text for w in _SERVICE_KEYWORDS) and not any(w in text for w in _PHYSICAL_KEYWORDS):
+        rie_type = "service"
+    elif any(w in text for w in _PHYSICAL_KEYWORDS):
+        rie_type = "product"
+    else:
+        rie_type = "product"  # default
+
+    # Detect capabilities
+    capabilities: list[str] = []
+    for cap_name, keywords in _CAPABILITY_PATTERNS:
+        if any(kw in text for kw in keywords):
+            capabilities.append(cap_name)
+
+    # Detect customization support
+    supports_customization = any(kw in text for kw in _CUSTOMIZATION_KEYWORDS)
+
+    # Detect physical product
+    is_physical_product = (
+        rie_type == "product" and
+        any(w in text for w in _PHYSICAL_KEYWORDS)
+    )
+
+    return {
+        "type":                  rie_type,
+        "capabilities":          capabilities,
+        "supports_customization": supports_customization,
+        "is_physical_product":   is_physical_product,
+    }
 
 
 # ── Deduplication ─────────────────────────────────────────────────────────────
