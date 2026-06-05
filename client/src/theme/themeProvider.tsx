@@ -36,12 +36,10 @@ function getInitialMode(): ThemeMode {
 
 export function AppThemeProvider({ children }: { children: React.ReactNode }) {
   const [mode, setModeState] = useState<ThemeMode>('light');
-  const [mounted, setMounted] = useState(false);
 
   // Hydrate from localStorage / system preference after mount
   useEffect(() => {
     setModeState(getInitialMode());
-    setMounted(true);
   }, []);
 
   // Sync system preference changes
@@ -68,9 +66,6 @@ export function AppThemeProvider({ children }: { children: React.ReactNode }) {
   const theme = useMemo(() => buildTheme(mode), [mode]);
 
   const ctx = useMemo(() => ({ mode, toggleTheme, setMode }), [mode, toggleTheme, setMode]);
-
-  // Prevent flash of wrong theme — render children only after hydration
-  if (!mounted) return null;
 
   return (
     <ThemeContext.Provider value={ctx}>
