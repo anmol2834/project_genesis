@@ -7,14 +7,14 @@
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 python-multipart==0.0.6
-pydantic==2.5.3
+pydantic==2.10.0
 pydantic-settings==2.1.0
 
 # ── Database Drivers ────────────────────────────────────────────────────────
 # PostgreSQL
-sqlalchemy==2.0.25
-asyncpg==0.29.0
-psycopg2-binary==2.9.9
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.12
 
 # MongoDB
 motor==3.3.2
@@ -22,7 +22,7 @@ pymongo==4.6.1
 
 # ── Redis & Caching ─────────────────────────────────────────────────────────
 redis==5.0.1
-hiredis==2.3.2
+hiredis==3.1.0
 
 # ── Celery & Task Queue ─────────────────────────────────────────────────────
 celery==5.3.6
@@ -30,13 +30,16 @@ kombu==5.3.5
 
 # ── HTTP Client ─────────────────────────────────────────────────────────────
 httpx==0.26.0
-aiohttp==3.9.1
+aiohttp==3.11.0
 
 # ── Authentication & Security ───────────────────────────────────────────────
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
 cryptography==42.0.0
+
+# ── Email Validation ────────────────────────────────────────────────────────
+email-validator==2.3.0
 
 # ── Utilities ───────────────────────────────────────────────────────────────
 python-dotenv==1.0.0
@@ -61,23 +64,17 @@ mypy==1.8.0
 openai>=1.30.0
 
 # ── Vector Database & ML ────────────────────────────────────────────────────
-qdrant-client==1.7.0
-# sentence-transformers 2.2.2 is incompatible with huggingface_hub >= 0.17.0
-# (cached_download was removed). 2.7.0 is the minimum version that works with
-# huggingface_hub 0.26.x, torch 2.1.2, and transformers 4.36.2.
-sentence-transformers==2.7.0
-torch==2.1.2
-transformers==4.36.2
-# tokenizers must stay < 0.19 — transformers 4.36.2 requires tokenizers<0.19,>=0.14
-# tokenizers >= 0.16 writes tokenizer.json with list-of-lists merges format that
-# tokenizers 0.15.x cannot read. Pin to 0.15.2 which matches the cached model format.
-tokenizers==0.15.2
-# huggingface_hub must be >= 0.17.0 (cached_download removed) and compatible with
-# sentence-transformers 2.7.0 and transformers 4.36.2
-huggingface_hub>=0.20.0,<0.27.0
-# numpy must stay < 2.0 — torch 2.1.2 is not numpy 2.x compatible
-numpy>=1.24.0,<2.0.0
+qdrant-client==1.7.1
+# Python 3.13 compatible ML stack
+# torch 2.6.0 is the minimum with a prebuilt cp313 wheel on Windows
+sentence-transformers==3.2.0
+torch==2.6.0
+transformers==4.47.0
+# tokenizers 0.21.0 uses stable abi3 wheel (cp39-abi3), works on Python 3.13+
+# transformers 4.47.0 requires tokenizers>=0.21,<0.22
+tokenizers==0.21.0
+huggingface_hub>=0.26.0
+# numpy 2.x is compatible with torch 2.6.0+
+numpy>=1.26.0,<3.0.0
 # Required by sentence-transformers cosine similarity utilities
 scipy>=1.11.0
-# NLI model used by intent engine: cross-encoder/nli-distilroberta-base (190MB, cached)
-# If tokenizer.json fails with 'ModelWrapper' error, run: python server/_fix_tokenizer.py

@@ -3,4 +3,5 @@
 # sentence-transformers, torch, python-jose, bcrypt) are in the base images.
 # Add any auth-specific extras here.
 
-# Currently no extras needed — all deps covered by base-ml image
+# email-validator required by pydantic EmailStr in schemas/auth.py
+email-validator==2.3.0
