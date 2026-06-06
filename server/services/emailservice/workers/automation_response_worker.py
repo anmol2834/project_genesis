@@ -63,44 +63,50 @@ class AutomationResponseWorker(BaseWorker):
         response_text = response.get("response_text", "")
         confidence = response.get("confidence", 0.0)
         send_email = response.get("send_email", False)
+        trace_id = response.get("trace_id", "")
         
         logger.info(
-            f"Automation response received | conv={conversation_id[:12]} "
-            f"action={action} confidence={confidence:.2f} send={send_email}"
+            "response_generated | conv=%s action=%s confidence=%.2f send_email=%s",
+            conversation_id[:12], action, confidence, send_email
         )
-        
-        if action == "send" and send_email:
-            # Send email reply
+
+        # ENTERPRISE RULE: send_email=True means the customer MUST receive the
+        # AI-generated response regardless of whether escalation also fires.
+        # response_decision and escalation_decision are INDEPENDENT.
+        if send_email and response_text:
             await self._send_email_reply(
                 conversation_id=conversation_id,
                 message_id=message_id,
                 user_id=user_id,
                 response_text=response_text,
-                trace_id=response.get("trace_id", "")
+                trace_id=trace_id,
             )
-        
-        elif action == "draft":
-            # Save as draft for human review
-            await self._save_draft(
-                conversation_id=conversation_id,
-                message_id=message_id,
-                user_id=user_id,
-                response_text=response_text,
-                confidence=confidence
-            )
-        
-        elif action == "escalate":
-            # Create escalation ticket
+            logger.info("response_sent | conv=%s action=%s", conversation_id[:12], action)
+        elif not send_email:
+            logger.info("response_blocked | conv=%s action=%s send_email=False", conversation_id[:12], action)
+
+        if action == "escalate":
+            # Escalation is PARALLEL to response delivery — never a replacement.
             await self._create_escalation(
                 conversation_id=conversation_id,
                 message_id=message_id,
                 user_id=user_id,
                 reason=response.get("escalation_reason", "unknown"),
-                priority=response.get("escalation_priority", "medium")
+                priority=response.get("escalation_priority", "medium"),
             )
-        
-        else:
-            logger.warning(f"Unknown action: {action}")
+            logger.info(
+                "escalation_created | conv=%s reason=%s",
+                conversation_id[:12], response.get("escalation_reason", "unknown")
+            )
+
+        elif action == "draft":
+            await self._save_draft(
+                conversation_id=conversation_id,
+                message_id=message_id,
+                user_id=user_id,
+                response_text=response_text,
+                confidence=confidence,
+            )
     
     async def _send_email_reply(
         self,

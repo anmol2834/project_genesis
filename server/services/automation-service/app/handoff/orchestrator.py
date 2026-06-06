@@ -89,12 +89,19 @@ class HandoffOrchestrator:
             )
 
             if escalation["should_escalate"]:
+                # ENTERPRISE: escalation and response delivery are INDEPENDENT decisions.
+                # A customer MUST always receive an acknowledgement — even during escalation.
+                # send_response=True means: deliver the AI-generated acknowledgement to the customer.
+                # escalate=True means: also notify the human team.
+                # These are not mutually exclusive.
                 return {
                     "action":             "escalate",
                     "final_confidence":   final_confidence,
                     "escalation_reason":  escalation["reason"],
                     "escalation_priority": escalation["priority"],
-                    "should_send":        False,
+                    "should_send":        True,   # always send acknowledgement to customer
+                    "send_response":      True,   # explicit flag: deliver the response
+                    "escalate":           True,   # explicit flag: notify human team
                     "priority":           Priority.label(priority),
                 }
 

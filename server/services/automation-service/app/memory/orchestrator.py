@@ -149,6 +149,10 @@ class MemoryOrchestrator:
                 "last_retrieval_confidence":   retrieval_mem.get("last_retrieval_confidence", 0.0),
                 "last_retrieval_layers":       retrieval_mem.get("last_retrieval_layers", []),
                 "retrieval_reuse_count":       retrieval_mem.get("retrieval_reuse_count", 0),
+                # Discovery context cache — analytics chunks from previous discovery turn
+                # loaded here so _inject_analytics_if_needed can serve cache-first
+                "discovery_context":           retrieval_mem.get("discovery_context", []),
+                "catalog_summary_cached":      retrieval_mem.get("catalog_summary_cached", False),
 
                 # Tier 4 — Response Memory (repetition prevention)
                 "already_shared_entities":     retrieval_mem.get("already_shared_entities", []),
@@ -365,6 +369,17 @@ class MemoryOrchestrator:
                 "last_retrieval_confidence":  retrieval_conf,
                 "last_retrieval_layers":      layers_used,
                 "retrieval_reuse_count":      old_ret.get("retrieval_reuse_count", 0) + (1 if ret_dict.get("cache_hit") else 0),
+                # Discovery context cache — persist analytics chunks for reuse on continuation turns.
+                # _inject_analytics_if_needed sets _analytics_chunks on the first discovery turn;
+                # we store them here so subsequent turns skip Qdrant entirely.
+                "discovery_context":          (
+                    ret_dict.get("_analytics_chunks")
+                    or old_ret.get("discovery_context", [])
+                ),
+                "catalog_summary_cached":     bool(
+                    ret_dict.get("_analytics_chunks")
+                    or old_ret.get("catalog_summary_cached", False)
+                ),
                 # Tier 4
                 "already_shared_entities":    merged_ents,
                 "already_shared_products":    merged_prods,
@@ -699,6 +714,7 @@ def _empty_memory(user_id: str, conversation_id: str, thread_id: str, error: str
         "already_shared_chunks": [], "retrieval_cache_keys": [],
         "last_retrieval_confidence": 0.0, "last_retrieval_layers": [],
         "retrieval_reuse_count": 0,
+        "discovery_context": [], "catalog_summary_cached": False,
         "already_shared_entities": [], "already_shared_products": [],
         "pricing_already_shared": [], "support_info_shared": [], "last_response_summary": "",
         "active_topics": [], "active_topic": "", "semantic_topic_cluster": [],

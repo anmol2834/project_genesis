@@ -167,6 +167,24 @@ class ExecutionEngine:
         ctx.layer_results["memory"] = memory
 
         # ── Stage 2: Intelligence ─────────────────────────────────────────
+        # Pre-filter: skip transactional/automated emails before calling Brain #1
+        if self._is_transactional_email(event):
+            logger.info(
+                "Transactional email filtered | from=%s subject=%s",
+                getattr(event, "from_email", "")[:40],
+                getattr(event, "subject", "")[:60],
+                trace_id=ctx.trace_id,
+            )
+            return {
+                "memory": memory, "intelligence": None, "retrieval": {},
+                "llm_result": {"response_text": "", "confidence": 1.0},
+                "decision": {"action": "skip", "should_send": False,
+                             "final_confidence": 1.0, "escalation_reason": None,
+                             "escalation_priority": None},
+                "response_filter": None, "pipeline_trace": {}, "priority": {},
+                "security": {},
+            }
+
         recorder.stage_start("intelligence")
         try:
             intelligence = await intelligence_orch.understand_intent(
@@ -269,17 +287,16 @@ class ExecutionEngine:
         ctx.set_state(ExecutionState.RETRIEVAL_COMPLETED)
         ctx.layer_results["retrieval"] = retrieval
 
-        # ── Stage 3.5: Analytics Fallback ────────────────────────────────
-        # When retrieval returns no meaningful chunks (empty or low confidence)
-        # AND the intent is generic (greeting, follow_up, general_inquiry, unknown),
-        # fetch data_analytics chunks so Brain #2 can generate grounded example
-        # questions from real business catalogue data instead of hallucinating.
-        # This runs AT MOST ONCE per message and only when truly needed.
+        # ── Stage 3.5: Analytics Fallback (cache-first, Qdrant-second) ──
+        # For discovery/greeting intents, inject analytics context so Brain #2
+        # has real business facts. Reads from memory cache first — Qdrant only
+        # on the first discovery turn. Subsequent turns reuse the cache.
         retrieval = await self._inject_analytics_if_needed(
             retrieval=retrieval,
             intelligence=intelligence,
             user_id=ctx.user_id,
             trace_id=ctx.trace_id,
+            memory=memory,
         )
 
         # ── Stage 4: LLM Generation ───────────────────────────────────────
@@ -389,29 +406,23 @@ class ExecutionEngine:
         intelligence: Any,
         user_id: str,
         trace_id: str,
+        memory: Optional[Dict] = None,
     ) -> Dict:
         """
-        Fetch data_analytics chunks from Qdrant and inject them into retrieval
-        when the message is generic (greeting/follow_up/unknown intent) OR when
-        normal retrieval returned no usable chunks.
+        Inject data_analytics context for generic/discovery intents.
 
-        Rules:
-        - Only triggers when chunks == [] OR retrieval_confidence < 0.3
-        - Only for low-specificity intents: follow_up, general_inquiry, greeting, unknown
-        - Runs at most once per message (guarded by _analytics_injected flag in retrieval)
-        - Analytics chunks are tagged with retrieval_layer="L_ANALYTICS" for observability
+        Cache-first: if memory already holds a discovery_context from a
+        previous turn, rebuild analytics chunks from it without hitting
+        Qdrant at all (zero extra I/O on continuations).
 
-        This gives Brain #2 real business context to generate grounded example
-        questions instead of generic "I don't have that information" responses.
+        Qdrant fetch only: first discovery message per conversation thread.
         """
-        # Already injected or normal retrieval succeeded — skip
         if retrieval.get("_analytics_injected"):
             return retrieval
 
         existing_chunks = retrieval.get("chunks", [])
         conf = retrieval.get("retrieval_confidence", 0.0)
 
-        # Determine if this is a generic/greeting intent
         generic_intents = {"follow_up", "general_inquiry", "greeting", "unknown", "follow-up"}
         intent_str = "unknown"
         if hasattr(intelligence, "primary_intents") and intelligence.primary_intents:
@@ -419,14 +430,38 @@ class ExecutionEngine:
             intent_str = (t.value if hasattr(t, "value") else str(t)).lower()
 
         needs_analytics = (
-            not existing_chunks                    # retrieval found nothing
-            or conf < 0.30                         # very low confidence
-            or intent_str in generic_intents       # generic/greeting message
+            not existing_chunks
+            or conf < 0.30
+            or intent_str in generic_intents
         )
 
         if not needs_analytics:
             return retrieval
 
+        # ── CACHE-FIRST: reuse discovery_context stored by a previous turn ─
+        mem = memory or {}
+        cached_discovery = mem.get("discovery_context")
+        if cached_discovery and isinstance(cached_discovery, list) and cached_discovery:
+            logger.info(
+                "discovery_mode_triggered | analytics_cache_hit=True "
+                "intent=%s chunks_from_cache=%d",
+                intent_str, len(cached_discovery),
+                trace_id=trace_id,
+            )
+            retrieval = dict(retrieval)
+            retrieval["chunks"] = cached_discovery + existing_chunks
+            retrieval["_analytics_injected"] = True
+            retrieval["_analytics_from_cache"] = True
+            retrieval["retrieval_confidence"] = max(conf, 0.45)
+            if "L_ANALYTICS" not in retrieval.get("layers_used", []):
+                retrieval["layers_used"] = retrieval.get("layers_used", []) + ["L_ANALYTICS"]
+            return retrieval
+
+        # ── QDRANT FETCH: first discovery turn, no cache yet ─────────────
+        logger.info(
+            "discovery_mode_triggered | analytics_cache_miss=True intent=%s",
+            intent_str, trace_id=trace_id,
+        )
         try:
             from app.core.resource_management import get_resource_manager
             qdrant_repo = get_resource_manager().get_qdrant_repository()
@@ -434,49 +469,96 @@ class ExecutionEngine:
             analytics_chunks = await qdrant_repo.scroll(
                 user_id=user_id,
                 filters={"category": "data_analytics"},
-                limit=3,   # one analytics entry covers the whole catalogue
+                limit=3,
+            )
+
+            analytics_found = len(analytics_chunks)
+            logger.info(
+                "analytics_found=%d intent=%s existing_chunks=%d conf=%.2f",
+                analytics_found, intent_str, len(existing_chunks), conf,
+                trace_id=trace_id,
             )
 
             if analytics_chunks:
-                formatted = [
-                    {
-                        "content":        record.get("payload", {}).get("search_text", "")
-                                          or record.get("payload", {}).get("title", ""),
-                        "score":          0.80,
-                        "chunk_type":     "data_analytics",
-                        "chunk_id":       str(record.get("id", "")),
-                        "source":         "analytics",
-                        "retrieval_layer": "L_ANALYTICS",
-                        "metadata":       record.get("payload", {}),
-                        "user_id":        user_id,
-                        # Attach full structured_data for rich context
-                        "structured_data": record.get("payload", {}).get("structured_data", {}),
-                        "attributes":      record.get("payload", {}).get("attributes", {}),
-                    }
-                    for record in analytics_chunks
-                ]
+                formatted = []
+                for record in analytics_chunks:
+                    payload = record.get("payload", {})
+                    # Robust content extraction — try every known field name
+                    content = (
+                        payload.get("content")
+                        or payload.get("search_text")
+                        or payload.get("title")
+                        or payload.get("description")
+                        or payload.get("summary")
+                        or payload.get("text")
+                        or ""
+                    )
+                    # If still empty, synthesise from structured fields
+                    if not content:
+                        sd = payload.get("structured_data") or {}
+                        attrs = payload.get("attributes") or {}
+                        parts = []
+                        for src in (sd, attrs, payload):
+                            if isinstance(src, dict):
+                                if src.get("business_name"):
+                                    parts.append(str(src["business_name"]))
+                                if src.get("industry"):
+                                    parts.append(str(src["industry"]))
+                                if src.get("categories"):
+                                    cats = src["categories"]
+                                    if isinstance(cats, list):
+                                        parts.extend(str(c) for c in cats[:5])
+                                    else:
+                                        parts.append(str(cats))
+                                if src.get("capabilities"):
+                                    caps = src["capabilities"]
+                                    if isinstance(caps, list):
+                                        parts.extend(str(c) for c in caps[:5])
+                                    else:
+                                        parts.append(str(caps))
+                        content = " ".join(parts) or "business analytics data"
 
-                # Prepend analytics chunks — they provide catalogue context
+                    formatted.append({
+                        "content":         content,
+                        "score":           0.80,
+                        "chunk_type":      "data_analytics",
+                        "chunk_id":        str(record.get("id", "")),
+                        "source":          "analytics",
+                        "retrieval_layer": "L_ANALYTICS",
+                        "metadata":        payload,
+                        "user_id":         user_id,
+                        "structured_data": payload.get("structured_data", {}),
+                        "attributes":      payload.get("attributes", {}),
+                    })
+
+                logger.info(
+                    "analytics_selected=%d analytics_validated=%d analytics_injected=%d",
+                    len(formatted), len(formatted), len(formatted),
+                    trace_id=trace_id,
+                )
+
                 retrieval = dict(retrieval)
                 retrieval["chunks"] = formatted + existing_chunks
                 retrieval["_analytics_injected"] = True
+                retrieval["_analytics_from_cache"] = False
+                # Store formatted chunks so memory layer can cache them
+                retrieval["_analytics_chunks"] = formatted
                 retrieval["retrieval_confidence"] = max(conf, 0.45)
                 if "L_ANALYTICS" not in retrieval.get("layers_used", []):
                     retrieval["layers_used"] = retrieval.get("layers_used", []) + ["L_ANALYTICS"]
 
                 logger.info(
-                    "Analytics fallback injected | intent=%s chunks=%d conf=%.2f→%.2f",
+                    "analytics_retrieved | intent=%s chunks=%d conf=%.2f→%.2f",
                     intent_str, len(formatted), conf, retrieval["retrieval_confidence"],
                     trace_id=trace_id,
                 )
             else:
                 logger.debug(
-                    "Analytics fallback: no data_analytics entries found for user=%s",
+                    "analytics_retrieved=0 | no data_analytics entries for user=%s",
                     user_id[:12], trace_id=trace_id,
                 )
 
         except Exception as e:
-            # Non-critical — pipeline continues without analytics fallback
             logger.warning("Analytics fallback error: %s", e, trace_id=trace_id)
 
         return retrieval

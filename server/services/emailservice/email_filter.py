@@ -119,7 +119,46 @@ _REJECT_SUBJECT_PREFIXES: tuple[str, ...] = (
     "[noreply]",
     "fwd: [",
     "re: [bulk",
+    # Bank / financial transactional notifications
+    "statement of your account",
+    "your account statement",
+    "e-statement",
+    "account statement for",
+    "transaction alert",
+    "transaction notification",
+    "otp for",
+    "your otp",
+    "verification code",
+    "your verification",
+    "password reset",
+    "reset your password",
+    "security alert",
+    "login attempt",
+    "suspicious activity",
 )
+
+# ── Stage 2b: Sender local-part rejection (O(k), bounded) ────────────────────
+# Transactional local-part patterns that are NOT in the prefix list above.
+# Checked against the part before '@' only.
+_REJECT_SENDER_LOCAL_PARTS: frozenset[str] = frozenset({
+    "estatement",
+    "statement",
+    "estatement",
+    "alert",
+    "alerts",
+    "notification",
+    "notifications",
+    "noticias",
+    "notify",
+    "info",        # keep? INFO@ is borderline — add if too noisy
+    "updates",
+    "update",
+    "system",
+    "robot",
+    "service",
+    "no.reply",
+    "do.not.reply",
+})
 
 # ── Stage 4: Snippet substring rejection (O(200) max, bounded) ───────────────
 # Only check first 200 chars of snippet — never full body.

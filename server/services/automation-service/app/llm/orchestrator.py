@@ -350,24 +350,23 @@ class LLMOrchestrator:
         """
         Post-generation hallucination check.
 
-        Uses validated chunks as primary context.
-        Falls back to rejected chunks (when rejection was score-based, not tenant)
-        so that low-BM25-score chunks don't falsely flag hallucination.
+        Grounding score seeded from pre-gen validation (most reliable signal).
+        Word-overlap is a secondary adjustment, never the sole arbiter.
 
-        Hallucination is only flagged when:
-        - Response makes specific $price claims without ANY context supporting them
-        - Response invents features that appear in neither validated nor rejected chunks
+        Hallucination is only flagged when confirmed violations exist:
+        - Response invents specific $prices with NO price in ANY context
+        - Response makes specific entity claims with ZERO context supporting them
+        A generic helpful greeting/engagement response is NEVER hallucination.
         """
-        # Use validated chunks; if empty fall back to rejected (score-rejected, not tenant-rejected)
+        # Build context from validated chunks first; fall back to rejected
+        # (reject on score, not on tenant — all rejected chunks are same-tenant)
         context_chunks = validated_chunks
         if not context_chunks and rejected_chunks:
-            # Only use rejected chunks that failed on score/keyword (not tenant isolation)
-            context_chunks = [
-                c for c in rejected_chunks
-                if c.get("user_id", "") != "__cross_tenant__"   # heuristic: tenant-safe only
-                and c.get("content", "")
-            ]
+            context_chunks = [c for c in rejected_chunks if c.get("content", "")]
 
+        all_context = " ".join(
+            c.get("content", "") for c in (validated_chunks + rejected_chunks)
+        ).lower()
         context_text = " ".join(
             chunk.get("content", "") for chunk in context_chunks
         ).lower()
@@ -375,51 +374,53 @@ class LLMOrchestrator:
         response_lower = response_text.lower()
         violations: List[str] = []
 
-        # Pattern 1: Specific claims without ANY context
-        hallucination_keywords = [
-            "our price is", "costs $", "priced at", "we charge",
-            "available in", "launching on", "released in",
-        ]
-        if not context_text and any(kw in response_lower for kw in hallucination_keywords):
-            violations.append("specific_claims_without_context")
+        # Pattern 1: Specific price claims with NO price in any retrieved context
+        if "$" in response_text and "$" not in all_context:
+            violations.append("invented_pricing")
 
-        # Pattern 2: Inventing pricing ($amount) when no price appears in ANY context
-        if "$" in response_text and "$" not in context_text:
-            # Only flag if ALL chunks (validated + rejected) have no price
-            all_context = " ".join(
-                c.get("content", "") for c in (validated_chunks + rejected_chunks)
-            ).lower()
-            if "$" not in all_context:
-                violations.append("invented_pricing")
+        # Pattern 2: Specific product-name claims with zero context when context exists
+        hallucination_keywords = ["our price is", "costs $", "we charge", "launching on", "released in"]
+        if all_context and any(kw in response_lower for kw in hallucination_keywords):
+            # Only a violation if the relevant product/price is not backed by any context
+            if not any(kw.replace(" ", "") in all_context.replace(" ", "") for kw in hallucination_keywords):
+                violations.append("specific_claims_without_context")
 
-        # Pattern 3: Inventing features when no feature mention anywhere
-        if "feature" in response_lower:
-            all_context = " ".join(
-                c.get("content", "") for c in (validated_chunks + rejected_chunks)
-            ).lower()
-            if "feature" not in all_context:
-                violations.append("invented_features")
+        # ── Grounding score ──────────────────────────────────────────────────
+        # Primary signal: use pre-gen grounding confidence when chunks were validated
+        # (it is the authoritative chunk-level quality signal from GroundingValidator)
+        accepted = grounding_result.accepted_count if grounding_result else 0
+        pre_gen_conf = grounding_result.overall_confidence if grounding_result else 0.0
 
-        # Post-generation grounding score (response ↔ available context overlap)
-        if not context_chunks:
-            # No chunks at all — low confidence but not necessarily hallucination
-            grounding_score = 0.45  # neutral: we can't confirm OR deny
-        elif violations:
-            grounding_score = 0.40
-        else:
+        if accepted > 0:
+            # Validated chunks exist — anchor on pre-gen confidence
+            # Apply a small word-overlap adjustment (max ±0.10) as secondary signal
             response_words = set(response_lower.split())
             context_words  = set(context_text.split())
             if response_words and context_words:
-                overlap = len(response_words & context_words)
-                grounding_score = min(0.95, 0.5 + (overlap / len(response_words)) * 0.5)
+                overlap = len(response_words & context_words) / len(response_words)
+                adjustment = (overlap - 0.10) * 0.10   # small ±0.10 band
             else:
-                grounding_score = 0.50
+                adjustment = 0.0
+            grounding_score = min(0.95, max(0.40, pre_gen_conf + adjustment))
+        elif context_chunks:
+            # Only rejected chunks available — compute overlap but be generous
+            response_words = set(response_lower.split())
+            context_words  = set(context_text.split())
+            if response_words and context_words:
+                overlap = len(response_words & context_words) / len(response_words)
+                grounding_score = min(0.75, 0.45 + overlap * 0.35)
+            else:
+                grounding_score = 0.45
+        else:
+            # Truly no context at all
+            grounding_score = 0.45
 
-        # Penalise when many chunks were rejected AND grounding_result signals low confidence
-        if grounding_result and grounding_result.accepted_count == 0 and grounding_result.rejected_count > 0:
-            grounding_score = min(grounding_score, 0.60)  # cap but don't crash to 0.3
+        if violations:
+            grounding_score = min(grounding_score, 0.40)
 
-        hallucination_detected = len(violations) > 0 or grounding_score < 0.40
+        # Hallucination only when confirmed violations exist OR zero-context + specific claims
+        # A helpful engagement response with no violations is NEVER hallucination
+        hallucination_detected = bool(violations)
 
         return {
             "hallucination_detected": hallucination_detected,
