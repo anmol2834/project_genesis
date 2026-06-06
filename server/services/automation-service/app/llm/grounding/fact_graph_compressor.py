@@ -77,6 +77,7 @@ class FactGraphCompressor:
                 "features":  [],
                 "support":   [],
                 "policies":  [],
+                "analytics": [],   # catalog/business overview from data_analytics chunks
                 "metadata": {
                     "compressed_at":       datetime.utcnow().isoformat(),
                     "chunk_count":         len(retrieval_chunks),
@@ -115,6 +116,17 @@ class FactGraphCompressor:
                     facts = self._extract_policy_facts(content, metadata)
                     if facts:
                         fact_graph["policies"].append(facts)
+
+                elif chunk_type == "data_analytics":
+                    # Analytics chunks carry business/catalogue summary data.
+                    # structured_data and attributes come from the analytics payload.
+                    analytics_facts = self._extract_analytics_facts(content, chunk)
+                    if analytics_facts:
+                        fact_graph["analytics"].append(analytics_facts)
+                    logger.debug(
+                        "analytics_found=1 analytics_grounded=1 | chunk_id=%s",
+                        chunk.get("chunk_id", ""),
+                    )
 
                 else:
                     # General / FAQ / profile — extract pricing if present, features otherwise
@@ -165,19 +177,26 @@ class FactGraphCompressor:
             fact_graph["pricing"]  = self._deduplicate_pricing(fact_graph["pricing"])
             fact_graph["features"] = list(dict.fromkeys(fact_graph["features"]))[:self.max_features]
             fact_graph["support"]  = fact_graph["support"][:self.max_support]
+            fact_graph["analytics"] = fact_graph["analytics"][:3]
 
             # Intent-aware filtering (keeps only relevant fact clusters)
             fact_graph = self._filter_by_intent(fact_graph, intelligence)
 
             elapsed = (time.perf_counter() - t_start) * 1000
+            analytics_count = len(fact_graph.get("analytics", []))
             logger.info(
                 "✅ L10 Fact Graph | products=%d pricing=%d support=%d "
-                "features=%d policies=%d confidence=%.3f latency=%.1fms",
+                "features=%d policies=%d analytics=%d confidence=%.3f latency=%.1fms",
                 len(fact_graph["products"]), len(fact_graph["pricing"]),
                 len(fact_graph["support"]), len(fact_graph["features"]),
-                len(fact_graph["policies"]),
+                len(fact_graph["policies"]), analytics_count,
                 fact_graph["metadata"]["grounding_confidence"], elapsed,
             )
+            if analytics_count:
+                logger.info(
+                    "analytics_injected=%d analytics_validated=%d",
+                    analytics_count, analytics_count,
+                )
 
             return fact_graph
 
@@ -312,6 +331,62 @@ class FactGraphCompressor:
             "effective_date": metadata.get("effective_date", ""),
         }
 
+    def _extract_analytics_facts(self, content: str, chunk: Dict) -> Optional[Dict]:
+        """
+        Extract business/catalogue overview from a data_analytics chunk.
+
+        Reads structured_data and attributes attached by _inject_analytics_if_needed,
+        falls back to parsing the content text when those are absent.
+        """
+        structured = chunk.get("structured_data") or {}
+        attributes = chunk.get("attributes") or {}
+        metadata   = chunk.get("metadata") or {}
+
+        # Merge all available structured sources
+        merged = {}
+        for src in (structured, attributes, metadata):
+            if isinstance(src, dict):
+                merged.update(src)
+
+        facts: Dict[str, Any] = {}
+
+        # Business/organisation name
+        name = merged.get("business_name") or merged.get("name") or merged.get("company_name", "")
+        if name:
+            facts["business_name"] = name
+
+        # Industry
+        industry = merged.get("industry") or merged.get("sector", "")
+        if industry:
+            facts["industry"] = industry
+
+        # Product/service categories
+        categories = merged.get("categories") or merged.get("product_categories") or []
+        if isinstance(categories, str):
+            categories = [c.strip() for c in categories.split(",") if c.strip()]
+        if categories:
+            facts["categories"] = categories[:10]
+
+        # Total product / entry count
+        total = merged.get("total_products") or merged.get("total_entries") or merged.get("count")
+        if total is not None:
+            facts["total_products"] = total
+
+        # Top capabilities / services
+        capabilities = merged.get("capabilities") or merged.get("services") or merged.get("top_capabilities") or []
+        if isinstance(capabilities, str):
+            capabilities = [c.strip() for c in capabilities.split(",") if c.strip()]
+        if capabilities:
+            facts["capabilities"] = capabilities[:8]
+
+        # Fallback: use content text as summary when no structured data
+        if not facts and content:
+            facts["summary"] = content[:300]
+        elif content and "summary" not in facts:
+            facts["summary"] = content[:200]
+
+        return facts if facts else None
+
     def _extract_features(self, content: str, metadata: Dict) -> List[str]:
         pattern = r"[\-\*\•]\s*([^\n]{5,80})"
         features = re.findall(pattern, content)
@@ -427,6 +502,7 @@ class FactGraphCompressor:
             "features":  [],
             "support":   [],
             "policies":  [],
+            "analytics": [],
             "metadata": {
                 "compressed_at":       datetime.utcnow().isoformat(),
                 "chunk_count":         0,
@@ -508,6 +584,24 @@ class FactGraphCompressor:
         # Features
         if fact_graph.get("features"):
             sections.append(f"\nADDITIONAL FEATURES: {', '.join(fact_graph['features'][:12])}")
+
+        # Analytics / Business Overview
+        if fact_graph.get("analytics"):
+            lines = ["\nBUSINESS OVERVIEW:"]
+            for a in fact_graph["analytics"]:
+                if a.get("business_name"):
+                    lines.append(f"  Business: {a['business_name']}")
+                if a.get("industry"):
+                    lines.append(f"  Industry: {a['industry']}")
+                if a.get("total_products"):
+                    lines.append(f"  Total products/services: {a['total_products']}")
+                if a.get("categories"):
+                    lines.append(f"  Categories: {', '.join(str(c) for c in a['categories'])}")
+                if a.get("capabilities"):
+                    lines.append(f"  Capabilities: {', '.join(str(c) for c in a['capabilities'])}")
+                if a.get("summary"):
+                    lines.append(f"  Summary: {a['summary']}")
+            sections.append("\n".join(lines))
 
         if not sections:
             return "No specific verified information available for this query."

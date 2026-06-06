@@ -32,6 +32,7 @@ class ChunkType(str, Enum):
     TEAM = "team"
     LOCATION = "location"
     GENERAL = "general"
+    DATA_ANALYTICS = "data_analytics"
 
 
 @dataclass

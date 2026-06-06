@@ -181,21 +181,49 @@ class IntelligenceOrchestrator:
             return self._create_fallback_intelligence(message_content, memory, str(e))
     
     def _is_simple_continuation(self, message: str) -> bool:
-        """Check if message is a simple continuation (fast path)"""
+        """
+        True ONLY for explicit continuation signals from an ACTIVE conversation.
+        Greetings and opening messages (hello, hi, hey, good morning, etc.) must
+        reach Brain #1 so they get a real intent + discovery search plan.
+        """
         message_lower = message.lower().strip()
-        continuations = [
+
+        # Greetings are NEVER continuations — they always go to Brain #1
+        greetings = {
+            "hello", "hi", "hey", "hii", "hiii", "heya", "hola",
+            "good morning", "good afternoon", "good evening", "good day",
+        }
+        if message_lower in greetings or any(message_lower.startswith(g) for g in greetings):
+            return False
+
+        explicit_continuations = {
             "yes", "no", "okay", "ok", "sure", "thanks", "thank you",
             "continue", "go ahead", "tell me more", "what else",
-            "please continue", "and then", "what about", "sounds good",
-            "perfect", "great", "got it", "understood", "i see"
-        ]
-        return message_lower in continuations or len(message) < 15
+            "please continue", "and then", "sounds good",
+            "perfect", "great", "got it", "understood", "i see",
+        }
+        return message_lower in explicit_continuations
     
     def _handle_continuation(self, message: str, memory: Dict) -> EnterpriseIntelligenceResult:
         """Handle simple continuation with enterprise structure (fast path)"""
         message_lower = message.lower().strip()
         is_agreement = message_lower in ["yes", "okay", "sure", "sounds good", "perfect"]
-        
+
+        # Inherit active topic and last intent for real search queries
+        last_intent  = memory.get("last_intent", "general_inquiry")
+        active_topic = memory.get("active_topic", "")
+        unresolved   = memory.get("unresolved_questions", [])
+
+        # Build search queries from inherited context (never empty)
+        if is_agreement and active_topic:
+            semantic_queries = [active_topic, f"{active_topic} details pricing features"]
+        elif unresolved:
+            semantic_queries = [q[:100] for q in unresolved[:2]]
+        elif active_topic:
+            semantic_queries = [active_topic]
+        else:
+            semantic_queries = ["products and services overview", "business information"]
+
         return EnterpriseIntelligenceResult(
             conversation_analysis=ConversationAnalysis(
                 stage=ConversationStage.INTEREST,
@@ -208,14 +236,14 @@ class IntelligenceOrchestrator:
                 IntentDefinition(type=IntentType.FOLLOW_UP, confidence=0.95)
             ],
             entities=EntityExtraction(),
-            search_plan=SearchPlan(),  # No retrieval needed
+            search_plan=SearchPlan(semantic_queries=semantic_queries),
             retrieval_strategy=RetrievalStrategy(
-                cache_lookup_first=False,
-                semantic_search=False,
+                cache_lookup_first=True,
+                semantic_search=True,
                 reranking_required=False
             ),
             business_reasoning=BusinessReasoning(
-                likely_goal="continuation of previous conversation"
+                likely_goal=active_topic or "continuation of previous conversation"
             ),
             response_strategy=ResponseStrategy(
                 tone=ResponseTone.FRIENDLY_SUPPORTIVE,
@@ -414,7 +442,7 @@ RESPOND WITH VALID JSON ONLY (no markdown, no extra text):
                     {"role": "user", "content": context}
                 ],
                 temperature=0.3,
-                max_tokens=1500,  # Increased for comprehensive response
+                max_tokens=800,   # 800 sufficient for structured JSON; 1500 inflated latency
                 timeout=20.0
             )
             

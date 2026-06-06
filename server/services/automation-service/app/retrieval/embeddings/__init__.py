@@ -3,26 +3,21 @@ Enterprise Embedding Registry
 ==============================
 Centralized, observable model management for all retrieval layers.
 
-Architecture:
-  EmbeddingRegistry (singleton)
-    ├── PRIMARY:   intfloat/e5-base-v2      (768-dim) ← matches Qdrant collection
-    ├── SECONDARY: sentence-transformers/all-mpnet-base-v2  (768-dim) ← same dim
-    └── EMERGENCY: sentence-transformers/all-MiniLM-L6-v2  (384-dim) ← DIMENSION MISMATCH
+DIMENSION CONTRACT — resolved at startup, not hardcoded:
+  The registry reads COLLECTION_DIM from shared config (QDRANT_VECTOR_SIZE),
+  which is the authoritative value written by whoever created the collection.
+  The embedding tiers are evaluated at load time against this live dimension.
 
-CRITICAL DIMENSION CONTRACT:
-  The Qdrant collection (business_context) was built by user-service using
-  intfloat/e5-base-v2 at 768 dimensions (Cosine distance).
-  The primary model MUST produce 768-dim vectors. Any model that produces
-  a different dimension will silently return zero results from Qdrant.
+  If QDRANT_VECTOR_SIZE=384 → all-MiniLM-L6-v2 is selected (matches collection)
+  If QDRANT_VECTOR_SIZE=768 → e5-base-v2 is selected (matches collection)
 
-Why NOT BAAI/bge-m3:
-  - bge-m3 produces 1024-dim vectors → incompatible with 768-dim collection
-  - bge-m3 pytorch_model.bin blocked by torch>=2.6 (CVE-2025-32434)
-  - bge-m3 was never used to build the Qdrant collection
+  Startup raises RuntimeError if no tier produces the correct dimension.
+  This prevents the silent 768-vs-384 mismatch that caused catastrophic
+  grounding collapse in production (all vector searches failed silently).
 
-Why NOT all-MiniLM-L6-v2 as primary:
-  - 384 dims → wrong dimension for the 768-dim collection
-  - Vector search returns garbage / zero results
+Tier order (highest quality first):
+  768-dim:  intfloat/e5-base-v2  →  all-mpnet-base-v2
+  384-dim:  all-MiniLM-L6-v2
 
 Every tier change emits:
   - WARNING log with full context
@@ -50,38 +45,76 @@ logger = logging.getLogger("automation-service.embeddings")
 class EmbeddingModel:
     name: str
     expected_dim: int
-    tier: int           # 1 = primary, 2 = secondary, 3 = emergency
+    tier: int           # 1 = primary, 2 = secondary, 3 = tertiary
     description: str
-    encode_prefix: str = ""   # e5 models need "query:" / "passage:" prefix
+    encode_prefix: str = ""   # e5 models need "query: " prefix
 
-# Ordered by preference.  Only models with expected_dim == COLLECTION_DIM
-# produce valid Qdrant search results.
-COLLECTION_DIM = 768   # user-service built Qdrant with e5-base-v2 @ 768 dims
 
-EMBEDDING_TIERS: List[EmbeddingModel] = [
+# All supported embedding models, ordered by quality within each dimension group.
+# The registry selects based on COLLECTION_DIM at runtime — not at import time.
+_ALL_EMBEDDING_TIERS: List[EmbeddingModel] = [
+    # ── 768-dim models ──────────────────────────────────────────────────────
     EmbeddingModel(
         name="intfloat/e5-base-v2",
         expected_dim=768,
         tier=1,
-        description="Primary — 768-dim, matches Qdrant collection (e5 instruction-tuned)",
+        description="768-dim primary — e5 instruction-tuned, highest quality",
         encode_prefix="query: ",
     ),
     EmbeddingModel(
         name="sentence-transformers/all-mpnet-base-v2",
         expected_dim=768,
         tier=2,
-        description="Secondary — 768-dim, compatible with Qdrant collection",
+        description="768-dim secondary — all-mpnet, solid quality",
         encode_prefix="",
     ),
+    # ── 384-dim models ──────────────────────────────────────────────────────
     EmbeddingModel(
         name="sentence-transformers/all-MiniLM-L6-v2",
         expected_dim=384,
-        tier=3,
-        description="Emergency — 384-dim, DIMENSION MISMATCH with 768-dim Qdrant collection. "
-                    "Semantic search will return zero results. Use only when collection is unavailable.",
+        tier=1,
+        description="384-dim primary — MiniLM-L6, fast and accurate",
         encode_prefix="",
     ),
 ]
+
+
+def _resolve_collection_dim() -> int:
+    """
+    Read the authoritative collection dimension from shared config.
+    This is the value used to CREATE the Qdrant collection (QDRANT_VECTOR_SIZE).
+    Falls back to 384 if config is unavailable to prefer the smaller model.
+    """
+    try:
+        from shared.config import get_config
+        dim = int(get_config().QDRANT_VECTOR_SIZE)
+        logger.info("Collection dimension resolved from config: %d", dim)
+        return dim
+    except Exception as e:
+        logger.warning(
+            "Could not read QDRANT_VECTOR_SIZE from config (%s) — defaulting to 384", e
+        )
+        return 384
+
+
+# COLLECTION_DIM is resolved once at module load from shared config.
+# All code that previously hardcoded 768 must use this value.
+COLLECTION_DIM: int = _resolve_collection_dim()
+
+# EMBEDDING_TIERS is filtered to only the models that match COLLECTION_DIM,
+# preserving tier order within that dimension group.
+EMBEDDING_TIERS: List[EmbeddingModel] = [
+    m for m in _ALL_EMBEDDING_TIERS if m.expected_dim == COLLECTION_DIM
+]
+
+if not EMBEDDING_TIERS:
+    logger.error(
+        "CRITICAL: No embedding model defined for COLLECTION_DIM=%d. "
+        "Add a model entry in _ALL_EMBEDDING_TIERS.",
+        COLLECTION_DIM,
+    )
+    # Keep all models as last-resort to avoid complete startup failure
+    EMBEDDING_TIERS = list(_ALL_EMBEDDING_TIERS)
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────

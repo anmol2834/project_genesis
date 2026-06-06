@@ -186,15 +186,30 @@ class ResourceManager:
 
     def get_qdrant_repository(self):
         """
-        Get tenant-safe Qdrant repository with collection_name baked in.
+        Get tenant-safe Qdrant repository with dual-collection support.
+
+        primary (catalog):  QDRANT_CATALOG_COLLECTION = user_data_entries
+                            Contains all product/service/analytics data (101 entries)
+        secondary (profile): QDRANT_COLLECTION = business_context
+                             Contains business profile chunks
+
         All retrieval engines (L2-L6) MUST use this — NOT get_qdrant().
         """
         if not self._qdrant_client:
             raise RuntimeError("Qdrant not initialized")
         from app.retrieval.qdrant.async_repository import AsyncQdrantRepository
         from shared.config import get_config as _gc
-        collection = _gc().QDRANT_COLLECTION
-        return AsyncQdrantRepository(self._qdrant_client, collection)
+        cfg = _gc()
+        profile_collection = cfg.QDRANT_COLLECTION
+        # QDRANT_CATALOG_COLLECTION is the user_data_entries collection
+        # that holds the actual product/service/analytics catalog data.
+        import os
+        catalog_collection = os.getenv("QDRANT_CATALOG_COLLECTION", "user_data_entries")
+        return AsyncQdrantRepository(
+            self._qdrant_client,
+            collection_name=profile_collection,
+            catalog_collection=catalog_collection,
+        )
     
     async def health_check(self) -> Dict[str, Any]:
         """Check health of all resources"""

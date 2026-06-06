@@ -251,9 +251,73 @@ async def _initialize_intelligence():
 
 
 async def _initialize_retrieval():
-    """Initialize retrieval layer"""
-    # Retrieval layer uses resource manager
-    pass
+    """
+    Initialize retrieval layer:
+    1. Validate embedding↔collection dimension contract.
+    2. Pre-load the SentenceTransformer model in a thread pool so the first
+       real request hits a warm encoder (avoids 15-20s cold-start penalty).
+    """
+    import asyncio
+    from app.retrieval.embeddings import get_embedding_registry, COLLECTION_DIM
+    from app.core.resource_management import get_resource_manager
+    from shared.config import get_config
+    import os
+
+    # 1. Load and validate embedding model (in thread pool — non-blocking)
+    registry = get_embedding_registry()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, registry.initialize)
+
+    if not registry.is_collection_compatible():
+        raise RuntimeError(
+            f"STARTUP BLOCKED: embedding model '{registry.get_model_name()}' produces "
+            f"{registry.get_embedding_dim()}-dim vectors but config expects {COLLECTION_DIM}-dim. "
+            f"Check QDRANT_VECTOR_SIZE in .env and ensure the collection matches."
+        )
+
+    # Pre-warm the encoder with one dummy call so the first request is fast
+    def _warmup():
+        embedder = registry.get_embedder()
+        if embedder:
+            prefix = registry.get_encode_prefix()
+            embedder.encode(prefix + "warmup", normalize_embeddings=True, show_progress_bar=False)
+            logger.info("Embedding model warm-up complete | model=%s", registry.get_model_name())
+
+    await loop.run_in_executor(None, _warmup)
+
+    # 2. Verify live Qdrant collection dimensions via REST (avoids qdrant-client parse bug)
+    try:
+        import urllib.request, json as _json
+        cfg = get_config()
+        catalog_col = os.getenv("QDRANT_CATALOG_COLLECTION", "user_data_entries")
+        base_url = cfg.QDRANT_URL.rstrip("/")
+
+        for col_name in (cfg.QDRANT_COLLECTION, catalog_col):
+            try:
+                with urllib.request.urlopen(
+                    f"{base_url}/collections/{col_name}", timeout=5
+                ) as resp:
+                    data = _json.loads(resp.read())
+                live_dim = data["result"]["config"]["params"]["vectors"]["size"]
+                points   = data["result"]["points_count"]
+                if live_dim != COLLECTION_DIM:
+                    raise RuntimeError(
+                        f"STARTUP BLOCKED: Qdrant collection '{col_name}' is "
+                        f"{live_dim}-dim but embedding model produces {COLLECTION_DIM}-dim. "
+                        f"Run qdrant_migrate.py to recreate at {COLLECTION_DIM}-dim."
+                    )
+                logger.info(
+                    "✅ Retrieval validation | col=%s dim=%d points=%d model=%s",
+                    col_name, live_dim, points, registry.get_model_name(),
+                )
+            except RuntimeError:
+                raise
+            except Exception as col_err:
+                logger.warning("Retrieval startup: collection '%s' check skipped (%s)", col_name, col_err)
+    except RuntimeError:
+        raise
+    except Exception as e:
+        logger.warning("Retrieval startup: Qdrant validation skipped (%s)", e)
 
 
 async def _initialize_llm():
