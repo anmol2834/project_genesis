@@ -20,7 +20,7 @@ const CTASection        = dynamic(() => import('@/components/landing/CTASection'
 export const metadata: Metadata = buildMetadata({
   title: 'AI Email Automation Platform — Reply Before You Open',
   description:
-    'Proxipilot is the AI-powered email automation platform that generates smart replies before you open your inbox. Save 20+ hours per week with sub-25ms AI processing and intelligent tone learning.',
+    'Proxipilot is the AI-powered email automation platform that generates smart replies before you open your inbox. Save 20+ hours per week with Blazing fast AI processing and intelligent tone learning.',
   path: '/',
   keywords: [
     'AI email automation',

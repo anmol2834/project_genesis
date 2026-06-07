@@ -242,11 +242,14 @@ class MemoryOrchestrator:
             ret_dict    = retrieval or {}
             llm_dict    = llm_result or {}
 
-            # Intent
+            # Intent — extract bare string from enum if needed
             primary_intents = int_dict.get("primary_intents", [])
             primary = primary_intents[0] if primary_intents else {}
+            raw_intent = _get(primary, "type") or intent or "unknown"
             resolved_intent = (
-                _get(primary, "type") or intent or "unknown"
+                raw_intent.value
+                if hasattr(raw_intent, "value")
+                else str(raw_intent).split(".")[-1].lower()
             )
 
             # Entities
@@ -262,11 +265,21 @@ class MemoryOrchestrator:
             goal      = br_dict.get("likely_goal", "")
             resolved_topic = active_topic or goal or (products[0] if products else "")
 
-            # Journey stage
+            # Journey stage — extract bare string from enum if needed
             conv      = int_dict.get("conversation_analysis", {})
             conv_dict = _to_dict(conv) if not isinstance(conv, dict) else conv
-            journey   = conv_dict.get("stage", "discovery")
-            sentiment = conv_dict.get("sentiment", "neutral")
+            journey_raw = conv_dict.get("stage", "discovery")
+            journey = (
+                journey_raw.value
+                if hasattr(journey_raw, "value")
+                else str(journey_raw).split(".")[-1].lower()
+            )
+            sentiment_raw = conv_dict.get("sentiment", "neutral")
+            sentiment = (
+                sentiment_raw.value
+                if hasattr(sentiment_raw, "value")
+                else str(sentiment_raw).split(".")[-1].lower()
+            )
 
             # Response text
             resp_text = response_text or llm_dict.get("response_text", "")

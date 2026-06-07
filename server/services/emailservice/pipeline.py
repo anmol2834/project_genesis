@@ -450,7 +450,9 @@ async def store_message_with_retry(msg: dict) -> bool:
                 await _publish_ai_event(user_id, msg["message_id"],
                                         msg.get("thread_id", ""), provider,
                                         msg.get("event_id", ""),
-                                        conversation_id=conversation_id)
+                                        conversation_id=conversation_id,
+                                        subject=msg.get("subject", ""),
+                                        from_email=msg.get("from_email", ""))
             return True
 
         except Exception as e:
@@ -493,7 +495,9 @@ async def store_message_with_retry(msg: dict) -> bool:
 
 async def _publish_ai_event(user_id: str, message_id: str, thread_id: str,
                              provider: str, event_id: str,
-                             conversation_id: str = "") -> None:
+                             conversation_id: str = "",
+                             subject: str = "",
+                             from_email: str = "") -> None:
     """
     Publish to ai_events stream for async automation handoff.
     conversation_id is passed in directly from the store transaction — zero extra DB calls.
@@ -527,6 +531,8 @@ async def _publish_ai_event(user_id: str, message_id: str, thread_id: str,
                 "message_id":         message_id,
                 "thread_id":          thread_id,
                 "conversation_id":    conversation_id,
+                "subject":            subject,
+                "from_email":         from_email,
                 "provider":           provider,
                 "automation_enabled": automation_enabled,
                 "ts":                 time.time(),

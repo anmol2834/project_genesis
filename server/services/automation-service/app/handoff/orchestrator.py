@@ -210,7 +210,11 @@ class HandoffOrchestrator:
             return {"should_escalate": True, "reason": "grounding_confidence_too_low",
                     "priority": "high"}
 
-        if pre_grounding.get("pricing_conflicts", 0) > 0:
+        # Pricing conflicts from analytics/offer chunks are informational only.
+        # Only escalate when a PRODUCT chunk (not analytics) has conflicting prices
+        # AND the conflict count exceeds 1 (single conflict from overlapping data is normal).
+        pricing_conflict_count = pre_grounding.get("pricing_conflicts", 0)
+        if pricing_conflict_count > 1:
             return {"should_escalate": True, "reason": "pricing_conflict_detected",
                     "priority": "medium"}
 

@@ -220,7 +220,7 @@ export default function PrivacyPage() {
             • <strong>Withdraw Consent:</strong> Revoke permissions at any time
           </Typography>
           <Typography variant="body2" sx={{ mt: 1.5, lineHeight: 1.7, color: 'text.secondary' }}>
-            To exercise these rights, contact us at privacy@proxipilot.com. We will respond within 30 days.
+            To exercise these rights, contact us at hello@proxipilot.com. We will respond within 30 days.
           </Typography>
         </>
       ),
@@ -353,10 +353,10 @@ export default function PrivacyPage() {
             border: `1px solid ${alpha(theme.palette.primary.main, 0.1)}`
           }}>
             <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5, color: 'text.primary' }}>Email:</Typography>
-            <Typography variant="body2" sx={{ mb: 1.5, color: 'primary.main' }}>privacy@proxipilot.com</Typography>
+            <Typography variant="body2" sx={{ mb: 1.5, color: 'primary.main' }}>hello@proxipilot.com</Typography>
             
             <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5, color: 'text.primary' }}>Data Protection Officer:</Typography>
-            <Typography variant="body2" sx={{ mb: 1.5, color: 'text.secondary' }}>dpo@proxipilot.com</Typography>
+            <Typography variant="body2" sx={{ mb: 1.5, color: 'text.secondary' }}>hello@proxipilot.com</Typography>
             
             <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5, color: 'text.primary' }}>Response Time:</Typography>
             <Typography variant="body2" sx={{ color: 'text.secondary' }}>Within 30 days of receipt</Typography>

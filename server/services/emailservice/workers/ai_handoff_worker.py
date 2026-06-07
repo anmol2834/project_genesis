@@ -135,10 +135,12 @@ class AIHandoffWorker(BaseWorker):
             pipe = redis.pipeline(transaction=False)
             for rec in truly_new:
                 payload = {
-                    "conversation_id":    rec.get("conversation_id", ""),
+                    "conversation_id":    rec.get("conversation_id") or rec.get("thread_id", ""),
                     "user_id":            rec.get("user_id", ""),
                     "message_id":         rec.get("message_id", ""),
                     "thread_id":          rec.get("thread_id", ""),
+                    "subject":            rec.get("subject", ""),
+                    "from_email":         rec.get("from_email", ""),
                     "provider":           rec.get("provider", ""),
                     "trace_id":           rec.get("trace_id", ""),
                     "automation_enabled": rec.get("automation_enabled", True),

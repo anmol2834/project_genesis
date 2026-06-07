@@ -58,10 +58,17 @@ class StreamConsumer:
         # Background task: listens for wake signals and sets the asyncio.Event
         self._listener_task = asyncio.create_task(self._pubsub_listener())
 
-        # Drain any backlog left from previous run (startup only — 1 XRANGE)
-        backlog = await self._drain_once()
-        if backlog:
-            logger.info("StreamConsumer: drained %d backlog messages on startup", len(backlog))
+        # Check backlog size — if messages exist, set the wake event immediately
+        # so _worker_loop processes them without waiting for a new Pub/Sub signal.
+        # Do NOT drain here — let _worker_loop do it so messages are never discarded.
+        try:
+            backlog_size = await self._redis.xlen(STREAM_AUTOMATION_EVENTS)
+            if backlog_size:
+                logger.info("StreamConsumer: %d backlog messages found — signalling worker",
+                            backlog_size)
+                self._wake_event.set()
+        except Exception as e:
+            logger.warning("StreamConsumer: backlog check failed: %s", e)
 
         logger.info("StreamConsumer started (event-driven, zero idle cost)")
 
@@ -91,10 +98,11 @@ class StreamConsumer:
 
     async def wait_for_work(self, timeout: Optional[float] = None) -> None:
         """
-        Sleep until woken by a Pub/Sub message or a retry becomes due.
-        Zero Redis commands while sleeping.
+        Block until a Pub/Sub wake signal arrives.
+        Zero Redis commands while idle.
+        The event is cleared AFTER waking to prevent losing signals
+        that arrive during processing.
         """
-        self._wake_event.clear()
         try:
             if timeout is not None:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
@@ -102,6 +110,7 @@ class StreamConsumer:
                 await self._wake_event.wait()
         except asyncio.TimeoutError:
             pass
+        self._wake_event.clear()
 
     async def consume_batch(self) -> List[Dict[str, Any]]:
         """

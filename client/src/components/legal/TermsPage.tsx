@@ -87,7 +87,7 @@ Data Security: We implement industry-standard security measures including encryp
 
 Third-Party Integration: When you connect third-party services (email providers, CRM systems), we access only the data necessary to provide our services and comply with those platforms' terms of service.
 
-Data Retention: We retain your data for as long as your account is active or as needed to provide services. You may request data deletion in accordance with our Privacy Policy.
+Data Retention: We retain your data for as long as your account is active or as needed to provide services.
 
 For detailed information about our data practices, please review our comprehensive Privacy Policy available on our website.`,
   },
@@ -123,7 +123,7 @@ Price Changes: We reserve the right to modify subscription prices with at least 
 
 Refund Policy: Refunds are provided on a case-by-case basis and are generally not available for partial billing periods. Please contact our support team for refund requests.
 
-Free Trials: Free trial periods may be offered for new users. Credit card information may be required, and you will be charged automatically when the trial ends unless you cancel before the trial expiration.
+Free Trials: We may offer free trial access to new users. Free trials may be subject to time, feature, and credit usage limitations. Once the trial period ends or the allotted credits are exhausted, access to certain features may be restricted unless you upgrade to a paid plan. We reserve the right to modify or discontinue free trials at any time.
 
 Cancellation: You may cancel your subscription at any time. Cancellations take effect at the end of the current billing period, and you will retain access until that time.
 
@@ -243,15 +243,7 @@ Version History: We maintain a version history of our terms, which is available 
     icon: ContactMailRounded,
     content: `If you have questions, concerns, or need support regarding these Terms and Conditions:
 
-Email Support: support@Proxipilot.com
-Business Inquiries: business@Proxipilot.com
-Legal Inquiries: legal@Proxipilot.com
-
-Mailing Address:
-Proxipilot Inc.
-114 - Siddhivinayak Socity 2, Mora Tekra, Hazira Road
-Surat, Gujarat, 394517
-India
+Email Support: hello@proxipilot.com
 
 Support Hours: Monday - Friday, 9:00 AM - 6:00 PM (Your Timezone)
 

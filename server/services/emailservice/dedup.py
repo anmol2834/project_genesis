@@ -13,9 +13,15 @@ Bloom filter design:
 No Redis required for dedup — eliminates the Redis connection pool bottleneck.
 """
 from __future__ import annotations
-import math, time, threading
+import hashlib, math, time, threading
 from typing import Optional
-import mmh3  # MurmurHash3 — fast, uniform distribution
+
+try:
+    import mmh3  # MurmurHash3 — fast, uniform distribution
+    _HAS_MMH3 = True
+except ImportError:  # pragma: no cover
+    mmh3 = None  # type: ignore[assignment]
+    _HAS_MMH3 = False
 
 import config as cfg
 
@@ -45,8 +51,14 @@ class BloomFilter:
         return max(1, int((m / n) * math.log(2)))
 
     def _positions(self, item: str) -> list[int]:
+        if _HAS_MMH3:
+            return [
+                mmh3.hash(item, seed=i, signed=False) % self.size
+                for i in range(self.hash_count)
+            ]
+        # Fallback: derive independent hashes via SHA-256 with seed suffix
         return [
-            mmh3.hash(item, seed=i, signed=False) % self.size
+            int(hashlib.sha256(f"{item}:{i}".encode()).hexdigest(), 16) % self.size
             for i in range(self.hash_count)
         ]
 

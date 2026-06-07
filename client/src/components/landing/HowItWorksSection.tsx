@@ -10,10 +10,10 @@ import { FadeUp, StaggerContainer, fadeUp } from './motion';
 import { lightGradients, darkGradients } from '@/theme/palette';
 
 const STEPS = [
-  { icon: InboxRoundedIcon,       label: 'Email arrives',   desc: 'Works with Gmail, Outlook, and any SMTP provider',       color: '#6366f1', ms: '< 5ms'   },
-  { icon: PsychologyRoundedIcon,  label: 'AI processes',    desc: 'Intent detection, tone analysis, context retrieval',     color: '#8b5cf6', ms: '< 50ms'  },
-  { icon: AutoAwesomeRoundedIcon, label: 'Reply generated', desc: 'Predictive draft ready before you open the email',       color: '#06b6d4', ms: '< 200ms' },
-  { icon: SendRoundedIcon,        label: 'Sent instantly',  desc: 'One-click send or full auto-reply mode',                 color: '#10b981', ms: '< 25ms'  },
+  { icon: InboxRoundedIcon,       label: 'Email arrives',   desc: 'Works with Gmail, Outlook, and any SMTP provider',       color: '#6366f1', s: '< 1s'   },
+  { icon: PsychologyRoundedIcon,  label: 'AI processes',    desc: 'Intent detection, tone analysis, context retrieval',     color: '#8b5cf6', s: '< 2s'  },
+  { icon: AutoAwesomeRoundedIcon, label: 'Reply generated', desc: 'Predictive draft ready before you open the email',       color: '#06b6d4', s: '< 3s' },
+  { icon: SendRoundedIcon,        label: 'Sent instantly',  desc: 'One-click send or full auto-reply mode',                 color: '#10b981', s: '< 1s'  },
 ];
 
 const PERF_BARS = [
@@ -112,7 +112,7 @@ export default function HowItWorksSection() {
 
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 0.75 }}>
                       <PulseDot color={step.color} />
-                      <Typography sx={{ color: step.color, fontWeight: 700, fontSize: '0.7rem' }}>{step.ms}</Typography>
+                      <Typography sx={{ color: step.color, fontWeight: 700, fontSize: '0.7rem' }}>{step.s}</Typography>
                     </Box>
 
                     <Typography variant="h6" sx={{ mb: 0.5, fontSize: { xs: '0.9rem', sm: '1rem' } }}>{step.label}</Typography>
@@ -152,7 +152,7 @@ export default function HowItWorksSection() {
               <Box key={item.label}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
                   <Typography sx={{ color: 'text.secondary', fontWeight: 500, fontSize: { xs: '0.7rem', sm: '0.75rem' } }}>{item.label}</Typography>
-                  <Typography sx={{ color: item.color, fontWeight: 700, fontSize: { xs: '0.7rem', sm: '0.75rem' } }}>{item.val}ms</Typography>
+                  <Typography sx={{ color: item.color, fontWeight: 700, fontSize: { xs: '0.7rem', sm: '0.75rem' } }}>{item.val}s</Typography>
                 </Box>
                 <Box sx={{ height: 4, borderRadius: '9999px', background: alpha(item.color, isDark ? 0.20 : 0.12), overflow: 'hidden' }}>
                   <motion.div

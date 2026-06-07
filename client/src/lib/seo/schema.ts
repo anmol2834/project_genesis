@@ -50,7 +50,7 @@ export function softwareApplicationSchema() {
     operatingSystem: 'Web',
     url: SITE_URL,
     description:
-      'AI-powered email automation platform that generates replies before you open the email. Sub-25ms processing, smart tone learning, enterprise-grade inbox management.',
+      'AI-powered email automation platform that generates replies before you open the email. Blazing fast processing, smart tone learning, enterprise-grade inbox management.',
     offers: {
       '@type': 'AggregateOffer',
       priceCurrency: 'USD',
@@ -69,7 +69,7 @@ export function softwareApplicationSchema() {
     },
     featureList: [
       'AI-powered email reply generation',
-      'Sub-25ms response time',
+      '< 15s response time',
       'Smart tone learning',
       'Campaign inbox management',
       'Multi-account support',

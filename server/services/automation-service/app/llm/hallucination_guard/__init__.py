@@ -146,6 +146,10 @@ class PreGenerationGroundingValidator:
         tenant_violations   = 0
 
         for chunk in chunks:
+            # Skip data_analytics chunks for pricing conflict detection —
+            # they contain aggregate/discount data, not authoritative product prices.
+            is_analytics = str(chunk.get("chunk_type", "")).lower() == "data_analytics"
+
             score = self._score_chunk(
                 chunk=chunk,
                 user_id=user_id,
@@ -154,7 +158,7 @@ class PreGenerationGroundingValidator:
                 active_topic=active_topic,
                 allowed_types=allowed_types,
                 query=query,
-                pricing_map=pricing_map,
+                pricing_map=pricing_map if not is_analytics else {},  # exclude analytics from pricing map
             )
             scores.append(score)
 

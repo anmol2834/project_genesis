@@ -8,7 +8,7 @@ import { lightGradients, darkGradients } from '@/theme/palette';
 
 const STATS = [
   { value: 87,  suffix: '%',  label: 'Faster processing',    desc: 'vs. legacy polling systems'       },
-  { value: 25,  suffix: 'ms', label: 'End-to-end pipeline',  desc: 'Email arrival to reply ready'     },
+  { value: 15,  suffix: 's', label: 'End-to-end pipeline',  desc: 'Email arrival to reply ready'     },
   { value: 5,   suffix: 'K+', label: 'Concurrent users',     desc: 'Without degradation'              },
 ];
 

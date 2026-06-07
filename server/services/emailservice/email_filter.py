@@ -270,7 +270,15 @@ def should_filter(subject: str, from_email: str, snippet: str = "",
     if frm and frm.startswith(_REJECT_SENDER_PREFIXES):
         return True
 
-    # ── Stage 3b: Subject prefix check (O(40) bounded) ───────────────────────
+    # ── Stage 3b: Sender local-part rejection (O(k), bounded) ───────────────
+    if frm:
+        at_pos2 = frm.rfind("@")
+        if at_pos2 > 0:
+            raw_local = frm[:at_pos2]
+            if raw_local in _REJECT_SENDER_LOCAL_PARTS:
+                return True
+
+    # ── Stage 3c: Subject prefix check (O(40) bounded) ───────────────────────
     if subject:
         subj_prefix = sanitize(subject, max_len=40)
         if subj_prefix.startswith(_REJECT_SUBJECT_PREFIXES):

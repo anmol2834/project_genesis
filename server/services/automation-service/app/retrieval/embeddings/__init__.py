@@ -152,7 +152,11 @@ class EmbeddingRegistry:
                 embedder = SentenceTransformer(model_def.name)
                 _lg.getLogger("sentence_transformers").setLevel(_lg.INFO)
 
-                actual_dim = embedder.get_sentence_embedding_dimension()
+                actual_dim = (
+                    embedder.get_embedding_dimension()
+                    if hasattr(embedder, "get_embedding_dimension")
+                    else embedder.get_sentence_embedding_dimension()
+                )
                 elapsed = (time.perf_counter() - t0) * 1000
 
                 if actual_dim != model_def.expected_dim:

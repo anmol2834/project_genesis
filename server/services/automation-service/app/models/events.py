@@ -21,6 +21,7 @@ class AutomationEvent(BaseEvent):
     thread_id: str = Field(..., description="Thread identifier with user_id prefix")
     content: str = Field(..., description="Message content")
     subject: str = Field(default="", description="Email subject")
+    from_email: str = Field(default="", description="Sender email address")
     automation_enabled: bool = Field(default=True, description="Automation enabled flag")
     priority: int = Field(default=MessagePriority.MEDIUM, description="Message priority")
     history: List[Dict[str, Any]] = Field(default_factory=list, description="Conversation history")

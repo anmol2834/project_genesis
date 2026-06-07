@@ -109,7 +109,8 @@ class WorkerRuntime:
         logger.info("Worker runtime stopped")
 
     async def run(self) -> None:
-        await self.start()
+        # NOTE: start() is called by the caller (app/main.py) before create_task(run()).
+        # Do NOT call start() here again — that would create duplicate consumers.
         try:
             self._tasks = [
                 asyncio.create_task(self._worker_loop(i))
@@ -129,31 +130,31 @@ class WorkerRuntime:
 
         while self._running:
             try:
-                # ── Event-driven sleep — zero Redis commands while idle ────
-                # Sleep until woken by Pub/Sub (automation:wake) or a retry
-                # becomes due.  Never poll.
+                # ── Wait for wake signal (Pub/Sub) or retry due ───────────
+                # The consumer.start() sets _wake_event if backlog exists,
+                # so startup messages are processed immediately without polling.
                 if self.consumer.has_pending_retries():
                     retry_delay = self.consumer.next_retry_delay()
-                    if retry_delay > 0:
-                        await self.consumer.wait_for_work(timeout=retry_delay)
+                    await self.consumer.wait_for_work(timeout=retry_delay if retry_delay > 0 else None)
                 else:
-                    # Block indefinitely — woken only by Pub/Sub wake signal
+                    # Block indefinitely — only woken by PUBLISH automation:wake
                     await self.consumer.wait_for_work(timeout=None)
 
                 if not self._running:
                     break
 
-                messages = await self.consumer.consume_batch()
+                # ── Drain ALL messages until stream is empty ──────────────
+                # Process every queued message before sleeping again.
+                # This is the core of the user's requirement:
+                #   "keep processing until queue is empty, then stop"
+                while self._running:
+                    messages = await self.consumer.consume_batch()
+                    if not messages:
+                        break  # stream empty — go back to sleep
 
-                if not messages:
-                    continue
-
-                consecutive_errors = 0
-
-                # ── Sort batch by priority before processing ──────────────
-                messages = sorted(messages, key=_quick_priority)
-
-                await self._process_batch(messages, worker_id)
+                    consecutive_errors = 0
+                    messages = sorted(messages, key=_quick_priority)
+                    await self._process_batch(messages, worker_id)
 
             except asyncio.CancelledError:
                 logger.info("Worker %d cancelled", worker_id)
@@ -200,7 +201,7 @@ class WorkerRuntime:
                     skipped += 1
                     continue
 
-                event = self.processor.process(message)
+                event = await self.processor.process(message)
                 if not event:
                     failed += 1
                     continue
@@ -272,12 +273,17 @@ class WorkerRuntime:
                 "processing_time_ms": response.processing_time_ms,
                 "timestamp":         time.time(),
             }
-            await redis.xadd(
+            pipe = redis.pipeline(transaction=False)
+            pipe.xadd(
                 "automation_responses",
                 {"data": json.dumps(payload)},
                 maxlen=10_000,
                 approximate=True,
             )
+            # Wake the AutomationResponseWorker in emailservice.
+            # It sleeps on asyncio.Event driven by this Pub/Sub channel.
+            pipe.publish("automation:response:wake", "1")
+            await pipe.execute()
             logger.info(
                 "✅ Response sent | conv=%s action=%s confidence=%.2f",
                 response.conversation_id[:12], response.action, response.confidence,

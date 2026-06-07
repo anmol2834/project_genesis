@@ -164,7 +164,7 @@ function LiveInboxDemo() {
         <Typography sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>Live · 1,247 emails/min</Typography>
         <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 0.5 }}>
           <BoltRoundedIcon sx={{ fontSize: 11, color: 'warning.main' }} />
-          <Typography sx={{ color: 'warning.main', fontSize: '0.65rem', fontWeight: 600 }}>{'<'}25ms</Typography>
+          <Typography sx={{ color: 'warning.main', fontSize: '0.65rem', fontWeight: 600 }}>{"< "}15s</Typography>
         </Box>
       </Box>
     </Box>
@@ -270,7 +270,7 @@ export default function HeroSection() {
               <Box component="strong" sx={{ color: 'text.primary', fontWeight: 600 }}>
                 before you even open the email
               </Box>
-              . Sub-25ms processing, smart tone learning, zero-blocking architecture.
+              . Blazing fast processing, smart tone learning, zero-blocking architecture.
             </Typography>
           </motion.div>
 
@@ -323,7 +323,7 @@ export default function HeroSection() {
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.45, delay: 0.35 }}>
             <Box sx={{ display: 'flex', gap: { xs: 2.5, sm: 3 }, flexWrap: 'wrap' }}>
               {[
-                { value: '<25ms', label: 'Response time' },
+                { value: '< 15s', label: 'Response time' },
                 { value: '5K+', label: 'Concurrent users' },
                 { value: '80%',  label: 'Less manual work' },
               ].map((stat) => (

@@ -102,8 +102,20 @@ class IntelligenceOrchestrator:
 
             # ── Full Brain #1 path ────────────────────────────────────────────────
             context = self._prepare_enterprise_context(message_content, subject, memory)
+
+            # Use the fast model (gpt-3.5-turbo) for simple first-turn messages
+            # with short body and a single clear subject. Saves ~5-7s of latency.
+            _use_fast_model = (
+                is_new
+                and len(message_content.strip()) < 80
+                and not any(kw in message_content.lower() for kw in (
+                    "technical", "complaint", "lawsuit", "refund", "breach",
+                    "integration", "api", "enterprise", "contract",
+                ))
+            )
+
             raw_result = await self._call_openai_enterprise_intelligence(
-                context, trace_id, is_new_conversation=is_new
+                context, trace_id, is_new_conversation=is_new, fast_model=_use_fast_model
             )
             intelligence = self._parse_enterprise_intelligence(raw_result, memory)
 
@@ -471,6 +483,7 @@ class IntelligenceOrchestrator:
         context: str,
         trace_id: str,
         is_new_conversation: bool = False,
+        fast_model: bool = False,
     ) -> Dict[str, Any]:
         """
         Call OpenAI Brain #1 with ENTERPRISE PROMPT.
@@ -598,16 +611,20 @@ RESPOND WITH VALID JSON ONLY (no markdown, no extra text):
 }}
 """
 
+        # Use a fast model for short/simple first-turn messages to cut latency ~3-5x.
+        # Falls back to the configured model for complex multi-intent messages.
+        model_to_use = "gpt-3.5-turbo" if fast_model else self.model
+
         try:
             response = await self.openai_client.chat.completions.create(
-                model=self.model,
+                model=model_to_use,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": context}
                 ],
                 temperature=0.3,
-                max_tokens=1500,
-                timeout=20.0
+                max_tokens=600 if fast_model else 800,
+                timeout=15.0 if fast_model else 20.0,
             )
 
             content = response.choices[0].message.content.strip()
@@ -688,11 +705,32 @@ RESPOND WITH VALID JSON ONLY (no markdown, no extra text):
             business_reasoning_data = raw_result.get("business_reasoning", {})
             business_reasoning = BusinessReasoning(**business_reasoning_data)
             
-            # Parse response strategy
+            # Parse response strategy — safe enum lookup: unknown values fall back to DEFAULT
             response_strategy_data = raw_result.get("response_strategy", {})
+            raw_tone     = response_strategy_data.get("tone", "professional_consultative")
+            raw_template = response_strategy_data.get("prompt_template", "default_professional")
+
+            # Safe tone lookup
+            try:
+                tone = ResponseTone(raw_tone)
+            except ValueError:
+                tone = ResponseTone.PROFESSIONAL_CONSULTATIVE
+
+            # Safe template lookup — GPT often returns short aliases (e.g. "sales_pricing")
+            # that don't match the full enum values. Fall back to DEFAULT gracefully.
+            try:
+                prompt_template = PromptTemplate(raw_template)
+            except ValueError:
+                # Try a prefix match against enum values
+                matched = next(
+                    (pt for pt in PromptTemplate if raw_template in pt.value or pt.value.startswith(raw_template)),
+                    PromptTemplate.DEFAULT,
+                )
+                prompt_template = matched
+
             response_strategy = ResponseStrategy(
-                tone=ResponseTone(response_strategy_data.get("tone", "professional_consultative")),
-                prompt_template=PromptTemplate(response_strategy_data.get("prompt_template", "default_professional")),
+                tone=tone,
+                prompt_template=prompt_template,
                 response_depth=response_strategy_data.get("response_depth", "balanced")
             )
             

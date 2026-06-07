@@ -185,6 +185,43 @@ class ExecutionEngine:
                 "security": {},
             }
 
+        # ── Greeting fast-path: bypass retrieval + LLM for pure greetings ─
+        # A greeting with no question and no subject keyword goes through a
+        # deterministic response — zero OpenAI calls, zero Qdrant queries.
+        greeting_response = self._try_greeting_fast_path(event, memory)
+        if greeting_response is not None:
+            logger.info(
+                "Greeting fast-path | latency<50ms | msg=%s",
+                event.message_id[:12], trace_id=ctx.trace_id,
+            )
+            total_ms = (time.perf_counter() - pipeline_start) * 1000
+            return {
+                "memory": memory,
+                "intelligence": None,
+                "retrieval": {"chunks": [], "retrieval_confidence": 1.0, "layers_used": ["GREETING_FAST_PATH"]},
+                "llm_result": {
+                    "response_text": greeting_response,
+                    "confidence": 0.95,
+                    "hallucination_detected": False,
+                    "grounding_score": 0.95,
+                    "fallback_tier": 0,
+                    "fallback_tier_name": "greeting_fast_path",
+                    "fallback_error_chain": [],
+                    "escalate_to_human": False,
+                    "pre_gen_grounding": {"escalate": False, "overall_confidence": 0.95,
+                                         "accepted_chunks": 0, "rejected_chunks": 0,
+                                         "pricing_conflicts": 0, "tenant_violations": 0,
+                                         "category_violations": 0},
+                },
+                "decision": {"action": "send", "should_send": True,
+                             "final_confidence": 0.95, "escalation_reason": None,
+                             "escalation_priority": None},
+                "response_filter": None,
+                "pipeline_trace": recorder.finalize(outcome="send", total_latency_ms=total_ms),
+                "priority": {"priority": "low", "priority_int": 3},
+                "security": tenant_ctx.security_summary(),
+            }
+
         recorder.stage_start("intelligence")
         try:
             intelligence = await intelligence_orch.understand_intent(
@@ -297,6 +334,8 @@ class ExecutionEngine:
             user_id=ctx.user_id,
             trace_id=ctx.trace_id,
             memory=memory,
+            message_content=event.content,
+            subject=event.subject,
         )
 
         # ── Stage 4: LLM Generation ───────────────────────────────────────
@@ -407,15 +446,19 @@ class ExecutionEngine:
         user_id: str,
         trace_id: str,
         memory: Optional[Dict] = None,
+        message_content: str = "",
+        subject: str = "",
     ) -> Dict:
         """
-        Inject data_analytics context for generic/discovery intents.
+        Inject data_analytics context for genuine discovery/inquiry intents.
+
+        Gate: only injects when the current message contains information-seeking
+        signals (product/price/support/etc. in body OR subject). Pure greetings
+        with no subject intent are excluded even if intent=general_inquiry.
 
         Cache-first: if memory already holds a discovery_context from a
         previous turn, rebuild analytics chunks from it without hitting
         Qdrant at all (zero extra I/O on continuations).
-
-        Qdrant fetch only: first discovery message per conversation thread.
         """
         if retrieval.get("_analytics_injected"):
             return retrieval
@@ -429,10 +472,43 @@ class ExecutionEngine:
             t = intelligence.primary_intents[0].type
             intent_str = (t.value if hasattr(t, "value") else str(t)).lower()
 
+        # Relevance gate: analytics should NOT inject for pure greetings or
+        # generic questions (contact, help, etc.) unrelated to products/pricing.
+        # Only inject when message contains genuine product/catalog discovery signals.
+        _DISCOVERY_SIGNALS = {
+            "product", "service", "price", "cost", "buy", "order", "offer",
+            "discount", "feature", "spec", "available", "catalog", "range",
+            "delivery", "policy", "refund", "enquiry", "inquiry",
+            "laptop", "model", "compare", "recommend", "option",
+            "cheapest", "expensive", "budget", "premium", "gaming",
+        }
+        # Block analytics injection when query is clearly off-catalog
+        # (contact info, account issues, generic help, etc.)
+        _ANALYTICS_BLOCKLIST = {
+            "contact", "phone", "email", "address", "location", "office",
+            "account", "login", "password", "reset", "sign in", "sign up",
+        }
+        combined_text = f"{message_content} {subject}".lower()
+        has_discovery_signal = (
+            any(s in combined_text for s in _DISCOVERY_SIGNALS)
+            and not any(b in combined_text for b in _ANALYTICS_BLOCKLIST)
+        )
+
+        # Intent is specific (non-generic): always allow analytics
+        # Intent is generic but message has discovery signals: allow
+        # Intent is generic and no discovery signals: block (pure greeting)
+        has_info_intent = (
+            intent_str not in generic_intents
+            or has_discovery_signal
+        )
+
         needs_analytics = (
-            not existing_chunks
-            or conf < 0.30
-            or intent_str in generic_intents
+            has_info_intent
+            and (
+                not existing_chunks
+                or conf < 0.30
+                or intent_str in generic_intents
+            )
         )
 
         if not needs_analytics:
@@ -563,15 +639,136 @@ class ExecutionEngine:
 
         return retrieval
 
+    def _try_greeting_fast_path(self, event: Any, memory: dict) -> str | None:
+        """
+        Returns a deterministic greeting response when the message is a pure
+        greeting/acknowledgement with no information-seeking intent.
+
+        Conditions for fast-path (ALL must be true):
+          1. Message body is a known greeting phrase or very short (<= 3 words)
+          2. Subject has no information-seeking keywords
+          3. First or early turn (turn_count <= 1) — avoids hijacking mid-conversation
+
+        Returns response string if fast-path applies, None otherwise.
+        """
+        content = (event.content or "").strip().lower()
+        subject = (event.subject or "").strip().lower()
+
+        # Only apply on new conversations (turn 0)
+        turn_count = memory.get("turn_count", 0)
+        if turn_count > 0:
+            return None
+
+        # Pure greeting patterns — exact or prefix match
+        _GREETING_EXACT = {
+            "hello", "hi", "hey", "hii", "hiii", "hiiii", "helloooo",
+            "helo", "helo there", "hi there", "hey there", "hello there",
+            "good morning", "good afternoon", "good evening", "good day",
+            "greetings", "howdy", "yo", "sup",
+            "thanks", "thank you", "thank you!", "thanks!", "ty",
+            "ok", "okay", "k", "noted",
+        }
+        # Also match if the full content is <=3 words and all words are greetings
+        _GREETING_WORDS = {
+            "hello", "hi", "hey", "hii", "helo", "hola", "greetings",
+            "good", "morning", "afternoon", "evening", "thanks", "thank", "you",
+            "howdy", "yo", "sup", "okay", "ok",
+        }
+
+        is_greeting = (
+            content in _GREETING_EXACT
+            or content.rstrip("!.") in _GREETING_EXACT
+            or (len(content.split()) <= 3
+                and all(w in _GREETING_WORDS for w in content.split()))
+        )
+
+        if not is_greeting:
+            return None
+
+        # Subject must not contain information-seeking keywords
+        _INFO_KEYWORDS = {
+            "price", "cost", "buy", "purchase", "order", "product", "service",
+            "support", "help", "issue", "problem", "refund", "return", "delivery",
+            "enquiry", "inquiry", "information", "details", "quote", "offer",
+            "discount", "available", "stock", "spec", "feature", "review",
+        }
+        if any(kw in subject for kw in _INFO_KEYWORDS):
+            return None
+
+        # Return a warm, brief greeting response
+        return (
+            "Hello! Thank you for reaching out. "
+            "How can I assist you today? Feel free to ask about our products, "
+            "pricing, support, or anything else you'd like to know."
+        )
+
+    def _is_transactional_email(self, event: Any) -> bool:
+        """
+        Fast O(1) transactional email check using the same frozensets as emailservice.
+        Returns True when the event should be silently skipped (no AI pipeline).
+        Only fires for emails that somehow passed emailservice's own filter
+        (e.g. CATEGORY_PERSONAL bank e-statements that have no 'unsubscribe' snippet).
+        """
+        subject    = (getattr(event, "subject",    "") or "").lower()[:80]
+        from_email = (getattr(event, "from_email", "") or "").lower()
+
+        # Subject prefix check (mirrors email_filter._REJECT_SUBJECT_PREFIXES)
+        _TRANSACTIONAL_SUBJECT_PREFIXES = (
+            "statement of your account",
+            "your account statement",
+            "e-statement",
+            "account statement for",
+            "transaction alert",
+            "transaction notification",
+            "otp for",
+            "your otp",
+            "verification code",
+            "your verification",
+            "password reset",
+            "reset your password",
+            "security alert",
+            "login attempt",
+            "suspicious activity",
+            "delivery status",
+            "mail delivery",
+            "undeliverable",
+            "auto-reply:",
+            "auto reply:",
+            "out of office",
+            "automatic reply",
+        )
+        if subject.startswith(_TRANSACTIONAL_SUBJECT_PREFIXES):
+            return True
+
+        # Sender local-part check (e.g. estatement@bankofbaroda.bank.in)
+        _TRANSACTIONAL_LOCAL_PARTS = frozenset({
+            "estatement", "statement", "alert", "alerts",
+            "notification", "notifications", "notify",
+            "updates", "update", "system", "robot",
+            "noreply", "no-reply", "donotreply", "do-not-reply",
+            "mailer-daemon", "postmaster", "bounce", "bounces",
+            "automated", "newsletter", "marketing", "promo",
+        })
+        at = from_email.find("@")
+        if at > 0:
+            local = from_email[:at].replace(".", "").replace("-", "").replace("_", "")
+            if local in _TRANSACTIONAL_LOCAL_PARTS:
+                return True
+            # Also check the raw local part without normalisation
+            raw_local = from_email[:at]
+            if raw_local in _TRANSACTIONAL_LOCAL_PARTS:
+                return True
+
+        return False
+
     def _create_response_event(self, ctx: ExecutionContext, original_event: AutomationEvent, result: Dict) -> ResponseEvent:
         """Create response event from execution results"""
         decision     = result["decision"]
         llm_result   = result["llm_result"]
         intelligence = result["intelligence"]
 
-        # intelligence is always an EnterpriseIntelligenceResult (Pydantic model),
-        # never a plain dict — extract intent safely via attributes.
-        if hasattr(intelligence, "primary_intents") and intelligence.primary_intents:
+        # intelligence may be None on transactional skip path
+        if intelligence is not None and hasattr(intelligence, "primary_intents") and intelligence.primary_intents:
             first_intent = intelligence.primary_intents[0].type
             intent_str = first_intent.value if hasattr(first_intent, "value") else str(first_intent)
         else:

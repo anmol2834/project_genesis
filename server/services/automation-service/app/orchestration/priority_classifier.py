@@ -181,18 +181,27 @@ class PriorityClassifier:
                         break   # can't go higher, short-circuit
 
         # ── 2. Intelligence urgency ───────────────────────────────────────
-        urgency = _get_nested(intelligence, "conversation_analysis", "urgency") or "medium"
-        urgency_floor = _URGENCY_FLOOR.get(str(urgency).lower(), Priority.P2_MEDIUM)
+        urgency_raw = _get_nested(intelligence, "conversation_analysis", "urgency") or "medium"
+        # Extract bare string from enum (Urgency.LOW → "low") or use string directly
+        urgency_str = (
+            urgency_raw.value if hasattr(urgency_raw, "value")
+            else str(urgency_raw).split(".")[-1].lower()
+        )
+        urgency_floor = _URGENCY_FLOOR.get(urgency_str, Priority.P2_MEDIUM)
         if urgency_floor < candidate:
             candidate = urgency_floor
-            signals.append(f"urgency={urgency}")
+            signals.append(f"urgency={urgency_str}")
 
         # ── 3. Intelligence sentiment ─────────────────────────────────────
-        sentiment = _get_nested(intelligence, "conversation_analysis", "sentiment") or "neutral"
-        sent_floor = _SENTIMENT_FLOOR.get(str(sentiment).lower(), Priority.P2_MEDIUM)
+        sentiment_raw = _get_nested(intelligence, "conversation_analysis", "sentiment") or "neutral"
+        sentiment_str = (
+            sentiment_raw.value if hasattr(sentiment_raw, "value")
+            else str(sentiment_raw).split(".")[-1].lower()
+        )
+        sent_floor = _SENTIMENT_FLOOR.get(sentiment_str, Priority.P2_MEDIUM)
         if sent_floor < candidate:
             candidate = sent_floor
-            signals.append(f"sentiment={sentiment}")
+            signals.append(f"sentiment={sentiment_str}")
 
         # ── 4. Primary intent ─────────────────────────────────────────────
         intent = _get_primary_intent(intelligence)
@@ -325,7 +334,14 @@ def _get_primary_intent(intelligence: Any) -> str:
     if intents:
         first = intents[0]
         t = first.get("type") if isinstance(first, dict) else getattr(first, "type", None)
-        return str(t).lower() if t else "general_inquiry"
+        if t is None:
+            return "general_inquiry"
+        # Extract .value from enum (IntentType.GENERAL_INQUIRY → "general_inquiry")
+        # then fall back to splitting on "." for legacy string repr
+        if hasattr(t, "value"):
+            return str(t.value).lower()
+        raw = str(t).lower()
+        return raw.split(".")[-1] if "." in raw else raw
     return "general_inquiry"
 
 

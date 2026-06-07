@@ -17,9 +17,9 @@ const EMAILS = [
 ];
 
 const PIPELINE_STEPS = [
-  { icon: InboxRoundedIcon,       label: 'Email received',  ms: '< 5ms',   color: '#6366f1' },
-  { icon: AutoAwesomeRoundedIcon, label: 'AI processing',   ms: '< 50ms',  color: '#8b5cf6' },
-  { icon: CheckCircleRoundedIcon, label: 'Reply ready',     ms: '< 200ms', color: '#10b981' },
+  { icon: InboxRoundedIcon,       label: 'Email received',  s: '< 1s',   color: '#6366f1' },
+  { icon: AutoAwesomeRoundedIcon, label: 'AI processing',   s: '< 5s',  color: '#8b5cf6' },
+  { icon: CheckCircleRoundedIcon, label: 'Reply ready',     s: '< 1s', color: '#10b981' },
 ];
 
 // Precise sleep — no drift
@@ -205,7 +205,7 @@ export default function AuthVisual() {
                           {step.label}
                         </Typography>
                         <Typography sx={{ fontSize: '0.62rem', color: active ? step.color : 'text.disabled', fontWeight: 600, transition: 'color 0.4s ease' }}>
-                          {step.ms}
+                          {step.s}
                         </Typography>
                       </Box>
                     </motion.div>

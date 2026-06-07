@@ -58,7 +58,12 @@ class StorageWorker(BaseWorker):
                 continue
 
             # End-to-end idempotency: skip if this event_id was already stored
-            if idem.check_and_mark("store", event_id):
+            # Idempotency key must be per-message, not per-batch event.
+            # The batch event_id (e.g. gmail:agg:...:historyId) is shared across
+            # all messages in a webhook batch — using it would drop every message
+            # after the first in the batch. Use message_id as the unique key.
+            per_message_key = f"store:{msg_id}" if msg_id else event_id
+            if idem.check_and_mark("store", per_message_key):
                 skipped += 1
                 continue
 

@@ -226,8 +226,7 @@ export const DATA_ENTRIES: DataEntry[] = [
     qualityScore: 100, missingFields: [], usedIn: ['Q4 Enterprise Outreach'],
     updatedAt: '1w ago', accentColor: '#f472b6',
     fields: [
-      { key: 'phone',    label: 'Phone',         value: '+1-800-555-0100',              type: 'phone', aiRelevance: 'critical' },
-      { key: 'email',    label: 'Support Email', value: 'support@Proxipilot.com',       type: 'email', aiRelevance: 'critical' },
+      { key: 'email',    label: 'Support Email', value: 'hello@Proxipilot.com',       type: 'email', aiRelevance: 'critical' },
       { key: 'weekdays', label: 'Mon – Fri',     value: '9:00 AM – 6:00 PM (EST)',      type: 'time',  aiRelevance: 'high' },
       { key: 'timezone', label: 'Timezone',      value: 'Eastern Standard Time (UTC-5)', type: 'text', aiRelevance: 'high' },
     ],

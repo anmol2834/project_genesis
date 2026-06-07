@@ -1,5 +1,20 @@
 import type { NextConfig } from 'next';
 
+// API URL must be in connect-src so the browser allows XHR/fetch to the backend.
+// Read at build time from the env — falls back to localhost for local dev.
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.googletagmanager.com https://www.google-analytics.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com data:",
+  "img-src 'self' data: blob: https:",
+  // API_URL is interpolated here — autoformat cannot collapse this to a string literal
+  'connect-src \'self\' ' + API_URL + ' https://api.web3forms.com https://www.google-analytics.com',
+  "frame-ancestors 'none'",
+].join('; ');
+
 const securityHeaders = [
   { key: 'X-DNS-Prefetch-Control', value: 'on' },
   { key: 'X-Content-Type-Options', value: 'nosniff' },
@@ -13,15 +28,7 @@ const securityHeaders = [
   },
   {
     key: 'Content-Security-Policy',
-    value: [
-      "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.googletagmanager.com https://www.google-analytics.com",
-      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-      "font-src 'self' https://fonts.gstatic.com data:",
-      "img-src 'self' data: blob: https:",
-      "connect-src 'self' https://api.web3forms.com https://www.google-analytics.com",
-      "frame-ancestors 'none'",
-    ].join('; '),
+    value: CSP,
   },
 ];
 
