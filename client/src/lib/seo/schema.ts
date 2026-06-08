@@ -4,14 +4,18 @@ export function organizationSchema() {
   return {
     '@context': 'https://schema.org',
     '@type': 'Organization',
+    '@id': `${SITE_URL}/#organization`,
     name: SITE_NAME,
     url: SITE_URL,
     logo: {
       '@type': 'ImageObject',
-      url: `${SITE_URL}/Proxipilot logo.svg`,
-      width: 200,
-      height: 200,
+      '@id': `${SITE_URL}/#logo`,
+      url: `${SITE_URL}/Proxipilot-logo.ico`,
+      contentUrl: `${SITE_URL}/Proxipilot-logo.ico`,
+      caption: SITE_NAME,
     },
+    description:
+      'Proxipilot is an AI-powered email automation platform that generates smart replies before you open your inbox.',
     sameAs: [
       'https://twitter.com/proxipilot',
       'https://linkedin.com/company/proxipilot',
@@ -28,15 +32,11 @@ export function websiteSchema() {
   return {
     '@context': 'https://schema.org',
     '@type': 'WebSite',
+    '@id': `${SITE_URL}/#website`,
     name: SITE_NAME,
     url: SITE_URL,
-    potentialAction: {
-      '@type': 'SearchAction',
-      target: {
-        '@type': 'EntryPoint',
-        urlTemplate: `${SITE_URL}/?q={search_term_string}`,
-      },
-      'query-input': 'required name=search_term_string',
+    publisher: {
+      '@id': `${SITE_URL}/#organization`,
     },
   };
 }
@@ -45,12 +45,17 @@ export function softwareApplicationSchema() {
   return {
     '@context': 'https://schema.org',
     '@type': 'SoftwareApplication',
+    '@id': `${SITE_URL}/#softwareapplication`,
     name: SITE_NAME,
     applicationCategory: 'BusinessApplication',
     operatingSystem: 'Web',
     url: SITE_URL,
     description:
       'AI-powered email automation platform that generates replies before you open the email. Blazing fast processing, smart tone learning, enterprise-grade inbox management.',
+    brand: {
+      '@type': 'Brand',
+      name: SITE_NAME,
+    },
     offers: {
       '@type': 'AggregateOffer',
       priceCurrency: 'USD',
@@ -63,9 +68,7 @@ export function softwareApplicationSchema() {
       ],
     },
     provider: {
-      '@type': 'Organization',
-      name: SITE_NAME,
-      url: SITE_URL,
+      '@id': `${SITE_URL}/#organization`,
     },
     featureList: [
       'AI-powered email reply generation',
@@ -131,9 +134,7 @@ export function articleSchema({
     image: image ?? `${SITE_URL}/og-default.png`,
     author: { '@type': 'Organization', name: SITE_NAME, url: SITE_URL },
     publisher: {
-      '@type': 'Organization',
-      name: SITE_NAME,
-      logo: { '@type': 'ImageObject', url: `${SITE_URL}/Proxipilot logo.svg` },
+      '@id': `${SITE_URL}/#organization`,
     },
   };
 }

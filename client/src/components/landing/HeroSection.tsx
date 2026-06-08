@@ -248,6 +248,20 @@ export default function HeroSection() {
                 backgroundClip: 'text',
               }}
             >
+              {/* Visually hidden brand name for SEO — screen readers and crawlers see it */}
+              <Box
+                component="span"
+                sx={{
+                  position: 'absolute',
+                  width: 1,
+                  height: 1,
+                  overflow: 'hidden',
+                  clip: 'rect(0 0 0 0)',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                Proxipilot —{' '}
+              </Box>
               Email replies on{' '}
               <Box component="span" sx={{ background: grad.primary, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text' }}>
                 autopilot.

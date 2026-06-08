@@ -14,7 +14,7 @@ export const metadata: Metadata = {
     template: `%s | ${SITE_NAME}`,
   },
   description:
-    'Proxipilot is an AI-powered email automation platform that generates replies before you open your inbox. Blazing fast processing, smart tone learning, enterprise-grade inbox management.',
+    'Proxipilot automatically generates smart email replies before you open your inbox. Save 20+ hours per week with blazing-fast AI processing and intelligent tone learning.',
   applicationName: SITE_NAME,
   authors: [{ name: SITE_NAME, url: SITE_URL }],
   publisher: SITE_NAME,
