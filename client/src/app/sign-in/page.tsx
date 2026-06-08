@@ -6,7 +6,6 @@ export const metadata: Metadata = buildMetadata({
   title: 'Sign In',
   description: 'Sign in to your Proxipilot account to access your AI-powered email automation dashboard.',
   path: '/sign-in',
-  noIndex: true,
 });
 
 export default function Page() {

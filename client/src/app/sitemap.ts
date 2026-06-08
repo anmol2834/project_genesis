@@ -39,19 +39,13 @@ export default function sitemap(): MetadataRoute.Sitemap {
       url: `${SITE_URL}/sign-in`,
       lastModified: now,
       changeFrequency: 'yearly',
-      priority: 0.3,
+      priority: 0.5,
     },
     {
       url: `${SITE_URL}/sign-up`,
       lastModified: now,
       changeFrequency: 'yearly',
-      priority: 0.3,
-    },
-    {
-      url: `${SITE_URL}/dashboard`,
-      lastModified: now,
-      changeFrequency: 'yearly',
-      priority: 0.3,
+      priority: 0.6,
     },
   ];
 }
