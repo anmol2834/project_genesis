@@ -43,6 +43,7 @@ export default function Footer() {
         {/* Links */}
         <Box sx={{ display: 'flex', gap: { xs: 2.5, sm: 3 }, flexWrap: 'wrap', justifyContent: 'center' }}>
           {[
+            { label: 'Pricing', href: '/pricing' },
             { label: 'Privacy', href: '/privacy' },
             { label: 'Terms', href: '/terms' },
             { label: 'Refund', href: '/refund' },
