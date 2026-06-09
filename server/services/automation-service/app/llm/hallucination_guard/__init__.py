@@ -158,7 +158,8 @@ class PreGenerationGroundingValidator:
                 active_topic=active_topic,
                 allowed_types=allowed_types,
                 query=query,
-                pricing_map=pricing_map if not is_analytics else {},  # exclude analytics from pricing map
+                pricing_map=pricing_map if not is_analytics else {},
+                is_analytics=is_analytics,
             )
             scores.append(score)
 
@@ -179,11 +180,10 @@ class PreGenerationGroundingValidator:
         # Downgrade grounding for pricing conflicts
         if pricing_conflicts:
             logger.warning(
-                "⚠️ Pricing conflicts detected: %d | entities=%s",
+                "Pricing conflicts detected: %d | entities=%s",
                 len(pricing_conflicts),
                 [c["entity"] for c in pricing_conflicts],
             )
-            # Remove chunks that contributed conflicting prices
             conflict_entities = {c["entity"].lower() for c in pricing_conflicts}
             validated = [
                 c for c in validated
@@ -201,7 +201,6 @@ class PreGenerationGroundingValidator:
                 overall = 0.0
             else:
                 overall = sum(s.final_grounding_score for s in passing) / len(passing)
-                # Penalise for high rejection ratio
                 reject_ratio = len(rejected) / len(chunks)
                 overall = overall * (1.0 - reject_ratio * 0.3)
 
@@ -210,7 +209,7 @@ class PreGenerationGroundingValidator:
         latency = (time.perf_counter() - t_start) * 1000
 
         logger.info(
-            "🛡️ Pre-gen grounding | intent=%s accepted=%d rejected=%d "
+            "Pre-gen grounding | intent=%s accepted=%d rejected=%d "
             "pricing_conflicts=%d tenant_violations=%d confidence=%.3f latency=%.1fms",
             intent_type, len(validated), len(rejected),
             len(pricing_conflicts), tenant_violations, overall, latency,
@@ -244,6 +243,7 @@ class PreGenerationGroundingValidator:
         allowed_types: set,
         query: str,
         pricing_map: Dict[str, List[float]],
+        is_analytics: bool = False,
     ) -> ChunkGroundingScore:
 
         chunk_id   = chunk.get("chunk_id") or chunk.get("id", "unknown")
@@ -253,7 +253,7 @@ class PreGenerationGroundingValidator:
         chunk_uid  = chunk.get("user_id") or chunk.get("metadata", {}).get("user_id", "")
         reasons: List[str] = []
 
-        # ── 1. Tenant validation (ZERO exceptions) ────────────────────────
+        # 1. Tenant validation (ZERO exceptions)
         tenant_valid = (not chunk_uid) or (chunk_uid == user_id)
         if not tenant_valid:
             reasons.append("tenant_mismatch")
@@ -265,37 +265,56 @@ class PreGenerationGroundingValidator:
                 validated=False, rejection_reasons=reasons,
             )
 
-        # ── 2. Content quality ────────────────────────────────────────────
+        # 2. Content quality
         content_valid = bool(content) and len(content.strip()) >= 20
         if not content_valid:
             reasons.append("empty_or_too_short")
 
-        # ── 3. Semantic score ─────────────────────────────────────────────
+        # 3. Semantic score
         if score_raw < MIN_SEMANTIC_SCORE:
             reasons.append(f"low_semantic_score_{score_raw:.2f}")
 
-        # ── 4. Category alignment ─────────────────────────────────────────
+        # 4. Category alignment
         normalized_type = chunk_type.replace("-", "_")
         category_ok = normalized_type in allowed_types or "general" in allowed_types
         category_score = 1.0 if category_ok else 0.0
         if not category_ok:
             reasons.append(f"category_mismatch_{chunk_type}_for_{intent_type}")
 
-        # ── 5. Entity alignment ───────────────────────────────────────────
-        entity_score = self._entity_alignment_score(content, entities, active_topic, query)
-        if entity_score < 0.1 and entities:
+        # 5. Entity alignment
+        # data_analytics chunks with pricing data are always relevant for
+        # pricing_inquiry even when no specific product name was mentioned.
+        # Without this, "What is the price?" rejects ALL grounding chunks
+        # (entity_score~0) and falls through to escalate instead of answering.
+        content_lower_check = content.lower()
+        is_pricing_analytics = (
+            is_analytics
+            and intent_type == "pricing_inquiry"
+            and (
+                "price" in content_lower_check
+                or "cheapest" in content_lower_check
+                or "most expensive" in content_lower_check
+                or "avg_price" in content_lower_check
+                or "price_insights" in content_lower_check
+            )
+        )
+        if is_pricing_analytics:
+            entity_score = 0.8  # authoritative pricing summary — always relevant
+        else:
+            entity_score = self._entity_alignment_score(content, entities, active_topic, query)
+        if entity_score < 0.1 and entities and not is_pricing_analytics:
             reasons.append("entity_not_found_in_chunk")
 
-        # ── 6. Pricing consistency (collect prices, conflicts checked later) ─
+        # 6. Pricing consistency (collect prices, conflicts checked later)
         prices = self._extract_prices(content)
         entity_key = self._dominant_entity(content, entities) or "unknown"
         if prices:
             if entity_key not in pricing_map:
                 pricing_map[entity_key] = []
             pricing_map[entity_key].extend(prices)
-        pricing_consistent = True  # conflict resolution done after all chunks
+        pricing_consistent = True
 
-        # ── 7. Composite grounding score ─────────────────────────────────
+        # 7. Composite grounding score
         grounding = (
             score_raw         * 0.35 +
             entity_score      * 0.30 +
@@ -423,18 +442,17 @@ class PreGenerationGroundingValidator:
         content_lower = content.lower()
         return any(e in content_lower for e in entities)
 
-    # ── Intelligence extraction (handles dataclass and dict) ──────────────
+    # Intelligence extraction (handles dataclass and dict)
 
     def _get_intent_type(self, intelligence: Any) -> str:
         if isinstance(intelligence, dict):
             intents = intelligence.get("primary_intents", [])
             if intents:
                 first = intents[0]
-                return first.get("type", "general_inquiry") if isinstance(first, dict) \
-                    else str(getattr(first, "type", "general_inquiry"))
+                if isinstance(first, dict):
+                    return first.get("type", "general_inquiry")
+                return str(getattr(first, "type", "general_inquiry"))
             return intelligence.get("intent", "general_inquiry")
-
-        # dataclass: EnterpriseIntelligenceResult
         intents = getattr(intelligence, "primary_intents", [])
         if intents:
             return str(getattr(intents[0], "type", "general_inquiry"))
@@ -458,7 +476,7 @@ class PreGenerationGroundingValidator:
         br = getattr(intelligence, "business_reasoning", None)
         return str(getattr(br, "likely_goal", "") or "") if br else ""
 
-    # ── Empty result ──────────────────────────────────────────────────────
+    # Empty result
 
     def _empty_result(self, t_start: float) -> GroundingResult:
         return GroundingResult(

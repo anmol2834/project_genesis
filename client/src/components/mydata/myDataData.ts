@@ -1,6 +1,6 @@
 export type DataCategory =
   | 'product_service'
-  | 'pricing_payment'
+  | 'issue_resolution'
   | 'contact_support'
   | 'offers_promotions'
   | 'delivery_shipping'
@@ -70,15 +70,15 @@ export const CATEGORY_CONFIG: Record<DataCategory, CategoryMeta> = {
     exampleColumns: ['Product Name', 'Description', 'Features', 'Variants', 'Availability', 'Demo URL', 'Category'],
     exampleEntry: 'Product Name: Proxipilot Pro | Features: AI personalization, multi-inbox | Availability: In stock',
   },
-  pricing_payment: {
-    label: 'Pricing & Payment',
-    emoji: '💰',
-    icon: 'payments',
-    color: '#34d399',
-    description: 'Plans, tiers, discounts, taxes, payment methods, refund policy',
-    guide: 'Pricing data is critical for the AI to handle objections and close deals. Include all tiers, payment options, and refund terms.',
-    exampleColumns: ['Plan Name', 'Monthly Price', 'Annual Price', 'Discount', 'Payment Methods', 'Refund Policy', 'Tax Info'],
-    exampleEntry: 'Plan: Pro | Price: $79/mo | Annual: $59/mo | Payment: UPI, Cards, EMI | Refund: 30-day money back',
+  issue_resolution: {
+    label: 'Issue Resolution',
+    emoji: '🔧',
+    icon: 'build_circle',
+    color: '#f97316',
+    description: 'Problems, errors, bugs, troubleshooting steps, root causes, resolutions',
+    guide: 'Document any issue and its resolution — hardware failures, login errors, integration bugs, payment failures, delivery problems. The AI uses this to instantly resolve similar issues and reduce support load.',
+    exampleColumns: ['Issue Title', 'Issue Description', 'Category', 'Root Cause', 'Resolution Steps', 'Affected Platform', 'Severity', 'Status'],
+    exampleEntry: 'Issue: Gmail integration not working | Root Cause: OAuth token expired | Resolution: Re-authenticate via Settings → Integrations → Gmail',
   },
   contact_support: {
     label: 'Contact & Support',
@@ -196,16 +196,15 @@ export const DATA_ENTRIES: DataEntry[] = [
     ],
   },
   {
-    id: 'e3', title: 'Pro Plan', category: 'pricing_payment',
+    id: 'e3', title: 'Issue Resolution Examples', category: 'issue_resolution',
     sourceId: 's1', sourceName: 'Manual Entry', sourceType: 'manual',
-    qualityScore: 98, missingFields: [], usedIn: ['Q4 Enterprise Outreach', 'SaaS Decision Makers'],
-    updatedAt: '30m ago', accentColor: '#34d399',
+    qualityScore: 92, missingFields: [], usedIn: ['Q4 Enterprise Outreach', 'SaaS Decision Makers'],
+    updatedAt: '30m ago', accentColor: '#f97316',
     fields: [
-      { key: 'plan_name',    label: 'Plan Name',      value: 'Pro',                                  type: 'text',   aiRelevance: 'critical' },
-      { key: 'price',        label: 'Monthly Price',  value: '$79/month',                            type: 'text',   aiRelevance: 'critical' },
-      { key: 'annual_price', label: 'Annual Price',   value: '$59/month (billed annually)',           type: 'text',   aiRelevance: 'critical' },
-      { key: 'emails_limit', label: 'Emails / Month', value: '15,000',                               type: 'number', aiRelevance: 'high' },
-      { key: 'support',      label: 'Support',        value: 'Priority chat + email',                type: 'text',   aiRelevance: 'medium' },
+      { key: 'issue_title',       label: 'Issue Title',       value: 'Gmail integration not working',                     type: 'text', aiRelevance: 'critical' },
+      { key: 'root_cause',        label: 'Root Cause',        value: 'OAuth token expired',                               type: 'text', aiRelevance: 'critical' },
+      { key: 'resolution_steps',  label: 'Resolution Steps',  value: 'Re-authenticate via Settings → Integrations → Gmail', type: 'text', aiRelevance: 'critical' },
+      { key: 'affected_platform', label: 'Affected Platform', value: 'Gmail',                                             type: 'text', aiRelevance: 'high' },
     ],
   },
   {

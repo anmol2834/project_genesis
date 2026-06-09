@@ -6,6 +6,15 @@
  *   sources — 2 min stale
  *   entries — 3 min stale (larger payload, changes less often)
  *   entry   — 5 min stale (single item, rarely changes)
+ *
+ * Data fetching strategy:
+ *   ALL entries are always fetched from the DB in a single request
+ *   (page_size=500 covers virtually all realistic datasets).
+ *   Category/source filtering is done CLIENT-SIDE so:
+ *     1. The left-nav category counts are always accurate (all categories visible)
+ *     2. Switching categories is instant (no extra network round-trip)
+ *     3. Loading stops as soon as all DB data is received — no Qdrant involved
+ *   This approach is intentional: GET /data/entries reads PostgreSQL only.
  */
 
 import { useQuery } from '@tanstack/react-query';
@@ -34,6 +43,20 @@ export function useDataSources() {
   });
 }
 
+/**
+ * Fetch ALL entries from the DB in one shot (page_size=500).
+ * No category filter — filtering is done client-side.
+ * This is the single source of truth for the My Data page.
+ */
+export function useAllDataEntries() {
+  return useQuery({
+    queryKey: queryKeys.data.entries(),
+    queryFn:  () => dataApi.getEntries({ page: 1, page_size: 500 }),
+    staleTime: 3 * 60 * 1000,
+    placeholderData: (prev) => prev,
+  });
+}
+
 /** Paginated data entries — supports category + source_id filtering. */
 export function useDataEntries(params: DataEntryListParams = {}) {
   const queryKey = Object.keys(params).length
@@ -44,20 +67,18 @@ export function useDataEntries(params: DataEntryListParams = {}) {
     queryKey,
     queryFn:  () => dataApi.getEntries(params),
     staleTime: 3 * 60 * 1000,
-    placeholderData: (prev) => prev, // keeps previous data visible while loading
+    placeholderData: (prev) => prev,
   });
 }
 
-/** Entries filtered to a single category — used by the left-nav category filter. */
+/**
+ * @deprecated Use useAllDataEntries() + client-side filtering instead.
+ * Kept for backward compatibility only.
+ */
 export function useDataEntriesByCategory(category: DataCategory | 'all') {
   return useQuery({
-    queryKey: category === 'all'
-      ? queryKeys.data.entries()
-      : queryKeys.data.byCategory(category),
-    queryFn: () =>
-      category === 'all'
-        ? dataApi.getEntries()
-        : dataApi.getEntries({ category }),
+    queryKey: queryKeys.data.entries(),
+    queryFn:  () => dataApi.getEntries({ page: 1, page_size: 500 }),
     staleTime: 3 * 60 * 1000,
     placeholderData: (prev) => prev,
   });

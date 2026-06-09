@@ -212,11 +212,16 @@ class GmailHistoryAggregator:
             # Enqueue to gmail_events stream for GmailFetchWorker
             # (preserves existing pipeline — only changes ingestion layer)
             from stream_client import publish
+            # pubsub_id MUST be globally unique — process_gmail_event uses it
+            # as the idempotency key. Using a non-unique value (e.g. "aggregated_1")
+            # causes the in-process idempotency cache to treat every subsequent
+            # email as a duplicate and silently discard it.
+            unique_pubsub_id = f"agg:{email_address}:{state.latest_history_id}:{int(state.first_seen_at * 1000)}"
             await publish(
                 cfg.TOPIC_GMAIL_RAW,
                 {
                     "event_id": f"gmail:agg:{email_address}:{state.latest_history_id}",
-                    "pubsub_id": f"aggregated_{state.event_count}",
+                    "pubsub_id": unique_pubsub_id,
                     "email_address": email_address,
                     "history_id": state.latest_history_id,
                     "publish_time": "",

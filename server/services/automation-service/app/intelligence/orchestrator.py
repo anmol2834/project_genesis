@@ -211,9 +211,10 @@ class IntelligenceOrchestrator:
         """
         Post-parse safety guard for new conversations.
 
-        If Brain #1 still returns follow_up on a new conversation, upgrade it to
-        general_inquiry and ensure the search plan includes discovery queries
-        so the analytics layer is triggered.
+        1. Block follow_up on new conversations → upgrade to general_inquiry.
+        2. Uplift general_inquiry to product_inquiry when message contains
+           product/service keywords, so retrieval and prompt routing treat
+           it as a catalog request rather than a generic engagement.
         """
         blocked_on_new = {IntentType.FOLLOW_UP}
         primary = intelligence.primary_intents[0] if intelligence.primary_intents else None
@@ -224,9 +225,35 @@ class IntelligenceOrchestrator:
                 "message='%s'",
                 primary.type, message_content[:80],
             )
-            # Replace the blocked intent
             intelligence.primary_intents[0] = IntentDefinition(
                 type=IntentType.GENERAL_INQUIRY,
+                confidence=primary.confidence,
+            )
+            primary = intelligence.primary_intents[0]
+
+        # Uplift: if customer explicitly asks about products/services/catalog,
+        # treat as product_inquiry so catalog role and catalog retrieval fire.
+        _PRODUCT_SERVICE_SIGNALS = {
+            "product", "products", "service", "services", "catalog", "catalogue",
+            "offer", "offers", "offering", "offerings", "solution", "solutions",
+            "what do you", "what you", "wanna about", "want to know about",
+            "tell me about", "know about", "available", "range",
+        }
+        msg_lower = message_content.lower()
+        has_product_signal = any(s in msg_lower for s in _PRODUCT_SERVICE_SIGNALS)
+
+        if (
+            primary
+            and primary.type == IntentType.GENERAL_INQUIRY
+            and has_product_signal
+        ):
+            logger.info(
+                "Uplifting general_inquiry → product_inquiry (product signal detected). "
+                "message='%s'",
+                message_content[:80],
+            )
+            intelligence.primary_intents[0] = IntentDefinition(
+                type=IntentType.PRODUCT_INQUIRY,
                 confidence=primary.confidence,
             )
 

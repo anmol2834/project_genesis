@@ -23,7 +23,7 @@ import TableChartRoundedIcon from '@mui/icons-material/TableChartRounded';
 import ApiRoundedIcon from '@mui/icons-material/ApiRounded';
 import ExpandMoreRoundedIcon from '@mui/icons-material/ExpandMoreRounded';
 import InventoryRoundedIcon from '@mui/icons-material/InventoryRounded';
-import PaymentsRoundedIcon from '@mui/icons-material/PaymentsRounded';
+import BuildCircleRoundedIcon from '@mui/icons-material/BuildCircleRounded';
 import LocalOfferRoundedIcon from '@mui/icons-material/LocalOfferRounded';
 import LocalShippingRoundedIcon from '@mui/icons-material/LocalShippingRounded';
 import PeopleRoundedIcon from '@mui/icons-material/PeopleRounded';
@@ -41,7 +41,7 @@ import {
 } from './myDataData';
 // React Query hooks
 import {
-  useDataStats, useDataSources, useDataEntries, useDataEntriesByCategory,
+  useDataStats, useDataSources, useAllDataEntries,
 } from '@/hooks/queries/useData';
 import {
   useUploadFile, useCreateManualEntry, useConnectGoogleSheet,
@@ -55,7 +55,7 @@ import type {
 // ── Category icon map ─────────────────────────────────────────────────────────
 const CATEGORY_ICONS: Record<DataCategory, React.ElementType> = {
   product_service:     InventoryRoundedIcon,
-  pricing_payment:     PaymentsRoundedIcon,
+  issue_resolution:    BuildCircleRoundedIcon,
   contact_support:     PeopleRoundedIcon,
   offers_promotions:   LocalOfferRoundedIcon,
   delivery_shipping:   LocalShippingRoundedIcon,
@@ -1399,21 +1399,32 @@ export default function MyDataPage() {
   const [toast, setToast] = useState<{ msg: string; severity: 'success' | 'error' } | null>(null);
 
   // ── Real API data ──────────────────────────────────────────────────────────
+  // Always fetch ALL entries from DB in one shot — filtering is done client-side.
+  // This ensures:
+  //   1. All category counts in the left nav are always accurate
+  //   2. Switching categories is instant (no extra network call)
+  //   3. Loading ends as soon as all DB rows arrive (no Qdrant involved in reads)
   const { data: statsData }   = useDataStats();
-  const { data: entriesData, isLoading: entriesLoading } = useDataEntriesByCategory(
-    activeCategory === 'sources' ? 'all' : activeCategory,
-  );
+  const { data: entriesData, isLoading: entriesLoading } = useAllDataEntries();
 
-  const apiEntries = entriesData?.entries ?? [];
+  // All entries from DB
+  const allEntries = entriesData?.entries ?? [];
+
+  // Entries for the currently active category (client-side filter)
+  const categoryEntries = useMemo(() => {
+    if (activeCategory === 'all' || activeCategory === 'sources') return allEntries;
+    return allEntries.filter(e => e.category === activeCategory);
+  }, [allEntries, activeCategory]);
 
   const filteredEntries = useMemo(() => {
-    if (!search) return apiEntries;
+    const base = activeCategory === 'sources' ? [] : categoryEntries;
+    if (!search) return base;
     const q = search.toLowerCase();
-    return apiEntries.filter(e =>
+    return base.filter(e =>
       e.title.toLowerCase().includes(q) ||
       Object.values(e.structured_data).some(v => String(v).toLowerCase().includes(q)),
     );
-  }, [apiEntries, search]);
+  }, [categoryEntries, search, activeCategory]);
 
   // Group by category for "all" view
   const groupedEntries = useMemo(() => {
@@ -1527,7 +1538,7 @@ export default function MyDataPage() {
         {/* Left nav — hidden on mobile */}
         <Box sx={{ display: { xs: 'none', md: 'flex' }, flexDirection: 'column', overflow: 'hidden' }}>
           <LeftNav
-            entries={apiEntries}
+            entries={allEntries}
             activeCategory={activeCategory}
             onSelect={setActiveCategory}
             isDark={isDark}
@@ -1558,8 +1569,8 @@ export default function MyDataPage() {
 
           {/* AI insight banner — shown when there are low quality entries */}
           {(() => {
-            const lowCount     = apiEntries.filter(e => e.quality_score < 75).length;
-            const missingCount = apiEntries.filter(e => (e.missing_fields?.length ?? 0) > 0).length;
+            const lowCount     = allEntries.filter(e => e.quality_score < 75).length;
+            const missingCount = allEntries.filter(e => (e.missing_fields?.length ?? 0) > 0).length;
             if (lowCount === 0 && missingCount === 0) return null;
             return (
               <Box sx={{
@@ -1591,7 +1602,11 @@ export default function MyDataPage() {
           {/* All / category view */}
           {activeCategory !== 'sources' && (
             <>
-              {filteredEntries.length === 0 ? (
+              {entriesLoading ? (
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', py: 10 }}>
+                  <CircularProgress size={28} sx={{ color: '#818cf8' }} />
+                </Box>
+              ) : filteredEntries.length === 0 ? (
                 <Box sx={{ textAlign: 'center', py: 10 }}>
                   <StorageRoundedIcon sx={{ fontSize: 40, color: 'text.disabled', mb: 1.5 }} />
                   <Typography sx={{ fontSize: '0.88rem', color: 'text.secondary', mb: 0.5 }}>No data entries found</Typography>

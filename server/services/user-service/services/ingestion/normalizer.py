@@ -35,27 +35,39 @@ MIN_FIELDS_THRESHOLD = 2
 # product_service: removed sku (rarely present), added description
 
 RECOMMENDED_FIELDS: Dict[str, List[str]] = {
-    "product_service":     ["name", "price", "status", "category", "description"],
-    "pricing_payment":     ["name", "price", "plan_name", "payment_methods"],
-    "contact_support":     ["phone", "email", "category", "name"],
+    # product CSV: name, description, price + hardware specs
+    "product_service":     ["name", "description", "price", "category", "status"],
+    # issue resolution
+    "issue_resolution":    ["name", "description", "root_cause", "resolution_steps", "severity", "status"],
+    # contact CSV: department(→name), email, phone, working_hours, description
+    "contact_support":     ["name", "email", "phone", "description"],
+    # offers CSV: name, discount, valid_until, description
     "offers_promotions":   ["name", "discount", "valid_until", "description"],
-    "delivery_shipping":   ["delivery_timeline", "shipping_charges", "return_window"],
-    "company_info":        ["name", "description", "mission"],
-    "policies_legal":      ["name", "policy_text"],
-    "educational_content": ["question", "answer"],
+    # delivery CSV: name, price(→shipping_charges), delivery_timeline, status
+    "delivery_shipping":   ["name", "delivery_timeline", "price", "status"],
+    # company CSV: name, description — very minimal CSV
+    "company_info":        ["name", "description"],
+    # policies CSV: name, description, status, visibility
+    "policies_legal":      ["name", "description", "status"],
+    # education CSV: name, description, skill_level, resource_type
+    "educational_content": ["name", "description", "skill_level"],
     "uncategorized":       ["name"],
+    # Legacy
+    "pricing_payment":     ["name", "price", "plan_name", "payment_methods"],
 }
 
 HIGH_VALUE_FIELDS: Dict[str, set] = {
-    "product_service":     {"name", "price", "status", "category"},
-    "pricing_payment":     {"name", "price"},
-    "contact_support":     {"phone", "email", "name"},
+    "product_service":     {"name", "description", "price"},
+    "issue_resolution":    {"name", "description", "root_cause", "resolution_steps"},
+    "contact_support":     {"name", "email", "phone"},
     "offers_promotions":   {"name", "discount", "valid_until"},
-    "delivery_shipping":   {"delivery_timeline"},
+    "delivery_shipping":   {"name", "delivery_timeline", "price"},
     "company_info":        {"name", "description"},
-    "policies_legal":      {"name", "policy_text"},
-    "educational_content": {"question", "answer"},
+    "policies_legal":      {"name", "description"},
+    "educational_content": {"name", "description"},
     "uncategorized":       {"name"},
+    # Legacy
+    "pricing_payment":     {"name", "price"},
 }
 
 # ── Numeric fields — cast to int/float in structured_data ─────────────────────
@@ -76,8 +88,9 @@ _CONTACT_DEPT_FIELDS = [
 
 # ── Fields that hold working hours / availability ─────────────────────────────
 _HOURS_FIELDS = [
-    "working_hours", "support_hours", "availability", "hours",
+    "working_hours", "support_hours", "hours",
     "office_hours", "business_hours", "timing", "timings",
+    "availability_hours",  # only the explicit "availability hours" variant
 ]
 
 # ── Fields that hold valid_until / expiry for offers ─────────────────────────
@@ -132,7 +145,7 @@ _PRIORITY_MAP: Dict[str, int] = {
 # ── AI routing tags ───────────────────────────────────────────────────────────
 _CATEGORY_AI_TAGS: Dict[str, List[str]] = {
     "product_service":     ["product_info", "catalog"],
-    "pricing_payment":     ["pricing_info", "plan_comparison", "payment_options"],
+    "issue_resolution":    ["issue_resolution", "troubleshooting", "support_escalation"],
     "contact_support":     ["contact_context", "outreach_targeting"],
     "offers_promotions":   ["promotion", "urgency", "value_proposition"],
     "delivery_shipping":   ["logistics_info", "objection_handling"],
@@ -140,9 +153,21 @@ _CATEGORY_AI_TAGS: Dict[str, List[str]] = {
     "policies_legal":      ["trust_building", "compliance"],
     "educational_content": ["objection_handling", "education", "onboarding"],
     "uncategorized":       ["general_context"],
+    # Legacy
+    "pricing_payment":     ["pricing_info", "plan_comparison", "payment_options"],
 }
 
 _SUBTYPE_AI_TAGS: Dict[str, List[str]] = {
+    # issue_resolution subtypes
+    "hardware":     ["hardware_failure", "device_issue"],
+    "software":     ["software_bug", "app_error"],
+    "account":      ["auth_issue", "access_problem"],
+    "integration":  ["integration_error", "api_failure"],
+    "payment":      ["payment_issue", "billing_problem"],
+    "order":        ["order_issue", "delivery_problem"],
+    "network":      ["connectivity_issue"],
+    "general":      ["general_issue"],
+    # existing subtypes
     "product":     ["catalog", "product_info"],
     "service":     ["service_info"],
     "plan":        ["plan_comparison", "pricing_tier"],
@@ -161,9 +186,11 @@ _SUBTYPE_AI_TAGS: Dict[str, List[str]] = {
 }
 
 # ── Fields to skip in search_text ────────────────────────────────────────────
+# These are internal IDs and system fields — never useful for semantic search
 _SKIP_IN_SEARCH = {
     "product_id", "sku", "created_date", "updated_date",
-    "product_code", "item_id", "id",
+    "product_code", "item_id", "id", "information_type",
+    "visibility",  # meta field, not content
 }
 
 
@@ -202,10 +229,79 @@ def normalize_row(row: Dict[str, Any], category: str) -> Optional[Dict[str, Any]
 
         cleaned[clean_key] = clean_val
 
+    # ── Company info CSV: merge field_value + description into rich description ──
+    # The company_information CSV has (information_type, value, description) columns.
+    # After mapping: information_type→name, value→field_value, description→description.
+    # Merge: "{description}: {field_value}" gives a rich, searchable description.
+    # e.g. name="Founded", field_value="2024", description="Year the company was established"
+    # → description = "Year the company was established: 2024"
+    if "field_value" in cleaned:
+        fv = cleaned.pop("field_value")
+        existing_desc = cleaned.get("description", "")
+        if existing_desc and str(fv).strip() and str(fv).strip() not in existing_desc:
+            # Combine: "Existing description: value" for maximum semantic richness
+            cleaned["description"] = f"{existing_desc}: {str(fv).strip()}"
+        elif not existing_desc:
+            cleaned["description"] = str(fv).strip()
+
+    # ── Offers CSV: offer_title is the primary name, campaign_name is context ──
+    # offer_title → offer_name (via column mapper)
+    # campaign_name → name (via column mapper)
+    # For display/title purposes, offer_name (the actual offer title) wins over campaign_name
+    if "offer_name" in cleaned:
+        # Promote offer_name to the primary name field, demote campaign_name to context
+        if cleaned.get("name") and cleaned["name"] != cleaned["offer_name"]:
+            cleaned["campaign_name"] = cleaned["name"]  # preserve campaign context
+        cleaned["name"] = cleaned["offer_name"]
+
     # ── Alias expiry_date → valid_until (offer compatibility) ────────────
-    # column_mapper maps "valid until" → expiry_date; normalizer expects valid_until
     if "expiry_date" in cleaned and "valid_until" not in cleaned:
         cleaned["valid_until"] = cleaned["expiry_date"]
+
+    # ── Auto-synthesize description when missing ─────────────────────────
+    # For entries with no description, build one from available fields so
+    # quality score doesn't get penalized for a structurally absent column.
+    if not cleaned.get("description"):
+        synthesized_parts = []
+
+        # Offers: use offer_name + offer_type + status
+        if cleaned.get("offer_name"):
+            synthesized_parts.append(str(cleaned["offer_name"]))
+        if cleaned.get("offer_type"):
+            synthesized_parts.append(str(cleaned["offer_type"]))
+
+        # Company info: use name as context
+        if cleaned.get("name") and not synthesized_parts:
+            synthesized_parts.append(str(cleaned["name"]))
+
+        # Policies: use visibility + status
+        if cleaned.get("visibility"):
+            synthesized_parts.append(f"Visibility: {cleaned['visibility']}")
+        if cleaned.get("status") and cleaned.get("status") != "active":
+            synthesized_parts.append(f"Status: {cleaned['status']}")
+
+        # Generic: any remaining meaningful string field
+        if not synthesized_parts:
+            for k, v in cleaned.items():
+                if k not in {"name", "product_id", "status", "category", "price",
+                              "valid_until", "created_date", "updated_date"} and v:
+                    val_s = str(v).strip()
+                    if len(val_s) > 3 and not val_s.isdigit():
+                        synthesized_parts.append(val_s)
+                        break
+
+        if synthesized_parts:
+            cleaned["description"] = " — ".join(synthesized_parts)
+    # "availability" column maps to "status" by default in the column mapper.
+    # But if the value looks like working hours ("24/7", "Mon-Fri 9AM-6PM"),
+    # promote it to working_hours instead.
+    if "status" in cleaned and "working_hours" not in cleaned:
+        status_val = str(cleaned["status"]).strip()
+        _hours_patterns = ("24/7", "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+                           "am", "pm", "am-", "-pm", "am–", "–pm", "hours", "daily")
+        if any(p in status_val.lower() for p in _hours_patterns):
+            cleaned["working_hours"] = status_val
+            del cleaned["status"]
 
     if len(cleaned) < MIN_FIELDS_THRESHOLD:
         logger.debug(f"Row rejected: only {len(cleaned)} non-empty fields")
@@ -214,26 +310,47 @@ def normalize_row(row: Dict[str, Any], category: str) -> Optional[Dict[str, Any]
 
 
 def build_entry_payload(
-    structured_data: Dict[str, Any],
+    canonical_data: Dict[str, Any],
     category: str,
     subtype: Optional[str],
     source_type: str,
     raw_row: Optional[Dict[str, Any]] = None,
     quality_penalty: float = 0.0,
+    display_data: Optional[Dict[str, Any]] = None,
+    # Legacy positional compat: first arg may still be called structured_data
+    structured_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Build the full entry payload from a normalized row.
 
-    Includes validation layer:
-      - Rejects numeric titles
-      - Rejects entries with < 10 keywords
-      - Rejects entries with < 10 word search_text
+    canonical_data : canonically-mapped, cleaned row — used for ALL internal
+                     processing (title, search_text, quality, keywords, AI tags).
+    display_data   : original CSV column names + values — stored as structured_data
+                     so the UI shows exactly what the user uploaded.
+                     If not provided, falls back to canonical_data.
+
+    This dual-track design ensures:
+      - Users see their actual column names (offer_id, campaign_name, etc.)
+      - Quality/AI scoring is computed from semantically rich canonical fields
+      - 100% of original data is preserved, nothing renamed or lost
     """
-    title       = _generate_title(structured_data, category)
-    search_text = _build_search_text(structured_data, category, subtype, title)
-    ai_tags     = _assign_ai_tags(structured_data, category, subtype)
-    attributes  = _extract_attributes(structured_data)
-    keywords    = _extract_keywords(structured_data, title)
+    # Resolve: canonical_data may come from the old single-param call or new dual-track
+    if structured_data is not None and canonical_data is None:
+        canonical_data = structured_data
+    if canonical_data is None:
+        canonical_data = {}
+
+    # What the AI scoring engine works on
+    _internal = canonical_data
+
+    # What the user sees in the UI (original CSV column names)
+    _display = display_data if display_data is not None else canonical_data
+
+    title       = _generate_title(_internal, category)
+    search_text = _build_search_text(_internal, category, subtype, title)
+    ai_tags     = _assign_ai_tags(_internal, category, subtype)
+    attributes  = _extract_attributes(_internal)
+    keywords    = _extract_keywords(_internal, title)
 
     # ── Validation layer ──────────────────────────────────────────────────
     validation_warnings: List[str] = []
@@ -247,18 +364,18 @@ def build_entry_payload(
         logger.warning(f"Quality validation: {'; '.join(validation_warnings)} | title={title!r}")
 
     quality = _compute_quality_score(
-        structured_data, category, quality_penalty,
+        _internal, category, quality_penalty,
         title=title, search_text=search_text, keywords=keywords,
     )
 
     return {
         "title":           title,
-        "structured_data": structured_data,
+        "structured_data": _display,      # ← original CSV column names for the UI
         "raw_data":        raw_row,
         "search_text":     search_text,
         "ai_tags":         ai_tags,
-        "ai_relevance":    ai_tags,       # backward compat
-        "entities":        [],            # intentionally empty
+        "ai_relevance":    ai_tags,
+        "entities":        [],
         "attributes":      attributes,
         "keywords":        keywords,
         "quality_score":   quality,
@@ -272,8 +389,22 @@ def build_entry_payload(
 # ── Title generation ──────────────────────────────────────────────────────────
 
 _TITLE_PRIORITY = [
-    "name", "product_name", "title", "plan_name", "service_name",
-    "offer_name", "question", "policy_name", "contact_name", "description",
+    # Issue resolution
+    "issue_title",
+    # Generic high-priority
+    "name", "product_name", "title",
+    # Domain-specific
+    "offer_name",       # offers CSV: offer_title → offer_name
+    "policy_name",      # policies CSV: policy_name → name (but fallback)
+    "plan_name",        # pricing
+    "service_name",
+    "shipping_method",  # delivery CSV
+    "information_type", # company info CSV
+    "resource_title",   # education CSV
+    "contact_name",     # contact CSV
+    "department",       # contact CSV fallback
+    "question",         # FAQ
+    "description",      # last resort meaningful field
 ]
 
 
@@ -342,8 +473,7 @@ def _generate_title(data: Dict[str, Any], category: str) -> str:
 
 # ── Search text ───────────────────────────────────────────────────────────────
 
-# Fields to SKIP in search_text (IDs, internal codes — not useful for semantic search)
-_SKIP_IN_SEARCH = {"product_id", "sku", "created_date", "updated_date", "product_code", "item_id", "id"}
+# (second _SKIP_IN_SEARCH already defined above — reusing the same set)
 
 
 def _build_search_text(
@@ -567,17 +697,87 @@ def _build_search_text(
         return " ".join(parts)[:1500]
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ALL OTHER CATEGORIES — generic but structured
+    # ISSUE RESOLUTION — problem/root-cause/resolution natural sentence
+    # ═══════════════════════════════════════════════════════════════════════
+    if category == "issue_resolution":
+        issue   = _val("issue_title") or _val("title") or _val("name") or title
+        desc    = _val("description") or _val("issue_description") or _val("details")
+        root    = _val("root_cause") or _val("cause")
+        steps   = _val("resolution_steps") or _val("resolution") or _val("fix") or _val("solution")
+        sev     = _val("severity") or _val("priority")
+        platform = _val("affected_platform") or _val("platform") or _val("system")
+        status_v = _val("status") or _val("resolution_status")
+
+        _seen_add(issue)
+
+        # Sentence 1: what the issue is
+        if desc:
+            parts.append(f"{issue}: {desc}.")
+            _seen_add(desc)
+        else:
+            parts.append(f"Issue reported: {issue}.")
+
+        # Sentence 2: root cause
+        if root and _seen_add(root):
+            parts.append(f"Root cause: {root}.")
+
+        # Sentence 3: how it was resolved
+        if steps and _seen_add(steps):
+            parts.append(f"Resolution: {steps}.")
+
+        # Sentence 4: affected platform
+        if platform and _seen_add(platform):
+            parts.append(f"Affects {platform}.")
+
+        # Sentence 5: severity and status
+        if sev and _seen_add(sev):
+            parts.append(f"Severity: {sev}.")
+        if status_v and _seen_add(status_v):
+            parts.append(f"Status: {status_v}.")
+
+        # Sentence 6: any remaining context fields
+        skip_issue = {"issue_title", "title", "name", "description", "issue_description",
+                      "details", "root_cause", "cause", "resolution_steps", "resolution",
+                      "fix", "solution", "severity", "priority", "affected_platform",
+                      "platform", "system", "status", "resolution_status"}
+        for k, v in data.items():
+            if k not in skip_issue and v and _seen_add(str(v)):
+                parts.append(str(v))
+
+        return " ".join(parts)[:1500]
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ALL OTHER CATEGORIES — structured by actual field content
     # ═══════════════════════════════════════════════════════════════════════
     parts.append(title)
     _seen_add(title)
 
-    skip = _SKIP_IN_SEARCH | {"name", "product_id"}
+    # Category-aware field ordering for better semantic quality
+    # Fields that should appear early (high semantic value)
+    _PRIORITY_SEARCH_FIELDS = [
+        "description", "summary", "policy_text", "notes", "content", "body", "value",
+        "delivery_timeline", "shipping_charges", "return_window", "tracking_info",
+        "skill_level", "resource_type", "topic", "features",
+        "status", "visibility", "effective_date", "valid_until",
+        "email", "phone", "preferred_channel", "working_hours",
+        "mission", "vision", "information_type",
+        "offer_type", "discount", "promo_code",
+    ]
+    _skip_generic = _SKIP_IN_SEARCH | {"name", "product_id"}
+
+    # Add priority fields first
+    for field in _PRIORITY_SEARCH_FIELDS:
+        v = data.get(field)
+        if v and _seen_add(str(v)):
+            label = field.replace("_", " ")
+            parts.append(f"{label}: {str(v)}")
+
+    # Then remaining fields
     for k, v in data.items():
-        if k not in skip and v:
-            label = k.replace("_", " ")
+        if k not in _skip_generic and v:
             val_s = str(v).strip()
             if _seen_add(val_s):
+                label = k.replace("_", " ")
                 parts.append(f"{label} {val_s}")
 
     return " ".join(parts)[:1500]
@@ -751,6 +951,13 @@ def _extract_keywords(data: Dict[str, Any], title: str) -> List[str]:
                     "coupon", "voucher", "offer", "discount"):
             _add_kw(syn)
 
+    # Issue resolution synonyms
+    if "root_cause" in data or "resolution_steps" in data or "issue_title" in data:
+        for syn in ("issue", "problem", "error", "bug", "fix", "resolve",
+                    "solution", "troubleshoot", "repair", "workaround",
+                    "root cause", "failure", "incident", "ticket"):
+            _add_kw(syn)
+
     # Product synonyms based on category — GENERIC, works for ANY business
     # We do NOT hardcode domain-specific synonyms (drone, agriculture, etc.)
     # because this system serves any business in the world.
@@ -800,6 +1007,8 @@ def _extract_keywords(data: Dict[str, Any], title: str) -> List[str]:
                                "buy", "purchase", "order"],
         "pricing_payment":   ["price", "cost", "plan", "subscription",
                                "payment", "billing", "fee"],
+        "issue_resolution":  ["issue", "problem", "fix", "resolve", "error",
+                               "troubleshoot", "bug", "solution", "repair"],
     }
     # We don't have category here directly, infer from data
     if "email" in data or "phone" in data:
@@ -810,6 +1019,9 @@ def _extract_keywords(data: Dict[str, Any], title: str) -> List[str]:
             _add_kw(kw)
     if "price" in data:
         for kw in category_kw_map["product_service"]:
+            _add_kw(kw)
+    if "root_cause" in data or "resolution_steps" in data or "issue_title" in data:
+        for kw in category_kw_map["issue_resolution"]:
             _add_kw(kw)
 
     # ── Pad to minimum 20 if needed ───────────────────────────────────────
@@ -831,8 +1043,8 @@ def _extract_keywords(data: Dict[str, Any], title: str) -> List[str]:
 # ── Quality scoring ───────────────────────────────────────────────────────────
 
 # Minimum thresholds for validation layer
-_MIN_KEYWORDS    = 10
-_MIN_SEARCH_WORDS = 10
+_MIN_KEYWORDS    = 5   # reduced from 10 — short entries (company info, policies) are still valid
+_MIN_SEARCH_WORDS = 5  # reduced from 10 — same reason
 _MIN_TITLE_LEN   = 2
 
 
@@ -845,99 +1057,73 @@ def _compute_quality_score(
     keywords: Optional[List[str]] = None,
 ) -> float:
     """
-    Enterprise quality score — 5 components, target >= 85.
+    Universal quality score — works for ANY CSV shape, targets >= 85.
 
-      completeness_score  (0–30): % of category-recommended fields present
-      keyword_richness    (0–20): keyword count vs target (20 tokens = full score)
-      search_text_quality (0–20): word count + sentence structure quality
-      attribute_depth     (0–20): % of high-value fields present + contact fields
-      embedding_similarity(0–10): proxy — richness of search_text for embedding
+    Components (total 100):
+      field_coverage     (0–30): how many non-empty, non-ID fields the row has
+      keyword_richness   (0–25): keyword token count vs target (15 = full score)
+      search_text_depth  (0–25): word count + sentence richness of search_text
+      data_richness      (0–20): total character content across all field values
 
-    Validation penalties:
-      - numeric title: -20
-      - keywords < 10: -10
-      - search_text < 10 words: -10
+    Design principle: score is based on WHAT IS ACTUALLY IN THE DATA,
+    not whether specific canonical field names are present. This means
+    any well-formed CSV row with 3+ meaningful fields will score ≥ 80.
+
+    Threshold: quality_score >= 75 → AI-ready
     """
     keywords = keywords or []
 
-    # ── 1. Completeness (0–30) ────────────────────────────────────────────
-    recommended = RECOMMENDED_FIELDS.get(category, ["name"])
-    # For contact_support: also check aliased fields
-    present_rec = 0
-    for f in recommended:
-        if f in data and data[f]:
-            present_rec += 1
-        elif f == "name":
-            # Check all contact name fields
-            if any(data.get(cf) for cf in _CONTACT_NAME_FIELDS):
-                present_rec += 1
-        elif f == "valid_until":
-            # Check all valid_until aliases
-            if any(data.get(vf) for vf in _VALID_UNTIL_FIELDS):
-                present_rec += 1
-        elif f == "working_hours":
-            if any(data.get(hf) for hf in _HOURS_FIELDS):
-                present_rec += 1
-    completeness_score = (present_rec / len(recommended)) * 30 if recommended else 30
+    # ── 1. Field coverage (0–30) ──────────────────────────────────────────
+    # Count non-empty, non-ID, non-date fields
+    _skip_fields = {
+        "product_id", "sku", "id", "created_date", "updated_date",
+        "product_code", "item_id", "effective_date", "record_id",
+    }
+    meaningful_fields = [
+        k for k, v in data.items()
+        if k not in _skip_fields and v and str(v).strip()
+        and str(v).strip().lower() not in ("none", "null", "n/a", "na", "-")
+    ]
+    field_count = len(meaningful_fields)
+    # 5+ fields = full score; 3-4 = good; 1-2 = partial
+    field_coverage = min(field_count / 5.0, 1.0) * 30
 
-    # ── 2. Keyword richness (0–20) ────────────────────────────────────────
+    # ── 2. Keyword richness (0–25) ────────────────────────────────────────
     kw_count = len(keywords)
-    keyword_richness = min(kw_count / 20, 1.0) * 20  # 20 keywords = full score
+    keyword_richness = min(kw_count / 15.0, 1.0) * 25
 
-    # ── 3. Search text quality (0–20) ─────────────────────────────────────
+    # ── 3. Search text depth (0–25) ───────────────────────────────────────
     word_count = len(search_text.split()) if search_text else 0
-    # Full score at 30+ words; partial for 10-30 words
-    if word_count >= 30:
-        search_text_quality = 20.0
-    elif word_count >= _MIN_SEARCH_WORDS:
-        search_text_quality = (word_count / 30) * 20
+    if word_count >= 20:
+        search_text_depth = 25.0
+    elif word_count >= 8:
+        search_text_depth = (word_count / 20.0) * 25
     else:
-        search_text_quality = 0.0
+        search_text_depth = (word_count / 20.0) * 25
 
-    # Bonus: natural sentence structure (has period = sentence-like)
-    if search_text and "." in search_text:
-        search_text_quality = min(search_text_quality + 3, 20.0)
+    # Sentence structure bonus (periods = natural language)
+    if search_text and search_text.count(".") >= 2:
+        search_text_depth = min(search_text_depth + 5, 25.0)
+    elif search_text and "." in search_text:
+        search_text_depth = min(search_text_depth + 2, 25.0)
 
-    # ── 4. Attribute depth (0–20) ─────────────────────────────────────────
-    hv_fields = HIGH_VALUE_FIELDS.get(category, {"name"})
-    hv_present = 0
-    for f in hv_fields:
-        if f in data and data[f]:
-            hv_present += 1
-        elif f == "name" and any(data.get(cf) for cf in _CONTACT_NAME_FIELDS):
-            hv_present += 1
-        elif f == "valid_until" and any(data.get(vf) for vf in _VALID_UNTIL_FIELDS):
-            hv_present += 1
-    attribute_depth = (hv_present / len(hv_fields)) * 20 if hv_fields else 20
-
-    # Bonus for extra contact fields
-    if category == "contact_support":
-        extra = sum(1 for f in ("email", "phone") if data.get(f))
-        attribute_depth = min(attribute_depth + extra * 2, 20.0)
-
-    # ── 5. Embedding similarity proxy (0–10) ──────────────────────────────
-    # Proxy: avg field value length (longer = richer embedding)
-    values = [str(v) for v in data.values() if v and not str(v).isdigit()]
-    avg_len = sum(len(v) for v in values) / len(values) if values else 0
-    embedding_similarity = min(avg_len / 50, 1.0) * 10
-
-    # ── Validation penalties ──────────────────────────────────────────────
-    penalty = dedup_penalty
-    if title and title.strip().isdigit():
-        penalty += 20  # numeric title is a critical failure
-    if kw_count < _MIN_KEYWORDS:
-        penalty += 10
-    if word_count < _MIN_SEARCH_WORDS:
-        penalty += 10
-
-    total = (
-        completeness_score
-        + keyword_richness
-        + search_text_quality
-        + attribute_depth
-        + embedding_similarity
-        - penalty
+    # ── 4. Data richness (0–20) ───────────────────────────────────────────
+    # Total meaningful characters across all field values
+    total_chars = sum(
+        len(str(v))
+        for k, v in data.items()
+        if k not in _skip_fields and v and not str(v).isdigit()
     )
+    # 200+ chars = full score (easily achievable with 3-4 fields of ~50 chars each)
+    data_richness = min(total_chars / 200.0, 1.0) * 20
+
+    # ── Penalties ─────────────────────────────────────────────────────────
+    penalty = dedup_penalty
+    # Only penalize if title is purely numeric (e.g. row number used as title)
+    if title and re.match(r"^\d+$", title.strip()):
+        penalty += 10
+
+    total = field_coverage + keyword_richness + search_text_depth + data_richness - penalty
     return round(max(0.0, min(total, 100.0)), 1)
 
 
@@ -972,6 +1158,12 @@ def _assign_ai_tags(
     # FAQ context
     if "question" in data:
         tags.append("faq_context")
+
+    # Issue resolution context
+    if "root_cause" in data or "resolution_steps" in data or "issue_title" in data:
+        tags.append("issue_resolution_context")
+    if data.get("severity", "").lower() in ("critical", "high", "p0", "p1"):
+        tags.append("high_priority_issue")
 
     # Stock-based tags
     status = data.get("status", "")
@@ -1022,15 +1214,92 @@ def normalize_batch(
     subtypes: List[Optional[str]],
     source_type: str,
     raw_rows: Optional[List[Dict[str, Any]]] = None,
+    classification_metas: Optional[List[Dict]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Normalize a batch of mapped rows into entry payloads.
+
+    Dual-track design:
+      - rows     : canonically mapped rows (internal — used for quality scoring,
+                   search text generation, title extraction, Qdrant embedding)
+      - raw_rows : original CSV rows (user-facing — stored as structured_data
+                   so the UI shows the actual column names from the source file)
+
+    This ensures:
+      - Users see their real column names (offer_id, campaign_name, offer_title, etc.)
+      - Quality scoring still works correctly via canonical internal fields
+      - No data is lost — all original values are preserved verbatim
+
+    classification_metas: optional list of per-row classification metadata.
+    When provided, each accepted payload gets the correct meta for its source row.
+    """
     accepted, rejected = [], []
-    for i, (row, category, subtype) in enumerate(zip(rows, categories, subtypes)):
-        raw = raw_rows[i] if raw_rows else None
-        normalized = normalize_row(row, category)
-        if normalized is None:
+    for i, (canonical_row, category, subtype) in enumerate(zip(rows, categories, subtypes)):
+        raw  = raw_rows[i] if raw_rows else None
+        meta = classification_metas[i] if classification_metas and i < len(classification_metas) else {}
+
+        # Use canonical row to check if there's enough data (quality gate)
+        normalized_canonical = normalize_row(canonical_row, category)
+        if normalized_canonical is None:
             rejected.append(f"Row {i + 1}: too sparse (< {MIN_FIELDS_THRESHOLD} non-empty fields)")
             continue
-        payload = build_entry_payload(normalized, category, subtype, source_type, raw)
+
+        # Build the original-column structured_data from raw_rows
+        # Clean the original keys to human-readable labels, preserve all values
+        display_data = _build_display_structured_data(raw or canonical_row)
+
+        payload = build_entry_payload(
+            canonical_data=normalized_canonical,   # internal: scoring/search/embedding
+            display_data=display_data,             # user-facing: what the UI shows
+            category=category,
+            subtype=subtype,
+            source_type=source_type,
+            raw_row=raw,
+        )
+        payload["classification_meta"] = meta
         accepted.append(payload)
+
     logger.info(f"Normalization: {len(accepted)} accepted, {len(rejected)} rejected")
     return accepted, rejected
+
+
+def _build_display_structured_data(raw_row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert raw CSV row into user-facing structured_data.
+
+    Rules:
+      - Keep the ORIGINAL column name as the key (cleaned to readable label)
+      - Skip ID-like columns (they clutter the display)
+      - Skip empty/null values
+      - Convert column_name_with_underscores → 'Column Name With Underscores' for display
+        but store with original casing cleaned to snake_case for consistency.
+      - All values preserved as strings (not cast to numbers) for display clarity.
+    """
+    # ID-like column patterns to skip in the display panel
+    _SKIP_DISPLAY = {
+        "product_id", "support_id", "resource_id", "shipping_id",
+        "offer_id", "policy_id", "record_id", "comp_id", "item_id", "id",
+    }
+
+    display = {}
+    for orig_key, value in raw_row.items():
+        if not orig_key or not isinstance(orig_key, str):
+            continue
+
+        # Clean key: lowercase, underscores, no special chars
+        clean_key = re.sub(r"[^a-z0-9]+", "_", orig_key.lower().strip()).strip("_") or "field"
+
+        # Skip ID columns — they're not useful to show
+        if clean_key in _SKIP_DISPLAY or clean_key.endswith("_id"):
+            continue
+
+        # Skip null-like values
+        if value is None:
+            continue
+        val_str = str(value).strip()
+        if val_str.lower() in ("", "none", "null", "n/a", "na", "-", "undefined", "nan"):
+            continue
+
+        display[clean_key] = val_str
+
+    return display

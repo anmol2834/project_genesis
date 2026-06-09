@@ -1,0 +1,21 @@
+offer_id,campaign_name,offer_title,offer_type,offer_value,start_date,end_date,status
+OFF-001,Welcome Offer,10% Off First Purchase,Percentage Discount,10,01-01-2026,31-12-2026,Active
+OFF-002,Student Special,15% Student Discount,Percentage Discount,15,01-01-2026,31-12-2026,Active
+OFF-003,Gaming Week,$100 Off Gaming Series,Flat Discount,100,01-02-2026,07-02-2026,Scheduled
+OFF-004,Business Bundle,Free Docking Station,Free Gift,Docking Station,15-01-2026,15-03-2026,Active
+OFF-005,Creator Deal,$200 Off Creator Laptops,Flat Discount,200,01-03-2026,31-03-2026,Scheduled
+OFF-006,Trade-In Bonus,Extra $150 Trade-In Credit,Trade-In,150,01-01-2026,30-06-2026,Active
+OFF-007,Holiday Sale,20% Off Selected Models,Percentage Discount,20,15-12-2026,31-12-2026,Scheduled
+OFF-008,Back to School,12% Off Student Series,Percentage Discount,12,01-06-2026,31-08-2026,Scheduled
+OFF-009,Enterprise Upgrade,Buy 10 Get 1 Free,Bulk Offer,1 Free Unit,01-01-2026,31-12-2026,Active
+OFF-010,Referral Reward,$50 Referral Credit,Referral,50,01-01-2026,31-12-2026,Active
+OFF-011,AI Laptop Launch,Free AI Productivity Suite,Free Software,AI Suite,01-04-2026,31-05-2026,Scheduled
+OFF-012,Premium Care Bundle,1 Year Premium Care Free,Free Service,1 Year,01-01-2026,30-04-2026,Active
+OFF-013,Weekend Flash Sale,8% Sitewide Discount,Percentage Discount,8,14-02-2026,15-02-2026,Scheduled
+OFF-014,Travel Series Promo,Free Laptop Sleeve,Free Gift,Laptop Sleeve,10-01-2026,31-03-2026,Active
+OFF-015,Accessory Combo,25% Off Accessories,Percentage Discount,25,01-01-2026,31-12-2026,Active
+OFF-016,Upgrade Festival,$250 Upgrade Bonus,Trade-In,250,01-07-2026,31-07-2026,Scheduled
+OFF-017,Loyalty Reward,5% Off for Returning Customers,Loyalty,5,01-01-2026,31-12-2026,Active
+OFF-018,Startup Program,18% Off Business Models,Percentage Discount,18,01-01-2026,31-12-2026,Active
+OFF-019,New Year Sale,$120 Off Premium Series,Flat Discount,120,01-01-2026,10-01-2026,Expired
+OFF-020,Anniversary Event,Free Wireless Mouse,Free Gift,Wireless Mouse,01-05-2026,15-05-2026,Scheduled

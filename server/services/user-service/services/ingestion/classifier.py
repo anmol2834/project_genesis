@@ -24,11 +24,13 @@ CATEGORY_PROTOTYPES: Dict[str, List[str]] = {
         "service offering description usage instructions demo",
         "software product SaaS tool platform features availability",
     ],
-    "pricing_payment": [
-        "pricing plan monthly annual cost fee subscription tier",
-        "price base tiered bulk discount tax payment method",
-        "refund cancellation policy billing cycle UPI cards EMI",
-        "subscription pricing starter pro enterprise plan amount",
+    "issue_resolution": [
+        "problem error bug troubleshooting steps fix resolution solution",
+        "issue reported root cause diagnosed resolved fixed workaround",
+        "technical problem device failure login error integration not working",
+        "customer complaint issue raised resolved support ticket closed",
+        "hardware damaged software crash payment failed order not delivered",
+        "account locked access denied connection refused error code",
     ],
     "contact_support": [
         "contact phone number email address support hours",
@@ -69,6 +71,16 @@ CATEGORY_PROTOTYPES: Dict[str, List[str]] = {
 }
 
 SUBTYPE_PROTOTYPES: Dict[str, Dict[str, List[str]]] = {
+    "issue_resolution": {
+        "hardware":     ["hardware damage physical device broken screen battery"],
+        "software":     ["software crash bug error application not opening frozen"],
+        "account":      ["login failed account locked password reset access denied"],
+        "integration":  ["integration not working API connection failed webhook error"],
+        "payment":      ["payment failed deducted charged refund not processed"],
+        "order":        ["order not delivered missing shipment tracking issue"],
+        "network":      ["network connectivity internet connection timeout unreachable"],
+        "general":      ["general issue miscellaneous problem unclassified error"],
+    },
     "pricing_payment": {
         "plan":           ["subscription plan tier starter pro enterprise pricing"],
         "one_time":       ["one time payment purchase fee charge single"],
@@ -251,13 +263,24 @@ def merge_category(
     user_category: Optional[str],
 ) -> Tuple[str, str]:
     """
-    Enterprise category merge logic.
+    Category merge logic.
+
+    Rule: the user explicitly selected a category in the UI before uploading.
+    That selection is ALWAYS respected as the final category.
+    AI classification is used ONLY as a fallback when the user did NOT select
+    a category (i.e. user_category is None/"uncategorized"/"").
+
+    This prevents the AI from overriding explicit user intent — the #1 cause
+    of miscategorised entries.
 
     Returns (final_category, decision_reason).
     """
-    if ai_confidence > AI_CONFIDENCE_THRESHOLD:
-        return ai_category, f"ai_override (conf={ai_confidence:.2f})"
-    elif user_category and user_category not in ("uncategorized", ""):
-        return user_category, "user_provided"
-    else:
-        return "uncategorized", f"low_confidence_no_user_category (conf={ai_confidence:.2f})"
+    # User explicitly chose a category — always honour it
+    if user_category and user_category not in ("uncategorized", ""):
+        return user_category, f"user_selected (ai_was={ai_category} conf={ai_confidence:.2f})"
+
+    # No user category — trust AI only if confidence is high enough
+    if ai_confidence > AI_CONFIDENCE_THRESHOLD and ai_category not in ("uncategorized", ""):
+        return ai_category, f"ai_classified (conf={ai_confidence:.2f})"
+
+    return "uncategorized", f"low_confidence_no_user_category (conf={ai_confidence:.2f})"

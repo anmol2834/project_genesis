@@ -51,7 +51,7 @@ class SourceStatus(str, enum.Enum):
 
 class DataCategory(str, enum.Enum):
     product_service     = "product_service"
-    pricing_payment     = "pricing_payment"
+    issue_resolution    = "issue_resolution"   # Troubleshooting & Issue Resolution
     contact_support     = "contact_support"
     offers_promotions   = "offers_promotions"
     delivery_shipping   = "delivery_shipping"
@@ -59,6 +59,8 @@ class DataCategory(str, enum.Enum):
     policies_legal      = "policies_legal"
     educational_content = "educational_content"
     uncategorized       = "uncategorized"
+    # Legacy — kept for backward compat with existing DB rows; no new entries
+    pricing_payment     = "pricing_payment"
 
 
 class IngestionStatus(str, enum.Enum):

@@ -11,7 +11,7 @@ import { get, post, patch, del, apiClient } from '../apiClient';
 
 export type DataCategory =
   | 'product_service'
-  | 'pricing_payment'
+  | 'issue_resolution'
   | 'contact_support'
   | 'offers_promotions'
   | 'delivery_shipping'

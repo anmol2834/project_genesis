@@ -216,8 +216,13 @@ class FactGraphCompressor:
         pricing_map: Dict[str, List[str]],
     ) -> None:
         """Merge product facts into product_map keyed by normalised name."""
-        # 1. Try metadata name
-        name = metadata.get("name", "").strip()
+        # 1. Try metadata name first (most reliable)
+        name = (
+            metadata.get("name", "")
+            or metadata.get("title", "")
+            or metadata.get("attributes", {}).get("name", "")
+            or metadata.get("structured_data", {}).get("name", "")
+        ).strip()
 
         # 2. If metadata name is empty, try extracting from content
         if not name:
@@ -232,28 +237,80 @@ class FactGraphCompressor:
         if name_lower not in product_map:
             product_map[name_lower] = {
                 "name":           name,
-                "category":       metadata.get("category", ""),
-                "description":    "",
+                "category":       (
+                    metadata.get("category", "")
+                    or metadata.get("attributes", {}).get("category", "")
+                    or metadata.get("structured_data", {}).get("category", "")
+                ),
+                "description":    (
+                    metadata.get("description", "")
+                    or metadata.get("attributes", {}).get("description", "")
+                    or metadata.get("structured_data", {}).get("description", "")
+                ),
                 "features":       [],
                 "specifications": {},
                 "price":          None,
+                "currency":       "USD",
             }
 
         entry = product_map[name_lower]
 
         # Merge category
-        if not entry["category"] and metadata.get("category"):
-            entry["category"] = metadata["category"]
+        if not entry["category"]:
+            for src in (metadata, metadata.get("attributes", {}), metadata.get("structured_data", {})):
+                if isinstance(src, dict) and src.get("category"):
+                    entry["category"] = src["category"]
+                    break
 
         # Merge description (take longest)
         snippet = content[:200]
-        if len(snippet) > len(entry["description"]):
+        if len(snippet) > len(entry.get("description") or ""):
             entry["description"] = snippet
 
-        # Merge price (first wins; others go to pricing_map for conflict check)
-        price_match = re.search(r"\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)", content)
-        if price_match:
-            price_str = price_match.group(1)
+        # ── Price extraction — priority order ─────────────────────────────
+        # Priority 1: structured numeric price from attributes or structured_data
+        # Priority 2: regex from content (supports $, USD, numeric patterns)
+        # This handles: ₹1299, $1299, 1299, USD 1299 etc.
+        price_str = None
+
+        # Check attributes.price and structured_data.price (integer/float)
+        for src_key in ("attributes", "structured_data"):
+            src = metadata.get(src_key, {})
+            if isinstance(src, dict) and src.get("price") is not None:
+                raw_price = src["price"]
+                try:
+                    price_str = str(int(float(str(raw_price).replace(",", ""))))
+                except (ValueError, TypeError):
+                    pass
+                if price_str:
+                    break
+
+        # Fallback: regex on content — handles $, USD, plain numbers after 'priced at'
+        if not price_str:
+            # Match: $1,299 or $1299 or USD 1299 or ₹1299 or "priced at 1299"
+            patterns = [
+                r"\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)",       # $1,299
+                r"USD\s*(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)",      # USD 1299
+                r"[\u20b9\u20ac\u00a3]\s*(\d{1,3}(?:,\d{3})*)",   # ₹1299 €1299 £1299
+                r"priced?\s+at\s+[\u20b9\$]?\s*(\d{1,3}(?:,\d{3})*)",  # priced at 1299
+                r"price[:\s]+[\u20b9\$]?\s*(\d{3,6})",             # price: 1299
+                r"costs?\s+[\u20b9\$]?\s*(\d{3,6})",               # cost 1299
+            ]
+            for pat in patterns:
+                m = re.search(pat, content, re.IGNORECASE)
+                if m:
+                    price_str = m.group(1).replace(",", "")
+                    break
+
+        if price_str:
+            # Detect currency symbol for display
+            if "\u20b9" in content or "INR" in content.upper():
+                entry["currency"] = "INR"
+            elif "\u20ac" in content or "EUR" in content.upper():
+                entry["currency"] = "EUR"
+            elif "\u00a3" in content or "GBP" in content.upper():
+                entry["currency"] = "GBP"
+
             if entry["price"] is None:
                 entry["price"] = price_str
             # Always track all prices for conflict detection
@@ -267,9 +324,12 @@ class FactGraphCompressor:
         entry["features"] = entry["features"][:10]
 
         # Merge specs from metadata
-        for key in ("battery", "camera", "weight", "range", "max_speed", "payload"):
-            if key in metadata and key not in entry["specifications"]:
-                entry["specifications"][key] = metadata[key]
+        for key in ("battery", "camera", "weight", "range", "max_speed", "payload",
+                    "ram", "storage", "processor", "gpu", "display"):
+            for src in (metadata, metadata.get("attributes", {}), metadata.get("structured_data", {})):
+                if isinstance(src, dict) and key in src and key not in entry["specifications"]:
+                    entry["specifications"][key] = src[key]
+                    break
 
     # ══════════════════════════════════════════════════════════════════════
     # Extractors
@@ -334,19 +394,18 @@ class FactGraphCompressor:
     def _extract_analytics_facts(self, content: str, chunk: Dict) -> Optional[Dict]:
         """
         Extract business/catalogue overview from a data_analytics chunk.
-
-        Reads structured_data and attributes attached by _inject_analytics_if_needed,
-        falls back to parsing the content text when those are absent.
+        Reads structured_data and attributes, extracting pricing summary fields
+        so Brain #2 has concrete price range data even without individual product chunks.
         """
         structured = chunk.get("structured_data") or {}
         attributes = chunk.get("attributes") or {}
         metadata   = chunk.get("metadata") or {}
 
-        # Merge all available structured sources
+        # Merge all available structured sources (structured_data takes priority)
         merged = {}
-        for src in (structured, attributes, metadata):
+        for src in (metadata, attributes, structured):
             if isinstance(src, dict):
-                merged.update(src)
+                merged.update({k: v for k, v in src.items() if v is not None})
 
         facts: Dict[str, Any] = {}
 
@@ -371,6 +430,64 @@ class FactGraphCompressor:
         total = merged.get("total_products") or merged.get("total_entries") or merged.get("count")
         if total is not None:
             facts["total_products"] = total
+
+        # ── Pricing summary from analytics structured data ──────────────
+        # price_insights is populated by the analytics engine with min/max/avg
+        price_insights = merged.get("price_insights") or {}
+        if isinstance(price_insights, dict) and price_insights:
+            min_p = price_insights.get("min_price") or price_insights.get("cheapest_price")
+            max_p = price_insights.get("max_price") or price_insights.get("priciest_price")
+            avg_p = price_insights.get("avg_price")
+            cheapest_item = price_insights.get("cheapest_item")
+            priciest_item = price_insights.get("priciest_item")
+
+            if min_p is not None and max_p is not None:
+                facts["price_range"] = f"{min_p} - {max_p}"
+            if avg_p is not None:
+                facts["avg_price"] = avg_p
+            if cheapest_item and min_p is not None:
+                facts["cheapest_item"] = cheapest_item
+                facts["cheapest_price"] = min_p
+            if priciest_item and max_p is not None:
+                facts["priciest_item"] = priciest_item
+                facts["priciest_price"] = max_p
+
+        # Also check top-level attributes for price fields (some analytics records
+        # store min_price/max_price directly in attributes, not in price_insights)
+        if not facts.get("price_range"):
+            min_p = merged.get("min_price")
+            max_p = merged.get("max_price")
+            if min_p is not None and max_p is not None:
+                facts["price_range"] = f"{min_p} - {max_p}"
+            if merged.get("avg_price") is not None and not facts.get("avg_price"):
+                facts["avg_price"] = merged["avg_price"]
+            if merged.get("cheapest_item") and not facts.get("cheapest_item"):
+                facts["cheapest_item"] = merged["cheapest_item"]
+                facts["cheapest_price"] = merged.get("min_price", "")
+            if merged.get("priciest_item") and not facts.get("priciest_item"):
+                facts["priciest_item"] = merged["priciest_item"]
+                facts["priciest_price"] = merged.get("max_price", "")
+
+        # Top products by price (up to 5)
+        top_by_price = merged.get("top_by_price") or []
+        if isinstance(top_by_price, list) and top_by_price:
+            facts["top_by_price"] = [
+                {"name": str(i.get("name", "")), "price": i.get("price", "")}
+                for i in top_by_price[:5] if isinstance(i, dict)
+            ]
+
+        # Bottom products by price (up to 5)
+        bottom_by_price = merged.get("bottom_by_price") or []
+        if isinstance(bottom_by_price, list) and bottom_by_price:
+            facts["bottom_by_price"] = [
+                {"name": str(i.get("name", "")), "price": i.get("price", "")}
+                for i in bottom_by_price[:5] if isinstance(i, dict)
+            ]
+
+        # All item names (for catalog overview)
+        all_names = merged.get("all_item_names") or []
+        if isinstance(all_names, list) and all_names:
+            facts["all_item_names"] = all_names[:20]
 
         # Top capabilities / services
         capabilities = merged.get("capabilities") or merged.get("services") or merged.get("top_capabilities") or []
@@ -526,23 +643,26 @@ class FactGraphCompressor:
             lines = ["PRODUCTS:"]
             for i, p in enumerate(fact_graph["products"], 1):
                 name = p.get("name", "Unknown")
-                conflict = " ⚠️ PRICE CONFLICT — verify before quoting" \
+                conflict = " [PRICE CONFLICT - verify before quoting]" \
                     if p.get("price_conflict") else ""
                 lines.append(f"\n{i}. {name}{conflict}")
                 if p.get("price") and not p.get("price_conflict"):
-                    lines.append(f"   Price: ${p['price']}")
+                    currency_sym = {"INR": "\u20b9", "EUR": "\u20ac", "GBP": "\u00a3"}.get(
+                        p.get("currency", "USD"), "$"
+                    )
+                    lines.append(f"   Price: {currency_sym}{p['price']}")
                 elif p.get("price_conflict"):
-                    lines.append(f"   Price: not confirmed — multiple values detected")
+                    lines.append(f"   Price: not confirmed - multiple values detected")
                 if p.get("category"):
                     lines.append(f"   Category: {p['category']}")
+                if p.get("description") and not p.get("description", "").startswith(name):
+                    lines.append(f"   Description: {p['description'][:100]}")
                 if p.get("features"):
                     lines.append(f"   Features: {', '.join(p['features'][:5])}")
                 specs = p.get("specifications", {})
                 if specs:
-                    spec_str = ", ".join(f"{k}: {v}" for k, v in specs.items())
+                    spec_str = ", ".join(f"{k}: {v}" for k, v in list(specs.items())[:4])
                     lines.append(f"   Specs: {spec_str}")
-                if p.get("description"):
-                    lines.append(f"   Info: {p['description'][:120]}")
             sections.append("\n".join(lines))
 
         # Pricing
@@ -585,20 +705,46 @@ class FactGraphCompressor:
         if fact_graph.get("features"):
             sections.append(f"\nADDITIONAL FEATURES: {', '.join(fact_graph['features'][:12])}")
 
-        # Analytics / Business Overview
+        # Analytics / Business Overview with Pricing
         if fact_graph.get("analytics"):
-            lines = ["\nBUSINESS OVERVIEW:"]
+            lines = ["\nCATALOG OVERVIEW:"]
             for a in fact_graph["analytics"]:
                 if a.get("business_name"):
                     lines.append(f"  Business: {a['business_name']}")
                 if a.get("industry"):
                     lines.append(f"  Industry: {a['industry']}")
                 if a.get("total_products"):
-                    lines.append(f"  Total products/services: {a['total_products']}")
+                    lines.append(f"  Total products: {a['total_products']}")
                 if a.get("categories"):
                     lines.append(f"  Categories: {', '.join(str(c) for c in a['categories'])}")
                 if a.get("capabilities"):
                     lines.append(f"  Capabilities: {', '.join(str(c) for c in a['capabilities'])}")
+                if a.get("price_range"):
+                    lines.append(f"  Price range: {a['price_range']}")
+                if a.get("avg_price"):
+                    lines.append(f"  Average price: {a['avg_price']}")
+                if a.get("cheapest_item") and a.get("cheapest_price") is not None:
+                    lines.append(f"  Most affordable: {a['cheapest_item']} at {a['cheapest_price']}")
+                if a.get("priciest_item") and a.get("priciest_price") is not None:
+                    lines.append(f"  Premium option: {a['priciest_item']} at {a['priciest_price']}")
+                if a.get("bottom_by_price"):
+                    items = [
+                        f"{i['name']} ({i['price']})" for i in a["bottom_by_price"]
+                        if isinstance(i, dict) and i.get("name") and i.get("price") is not None
+                    ]
+                    if items:
+                        lines.append(f"  Budget options: {', '.join(items)}")
+                if a.get("top_by_price"):
+                    items = [
+                        f"{i['name']} ({i['price']})" for i in a["top_by_price"]
+                        if isinstance(i, dict) and i.get("name") and i.get("price") is not None
+                    ]
+                    if items:
+                        lines.append(f"  Premium options: {', '.join(items)}")
+                if a.get("all_item_names"):
+                    names = a["all_item_names"]
+                    if isinstance(names, list):
+                        lines.append(f"  All products: {', '.join(str(n) for n in names[:15])}")
                 if a.get("summary"):
                     lines.append(f"  Summary: {a['summary']}")
             sections.append("\n".join(lines))

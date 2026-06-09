@@ -9,6 +9,7 @@ import json
 import time
 from typing import List, Dict, Any, Optional
 from redis.asyncio import Redis
+import redis.asyncio as aioredis
 from app.core.resource_management import get_resource_manager
 from app.observability import get_logger, get_metrics_collector
 
@@ -20,6 +21,11 @@ STREAM_AUTOMATION_EVENTS = "automation_events"
 WAKE_CHANNEL = "automation:wake"
 BATCH_SIZE = 100
 MAX_RETRY_COUNT = 3
+# Poll interval: wake worker every N seconds to drain the stream.
+# This is the primary wake mechanism since Upstash Redis does not support
+# Pub/Sub on most plans. Pub/Sub is attempted as a best-effort fast-path
+# but the poll interval guarantees real-time processing regardless.
+POLL_INTERVAL_S = 5.0
 
 
 class StreamConsumer:
@@ -42,25 +48,20 @@ class StreamConsumer:
         self.metrics = get_metrics_collector()
         self._running = False
         self._redis: Optional[Redis] = None
-        self._pubsub = None
         self._wake_event: asyncio.Event = asyncio.Event()
         self._retry_queue: List[tuple[Dict, int, float]] = []  # (payload, retry_count, next_attempt)
         self._listener_task: Optional[asyncio.Task] = None
+        self._pubsub_redis: Optional[aioredis.Redis] = None
 
     async def start(self) -> None:
         self._redis = get_resource_manager().get_redis()
         self._running = True
 
-        # Subscribe to wake channel — zero-cost idle
-        self._pubsub = self._redis.pubsub()
-        await self._pubsub.subscribe(WAKE_CHANNEL)
-
-        # Background task: listens for wake signals and sets the asyncio.Event
+        # Background task: dedicated connection for Pub/Sub wake signals with auto-reconnect
         self._listener_task = asyncio.create_task(self._pubsub_listener())
 
         # Check backlog size — if messages exist, set the wake event immediately
         # so _worker_loop processes them without waiting for a new Pub/Sub signal.
-        # Do NOT drain here — let _worker_loop do it so messages are never discarded.
         try:
             backlog_size = await self._redis.xlen(STREAM_AUTOMATION_EVENTS)
             if backlog_size:
@@ -78,36 +79,71 @@ class StreamConsumer:
         if self._listener_task:
             self._listener_task.cancel()
             await asyncio.gather(self._listener_task, return_exceptions=True)
-        if self._pubsub:
-            await self._pubsub.unsubscribe(WAKE_CHANNEL)
-            await self._pubsub.aclose()
+        if self._pubsub_redis:
+            try:
+                await self._pubsub_redis.aclose()
+            except Exception:
+                pass
         logger.info("StreamConsumer stopped")
 
     async def _pubsub_listener(self) -> None:
-        """Listens on automation:wake channel. Sets asyncio.Event on each message."""
-        try:
-            async for message in self._pubsub.listen():
-                if not self._running:
-                    break
-                if message and message.get("type") == "message":
-                    self._wake_event.set()
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error("Pub/Sub listener error: %s", e)
+        """
+        Best-effort Pub/Sub listener for fast-path wake signals.
+        Upstash Redis does not support Pub/Sub on most plans — if subscribe
+        fails after 3 attempts, this task exits gracefully and the poll
+        interval (POLL_INTERVAL_S) takes over as the sole wake mechanism.
+        """
+        from shared.config import get_config
+        url = get_config().REDIS_URL
+        consecutive_failures = 0
+        max_failures = 3
+        while self._running and consecutive_failures < max_failures:
+            try:
+                self._pubsub_redis = aioredis.from_url(
+                    url,
+                    encoding="utf-8",
+                    decode_responses=True,
+                    socket_connect_timeout=5,
+                    socket_keepalive=True,
+                )
+                pubsub = self._pubsub_redis.pubsub()
+                await pubsub.subscribe(WAKE_CHANNEL)
+                consecutive_failures = 0  # reset on successful subscribe
+                logger.debug("StreamConsumer: Pub/Sub subscribed to %s (fast-path active)", WAKE_CHANNEL)
+                async for message in pubsub.listen():
+                    if not self._running:
+                        break
+                    if message and message.get("type") == "message":
+                        self._wake_event.set()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                consecutive_failures += 1
+                if self._running and consecutive_failures < max_failures:
+                    logger.debug("StreamConsumer: Pub/Sub unavailable (%d/%d): %s",
+                                 consecutive_failures, max_failures, e)
+                    await asyncio.sleep(2)
+            finally:
+                if self._pubsub_redis:
+                    try:
+                        await self._pubsub_redis.aclose()
+                    except Exception:
+                        pass
+                    self._pubsub_redis = None
+        if self._running:
+            logger.info("StreamConsumer: Pub/Sub disabled (not supported by Redis provider) "
+                        "— poll interval %.0fs is the active wake mechanism", POLL_INTERVAL_S)
 
     async def wait_for_work(self, timeout: Optional[float] = None) -> None:
         """
-        Block until a Pub/Sub wake signal arrives.
-        Zero Redis commands while idle.
-        The event is cleared AFTER waking to prevent losing signals
-        that arrive during processing.
+        Block until a Pub/Sub wake signal arrives OR the poll interval elapses.
+        The poll interval (POLL_INTERVAL_S) is the safety fallback: even if the
+        Pub/Sub listener dies or a wake signal is missed, the worker wakes up
+        and drains the stream every POLL_INTERVAL_S seconds.
         """
+        effective_timeout = timeout if timeout is not None else POLL_INTERVAL_S
         try:
-            if timeout is not None:
-                await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
-            else:
-                await self._wake_event.wait()
+            await asyncio.wait_for(self._wake_event.wait(), timeout=effective_timeout)
         except asyncio.TimeoutError:
             pass
         self._wake_event.clear()
@@ -196,4 +232,4 @@ class StreamConsumer:
             logger.error("Failed to send to DLQ: %s", e)
 
 
-__all__ = ["StreamConsumer", "STREAM_AUTOMATION_EVENTS"]
+__all__ = ["StreamConsumer", "STREAM_AUTOMATION_EVENTS", "POLL_INTERVAL_S"]

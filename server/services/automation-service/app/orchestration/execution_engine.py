@@ -481,6 +481,7 @@ class ExecutionEngine:
             "delivery", "policy", "refund", "enquiry", "inquiry",
             "laptop", "model", "compare", "recommend", "option",
             "cheapest", "expensive", "budget", "premium", "gaming",
+            "wanna", "want", "tell me", "show", "list", "what do you", "what you have",
         }
         # Block analytics injection when query is clearly off-catalog
         # (contact info, account issues, generic help, etc.)
@@ -497,6 +498,8 @@ class ExecutionEngine:
         # Intent is specific (non-generic): always allow analytics
         # Intent is generic but message has discovery signals: allow
         # Intent is generic and no discovery signals: block (pure greeting)
+        # pricing_inquiry / product_inquiry ALWAYS get analytics
+        catalog_intents = {"pricing_inquiry", "product_inquiry"}
         has_info_intent = (
             intent_str not in generic_intents
             or has_discovery_signal
@@ -508,6 +511,7 @@ class ExecutionEngine:
                 not existing_chunks
                 or conf < 0.30
                 or intent_str in generic_intents
+                or intent_str in catalog_intents  # always inject for catalog intents
             )
         )
 

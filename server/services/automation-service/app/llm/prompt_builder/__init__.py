@@ -115,12 +115,21 @@ Focus: Continue the existing conversation thread with context-awareness.
 - Keep the response concise and focused on the new question or clarification.""",
 
     "general": """ROLE: Customer Service Assistant
-Focus: Provide helpful, accurate responses to general inquiries.
-- Answer clearly and concisely using only the provided context.
-- If the context contains analytics/catalogue data, use it to suggest relevant example questions the customer could ask (e.g. about specific products, pricing, features).
+Focus: Directly answer the customer's question using the verified catalog data in context.
+- When the customer asks about products or services: list actual products/services from the VERIFIED CONTEXT immediately.
+- When catalog data (product names, prices, categories) is present in context: present it clearly and factually.
+- NEVER suggest follow-up questions as a substitute for answering what was asked.
 - NEVER fabricate product names, prices, or features — only reference what appears in VERIFIED CONTEXT.
-- For greetings or short openers: respond warmly, briefly explain what you can help with, then list 3-5 concrete example questions drawn directly from the catalogue data in context.
+- Structure: (1) Direct answer from context, (2) Key details, (3) Optional: one relevant follow-up offer.
 - Maintain a warm, professional tone at all times.""",
+
+    "catalog": """ROLE: Product Catalog Assistant
+Focus: Present the business's available products and services factually from the VERIFIED CONTEXT.
+- IMMEDIATELY list products/services found in VERIFIED CONTEXT. Do NOT ask clarifying questions first.
+- For each product include: name, price (if available), key category or feature.
+- After presenting the catalog overview, invite the customer to ask about specific items.
+- NEVER invent product names, prices, or features not present in VERIFIED CONTEXT.
+- NEVER respond with only questions or suggestions — always lead with actual catalog data.""",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,7 +137,10 @@ Focus: Provide helpful, accurate responses to general inquiries.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _JOURNEY_MODIFIERS: Dict[str, str] = {
-    "discovery":     "The customer is exploring options. Lead with value and clarity.",
+    "discovery":     "The customer is exploring options. Present available products and services directly from the context, then invite further questions.",
+    # awareness maps to discovery behaviour — new customer asking about what we offer
+    "awareness":     "The customer is exploring options. Present available products and services directly from the context, then invite further questions.",
+    "interest":      "The customer has shown interest. Highlight relevant products and key benefits from the context.",
     "consideration": "The customer is comparing options. Be consultative and thorough.",
     "decision":      "The customer is close to deciding. Be decisive, reassuring, and clear on next steps.",
     "post_purchase": "The customer has purchased. Focus on onboarding success and satisfaction.",
@@ -148,15 +160,21 @@ _SENTIMENT_MODIFIERS: Dict[str, str] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 _RISK_PROMPT_LOW_CONFIDENCE = """
-⚠️ GROUNDING WARNING: The retrieved context has low confidence ({confidence:.0%}).
-- Do NOT quote specific prices or product specifications.
-- Acknowledge that you need to verify details.
-- Offer to connect the customer with a specialist who can confirm accurate information."""
+NOTE: Retrieved context has moderate confidence ({confidence:.0%}).
+- Use only the product names and prices explicitly listed in the VERIFIED CONTEXT above.
+- If a price IS shown in the VERIFIED CONTEXT, you MUST state it accurately.
+- Do not invent prices, products, or specifications not in the context.
+- If context contains no price for a specific product, acknowledge you cannot confirm that specific price."""
+
+_RISK_PROMPT_NO_PRICING_DATA = """
+NOTE: No verified pricing data is available for this specific request.
+- Do not guess or estimate any prices.
+- Acknowledge you don't have current pricing and offer to connect with a specialist."""
 
 _RISK_PROMPT_PRICE_CONFLICT = """
-⚠️ PRICING CONFLICT: Multiple price values were detected for this product.
-- Do NOT quote any specific price.
-- Say that pricing requires confirmation and offer to connect with sales."""
+PRICING CONFLICT: Multiple price values detected for a product.
+- Do NOT quote any specific price for the conflicted product.
+- State that pricing requires confirmation and offer to connect with sales."""
 
 _RISK_PROMPT_MULTILINGUAL = """
 LANGUAGE INSTRUCTION: Respond in the same language the customer used.
@@ -296,12 +314,32 @@ class PromptRouter:
         # ── Layer 5: Risk ─────────────────────────────────────────────────
         has_risk = False
         has_price_warn = False
+
+        # Detect if verified pricing data exists in the fact graph context.
+        # If it does, use a softer warning that allows Brain #2 to quote prices.
+        # If no pricing data exists, use a stronger warning that blocks speculation.
+        context_has_pricing = (
+            "Price:" in fact_graph_context
+            or "Price range:" in fact_graph_context
+            or "Budget options:" in fact_graph_context
+            or "Most affordable:" in fact_graph_context
+            or "Premium option:" in fact_graph_context
+            or "PRODUCTS:" in fact_graph_context
+            or "PRICING:" in fact_graph_context
+        )
+
         if grounding_confidence < 0.60:
-            parts.append(
-                _RISK_PROMPT_LOW_CONFIDENCE.format(confidence=grounding_confidence)
-            )
+            if context_has_pricing:
+                # Pricing data IS in context - use soft warning that permits quoting
+                parts.append(
+                    _RISK_PROMPT_LOW_CONFIDENCE.format(confidence=grounding_confidence)
+                )
+                layers_applied.append(f"risk:low_confidence={grounding_confidence:.2f}")
+            else:
+                # No pricing data in context - block speculation
+                parts.append(_RISK_PROMPT_NO_PRICING_DATA)
+                layers_applied.append("risk:no_pricing_data")
             has_risk = True
-            layers_applied.append(f"risk:low_confidence={grounding_confidence:.2f}")
 
         if has_price_conflict:
             parts.append(_RISK_PROMPT_PRICE_CONFLICT)
@@ -378,12 +416,18 @@ class PromptRouter:
         """Map Brain #1 intent/template to a role prompt."""
         # Try prompt_template from response_strategy first (most specific)
         template = _get_nested(intelligence, "response_strategy", "prompt_template") or ""
-        template = str(template).lower()
+        # Handle Enum objects
+        if hasattr(template, "value"):
+            template = str(template.value).lower()
+        else:
+            template_str = str(template).lower()
+            # Handle "PromptTemplate.GENERAL_ENGAGEMENT" → extract value after last dot
+            template = template_str.split(".")[-1] if "." in template_str else template_str
 
         # Mapping from PromptTemplate enum values → role keys
         _TEMPLATE_TO_ROLE = {
             "sales_pricing_consultative": "negotiation",
-            "sales_product_discovery":    "sales",
+            "sales_product_discovery":    "catalog",
             "sales_product_inquiry":      "sales",
             "support_technical_troubleshooting": "support",
             "support_technical":          "support",
@@ -395,7 +439,7 @@ class PromptRouter:
             "follow_up_continuation":     "follow_up",
             "short_reply_continuation":   "follow_up",
             "general_followup":           "follow_up",
-            "general_engagement":         "general",
+            "general_engagement":         "catalog",
             "multi_intent_enterprise":    "sales",
             "default_professional":       "general",
         }
@@ -407,7 +451,7 @@ class PromptRouter:
         intent = _get_primary_intent(intelligence)
         _INTENT_TO_ROLE = {
             "pricing_inquiry":            "negotiation",
-            "product_inquiry":            "sales",
+            "product_inquiry":            "catalog",
             "bulk_purchase":              "sales",
             "partnership_inquiry":        "sales",
             "support_request":            "support",
@@ -422,7 +466,7 @@ class PromptRouter:
             "feature_request":            "sales",
             "follow_up":                  "follow_up",
             "greeting":                   "general",
-            "general_inquiry":            "general",
+            "general_inquiry":            "catalog",  # always show catalog for general inquiry
             "unknown":                    "general",
         }
         key = _INTENT_TO_ROLE.get(intent, "general")
@@ -438,8 +482,14 @@ class PromptRouter:
             or memory.get("customer_journey_stage", "")
             or "discovery"
         )
-        stage = str(stage).lower()
-        return stage, _JOURNEY_MODIFIERS.get(stage, "")
+        # Handle str(Enum) → "ConversationStage.AWARENESS" → extract value after last dot
+        stage_str = str(stage).lower()
+        if "." in stage_str:
+            stage_str = stage_str.split(".")[-1]
+        # Also handle the .value attribute directly
+        if hasattr(stage, "value"):
+            stage_str = str(stage.value).lower()
+        return stage_str, _JOURNEY_MODIFIERS.get(stage_str, _JOURNEY_MODIFIERS.get("discovery", ""))
 
     # ── Sentiment modifier ────────────────────────────────────────────────
 
@@ -451,8 +501,13 @@ class PromptRouter:
             or (memory.get("sentiment_history") or ["neutral"])[0]
             or "neutral"
         )
-        sentiment = str(sentiment).lower()
-        return sentiment, _SENTIMENT_MODIFIERS.get(sentiment, "")
+        # Handle str(Enum) → "Sentiment.POSITIVE" → extract value after last dot
+        sentiment_str = str(sentiment).lower()
+        if "." in sentiment_str:
+            sentiment_str = sentiment_str.split(".")[-1]
+        if hasattr(sentiment, "value"):
+            sentiment_str = str(sentiment.value).lower()
+        return sentiment_str, _SENTIMENT_MODIFIERS.get(sentiment_str, "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -484,7 +539,7 @@ def _get_primary_intent(intelligence: Any) -> str:
 def _count_fact_graph_sections(context: str) -> int:
     if not context:
         return 0
-    return sum(1 for h in ("PRODUCTS:", "PRICING:", "SUPPORT", "POLICIES:", "FEATURES:")
+    return sum(1 for h in ("PRODUCTS:", "PRICING:", "SUPPORT", "POLICIES:", "FEATURES:", "CATALOG OVERVIEW:")
                if h in context)
 
 

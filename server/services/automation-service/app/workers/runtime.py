@@ -18,7 +18,7 @@ import re
 import time
 from typing import Optional, List, Tuple
 from datetime import datetime
-from app.workers.consumer import StreamConsumer, MAX_RETRY_COUNT
+from app.workers.consumer import StreamConsumer, MAX_RETRY_COUNT, POLL_INTERVAL_S
 from app.workers.processor import MessageProcessor
 from app.workers.execution import get_execution_engine
 from app.observability import get_logger, get_metrics_collector
@@ -130,15 +130,15 @@ class WorkerRuntime:
 
         while self._running:
             try:
-                # ── Wait for wake signal (Pub/Sub) or retry due ───────────
-                # The consumer.start() sets _wake_event if backlog exists,
-                # so startup messages are processed immediately without polling.
+                # ── Wait for wake signal (Pub/Sub) or poll interval ────────
+                # wait_for_work() defaults to POLL_INTERVAL_S as safety fallback:
+                # even if Pub/Sub is silent/dead, we wake every 30s and drain
+                # the stream, guaranteeing real-time processing.
                 if self.consumer.has_pending_retries():
                     retry_delay = self.consumer.next_retry_delay()
                     await self.consumer.wait_for_work(timeout=retry_delay if retry_delay > 0 else None)
                 else:
-                    # Block indefinitely — only woken by PUBLISH automation:wake
-                    await self.consumer.wait_for_work(timeout=None)
+                    await self.consumer.wait_for_work()
 
                 if not self._running:
                     break

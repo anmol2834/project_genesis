@@ -74,8 +74,10 @@ async def run_file_pipeline(
     """
     Full intelligence pipeline for CSV/Excel/Google Sheets rows.
 
-    forced_category: user-selected category from UI (optional signal, not truth).
-    AI classification always runs; confidence merge decides final category.
+    forced_category: user-selected category from the UI.
+    When provided, it is ALWAYS used as the final category for all rows —
+    the user's explicit choice is never overridden by AI classification.
+    AI classification only runs as a fallback when forced_category is absent.
     """
     from .column_mapper     import map_columns, apply_mapping
     from .classifier        import classify_batch, merge_category
@@ -92,12 +94,18 @@ async def run_file_pipeline(
     mapped_rows = await asyncio.to_thread(apply_mapping, rows, mapping)
     logger.info(f"Column mapping: {len(mapping)} columns mapped")
 
-    # ── Step 2: AI classification (always runs) ───────────────────────────
-    # Returns (ai_category, subtype, ai_confidence) per row
-    ai_results = await asyncio.to_thread(classify_batch, mapped_rows)
+    # ── Step 2: AI classification ─────────────────────────────────────────
+    # Skip expensive ML inference when the user already chose a category.
+    # This cuts ~20s of latency per 20-row upload.
+    if forced_category and forced_category not in ("uncategorized", ""):
+        # User explicitly selected category — assign it to every row
+        ai_results = [("uncategorized", None, 0.0)] * len(mapped_rows)
+        logger.info(f"Skipping AI classification — user selected '{forced_category}'")
+    else:
+        ai_results = await asyncio.to_thread(classify_batch, mapped_rows)
 
     # ── Step 3: Category merge per row ────────────────────────────────────
-    # Enterprise rule: ai_confidence > 0.75 -> ai wins, else user_category
+    # User-selected category ALWAYS wins. AI is only a fallback.
     final_categories: List[str] = []
     final_subtypes:   List[Optional[str]] = []
     classification_metas: List[Dict] = []
@@ -105,6 +113,9 @@ async def run_file_pipeline(
     for row_idx, (ai_cat, subtype, ai_conf) in enumerate(ai_results):
         final_cat, decision = merge_category(ai_cat, ai_conf, forced_category)
         final_categories.append(final_cat)
+        # When user forced a category, still detect subtype from mapped row
+        if forced_category and forced_category not in ("uncategorized", "") and subtype is None:
+            subtype = None  # subtype detection is optional; skip for user-forced uploads
         final_subtypes.append(subtype)
         classification_metas.append({
             "user_category":   forced_category,
@@ -113,25 +124,22 @@ async def run_file_pipeline(
             "final_category":  final_cat,
             "subtype":         subtype,
             "decision_reason": decision,
-            # Raw retention fields — populated in _insert_entries_pg
             "row_index":       row_idx,
         })
 
     logger.info(f"Category merge complete. Sample: {final_categories[:3]}")
 
     # ── Step 4: Normalization + quality scoring + entity extraction ───────
+    # Pass classification_metas into normalize_batch so each accepted payload
+    # gets the meta for its own source row — fixes the N→M index misalignment.
     payloads, rejection_reasons = await asyncio.to_thread(
-        normalize_batch, mapped_rows, final_categories, final_subtypes, source_type, rows
+        normalize_batch, mapped_rows, final_categories, final_subtypes,
+        source_type, rows, classification_metas,
     )
     logger.info(f"Normalization: {len(payloads)} accepted, {len(rejection_reasons)} rejected")
 
     if not payloads:
         return {"accepted": 0, "rejected": len(rows), "errors": rejection_reasons, "entry_ids": []}
-
-    # Attach classification_meta to each payload
-    accepted_metas = [m for m, p in zip(classification_metas, payloads)]
-    for payload, meta in zip(payloads, accepted_metas):
-        payload["classification_meta"] = meta
 
     # ── Step 5: PostgreSQL insert (raw_data preserved) ────────────────────
     entry_ids = await _insert_entries_pg(payloads, source_id, user_id, source_type, session)
@@ -216,8 +224,12 @@ async def run_manual_pipeline(
     if normalized is None:
         return {"accepted": 0, "rejected": 1, "errors": ["Entry too sparse"], "entry_ids": []}
 
+    # For manual entries, display_data = raw_data (user's own field keys/values)
+    from .normalizer import _build_display_structured_data
+    display_data = _build_display_structured_data(raw_data)
+
     payload = await asyncio.to_thread(
-        build_entry_payload, normalized, final_cat, subtype, "manual", raw_data
+        build_entry_payload, normalized, final_cat, subtype, "manual", raw_data, 0.0, display_data
     )
     payload["title"] = title
     payload["classification_meta"] = classification_meta
@@ -291,10 +303,13 @@ async def run_update_pipeline(
     if normalized is None:
         return False
 
+    # For updates, preserve existing structured_data column names by using new_data as display
+    from .normalizer import _build_display_structured_data
+    display_data = _build_display_structured_data(new_data)
+    src_type = str(entry.source_type.value if hasattr(entry.source_type, "value") else entry.source_type)
+
     payload = await asyncio.to_thread(
-        build_entry_payload, normalized, final_cat, subtype,
-        str(entry.source_type.value if hasattr(entry.source_type, "value") else entry.source_type),
-        new_data,
+        build_entry_payload, normalized, final_cat, subtype, src_type, new_data, 0.0, display_data
     )
     payload["title"] = title
 

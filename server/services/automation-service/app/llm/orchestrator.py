@@ -29,13 +29,12 @@ class LLMOrchestrator:
     LLM orchestration engine.
     Generates grounded responses and validates against hallucination.
     """
-    
+
     def __init__(self):
         self.config = get_config()
         self.openai_client = AsyncOpenAI(api_key=self.config.get_openai_api_key())
         self.model = self.config.shared.OPENAI_MODEL
         self.max_tokens = 500
-        # Lazy-initialised; needs redis which is available after startup
         self._fallback_chain: Optional[FallbackChain] = None
 
     def _get_fallback_chain(self) -> FallbackChain:
@@ -53,7 +52,7 @@ class LLMOrchestrator:
                 max_tokens=self.max_tokens,
             )
         return self._fallback_chain
-    
+
     async def generate_response(
         self,
         intelligence: Dict[str, Any],
@@ -71,10 +70,11 @@ class LLMOrchestrator:
         1. Pre-generation grounding validation
         2. L10 Fact graph compression
         3. Grounded prompt builder
-        4. Brain #2 generation (with fallback chain: T1→T2→T3→T4→T5)
+        4. Brain #2 generation (with fallback chain: T1->T2->T3->T4->T5)
         5. UTF-8 sanitization
         6. Post-generation hallucination check
-        7. Confidence calculation
+        7. Catalog response validation
+        8. Confidence calculation
         """
         import time
         start = time.perf_counter()
@@ -82,7 +82,7 @@ class LLMOrchestrator:
         try:
             from app.llm.hallucination_guard import get_grounding_validator
 
-            # ── PRE-GENERATION GROUNDING VALIDATION ───────────────────────────
+            # -- PRE-GENERATION GROUNDING VALIDATION --
             validator = get_grounding_validator()
             grounding_result = validator.validate(
                 chunks=retrieval.get("chunks", []),
@@ -93,12 +93,12 @@ class LLMOrchestrator:
 
             if grounding_result.escalate:
                 logger.warning(
-                    "⚠️ Grounding failed catastrophically | confidence=%.3f accepted=0",
+                    "Grounding failed catastrophically | confidence=%.3f accepted=0",
                     grounding_result.overall_confidence,
                     trace_id=trace_id,
                 )
 
-            # ── L10: Fact Graph Compression (validated chunks only) ───────────
+            # -- L10: Fact Graph Compression (validated chunks only) --
             prompt, prompt_obs = await self._build_grounded_prompt_async(
                 intelligence=intelligence,
                 retrieval_chunks=grounding_result.validated_chunks,
@@ -108,7 +108,7 @@ class LLMOrchestrator:
                 grounding_confidence=grounding_result.overall_confidence,
             )
 
-            # ── Brain #2 Generation (with FALLBACK CHAIN) ────────────────────
+            # -- Brain #2 Generation (with FALLBACK CHAIN) --
             chain = self._get_fallback_chain()
             fallback_result = await chain.execute(
                 prompt=prompt,
@@ -121,10 +121,10 @@ class LLMOrchestrator:
                 grounding_result=grounding_result,
             )
 
-            # ── UTF-8 Sanitization (prevent ₹ and other non-ASCII crashes) ───
+            # -- UTF-8 Sanitization --
             response_text = sanitize_openai_response(fallback_result.response_text)
 
-            # ── Post-generation Hallucination Guard (enhanced) ────────────────
+            # -- Post-generation Hallucination Guard --
             hallucination_check = self._check_hallucination(
                 response_text=response_text,
                 validated_chunks=grounding_result.validated_chunks,
@@ -133,7 +133,18 @@ class LLMOrchestrator:
                 grounding_result=grounding_result,
             )
 
-            # ── Confidence Calculation ────────────────────────────────────────
+            # -- Catalog Response Validation --
+            # When customer asks about products/services and catalog data was
+            # retrieved, verify the response contains actual catalog content.
+            response_text = self._validate_catalog_response(
+                response_text=response_text,
+                retrieval=retrieval,
+                intelligence=intelligence,
+                grounding_result=grounding_result,
+                message_content=message_content,
+            )
+
+            # -- Confidence Calculation --
             confidence = self._calculate_generation_confidence(
                 retrieval_confidence=retrieval["retrieval_confidence"],
                 grounding_confidence=grounding_result.overall_confidence,
@@ -152,33 +163,30 @@ class LLMOrchestrator:
             elapsed = (time.perf_counter() - start) * 1000
 
             result = {
-                "response_text":         response_text,
-                "confidence":            confidence,
+                "response_text":          response_text,
+                "confidence":             confidence,
                 "hallucination_detected": hallucination_check["hallucination_detected"],
-                "grounding_score":       hallucination_check["grounding_score"],
-                "tokens_used":           fallback_result.tokens_used,
-                "generation_latency_ms": elapsed,
-                "model":                 fallback_result.model,
-                # Fallback chain metadata (for observability & escalation)
-                "fallback_tier":         fallback_result.tier_used,
-                "fallback_tier_name":    fallback_result.tier_name,
-                "fallback_error_chain":  fallback_result.error_chain,
-                "escalate_to_human":     fallback_result.escalate_to_human,
-                # Prompt observability (from PromptRouter)
-                "prompt_route":          prompt_obs.get("prompt_route", ""),
-                "prompt_tokens_est":     prompt_obs.get("prompt_tokens_est", 0),
-                "fact_graph_sections":   prompt_obs.get("fact_graph_sections", 0),
-                "compression_ratio":     prompt_obs.get("compression_ratio", 1.0),
-                "prompt_layers":         prompt_obs.get("layers_applied", []),
-                # Pre-generation grounding
+                "grounding_score":        hallucination_check["grounding_score"],
+                "tokens_used":            fallback_result.tokens_used,
+                "generation_latency_ms":  elapsed,
+                "model":                  fallback_result.model,
+                "fallback_tier":          fallback_result.tier_used,
+                "fallback_tier_name":     fallback_result.tier_name,
+                "fallback_error_chain":   fallback_result.error_chain,
+                "escalate_to_human":      fallback_result.escalate_to_human,
+                "prompt_route":           prompt_obs.get("prompt_route", ""),
+                "prompt_tokens_est":      prompt_obs.get("prompt_tokens_est", 0),
+                "fact_graph_sections":    prompt_obs.get("fact_graph_sections", 0),
+                "compression_ratio":      prompt_obs.get("compression_ratio", 1.0),
+                "prompt_layers":          prompt_obs.get("layers_applied", []),
                 "pre_gen_grounding": {
-                    "overall_confidence":  grounding_result.overall_confidence,
-                    "accepted_chunks":      grounding_result.accepted_count,
-                    "rejected_chunks":      grounding_result.rejected_count,
-                    "pricing_conflicts":    len(grounding_result.pricing_conflicts),
-                    "tenant_violations":    grounding_result.tenant_violations,
-                    "category_violations":  grounding_result.category_violations,
-                    "escalate":             grounding_result.escalate or fallback_result.escalate_to_human,
+                    "overall_confidence": grounding_result.overall_confidence,
+                    "accepted_chunks":    grounding_result.accepted_count,
+                    "rejected_chunks":    grounding_result.rejected_count,
+                    "pricing_conflicts":  len(grounding_result.pricing_conflicts),
+                    "tenant_violations":  grounding_result.tenant_violations,
+                    "category_violations": grounding_result.category_violations,
+                    "escalate":           grounding_result.escalate or fallback_result.escalate_to_human,
                 },
             }
 
@@ -196,30 +204,29 @@ class LLMOrchestrator:
             return result
 
         except Exception as e:
-            # Catastrophic failure — should never happen (T5 has no I/O)
             logger.error("Response generation catastrophic failure: %s", e,
                          trace_id=trace_id, exc_info=True)
             elapsed = (time.perf_counter() - start) * 1000
             return {
-                "response_text":         "We apologize, but we're experiencing technical difficulties. A team member will assist you shortly.",
-                "confidence":            0.05,
+                "response_text":          "We apologize, but we're experiencing technical difficulties. A team member will assist you shortly.",
+                "confidence":             0.05,
                 "hallucination_detected": False,
-                "grounding_score":       0.0,
-                "tokens_used":           0,
-                "generation_latency_ms": elapsed,
-                "error":                 str(e),
-                "fallback_tier":         6,
-                "fallback_tier_name":    "catastrophic_failure",
-                "fallback_error_chain":  [str(e)],
-                "escalate_to_human":     True,
-                "prompt_route":          "catastrophic",
-                "prompt_tokens_est":     0,
-                "fact_graph_sections":   0,
-                "compression_ratio":     1.0,
-                "prompt_layers":         [],
-                "pre_gen_grounding":     {"escalate": True},
+                "grounding_score":        0.0,
+                "tokens_used":            0,
+                "generation_latency_ms":  elapsed,
+                "error":                  str(e),
+                "fallback_tier":          6,
+                "fallback_tier_name":     "catastrophic_failure",
+                "fallback_error_chain":   [str(e)],
+                "escalate_to_human":      True,
+                "prompt_route":           "catastrophic",
+                "prompt_tokens_est":      0,
+                "fact_graph_sections":    0,
+                "compression_ratio":      1.0,
+                "prompt_layers":          [],
+                "pre_gen_grounding":      {"escalate": True},
             }
-    
+
     async def _build_grounded_prompt_async(
         self,
         intelligence: Any,
@@ -235,16 +242,16 @@ class LLMOrchestrator:
         Returns (assembled_prompt_str, prompt_observability_dict)
 
         NEVER injects raw chunks — all context flows through:
-          validated_chunks → FactGraphCompressor → PromptRouter
+          validated_chunks -> FactGraphCompressor -> PromptRouter
         """
         from app.llm.grounding.fact_graph_compressor import get_fact_graph_compressor
         from app.llm.prompt_builder import get_prompt_router
 
-        compressor   = get_fact_graph_compressor()
+        compressor    = get_fact_graph_compressor()
         prompt_router = get_prompt_router()
-        user_id      = memory.get("user_id", "")
+        user_id       = memory.get("user_id", "")
 
-        # ── L10: Fact Graph Compression ───────────────────────────────────
+        # -- L10: Fact Graph Compression --
         try:
             int_dict = intelligence if isinstance(intelligence, dict) else (
                 intelligence.__dict__ if hasattr(intelligence, "__dict__") else {}
@@ -259,11 +266,13 @@ class LLMOrchestrator:
             logger.warning("Fact graph compression failed: %s", e)
             fact_graph = None
 
-        # ── Format fact graph → context string ───────────────────────────
+        # -- Format fact graph -> context string --
+        # Also include analytics even when no products/pricing so CATALOG OVERVIEW
+        # section reaches the prompt and Brain #2 can present catalog data.
         if fact_graph and (
             fact_graph.get("products") or fact_graph.get("pricing")
             or fact_graph.get("support") or fact_graph.get("features")
-            or fact_graph.get("policies")
+            or fact_graph.get("policies") or fact_graph.get("analytics")
         ):
             fact_graph_context = compressor.format_for_llm(fact_graph)
         elif retrieval_chunks:
@@ -275,12 +284,12 @@ class LLMOrchestrator:
         else:
             fact_graph_context = "No specific verified information available for this query."
 
-        # ── Detect price conflicts for risk layer ─────────────────────────
+        # -- Detect price conflicts for risk layer --
         has_price_conflict = bool(
             fact_graph and any(p.get("price_conflict") for p in fact_graph.get("products", []))
         )
 
-        # ── PromptRouter: assemble layered prompt ─────────────────────────
+        # -- PromptRouter: assemble layered prompt --
         build_result = prompt_router.build(
             intelligence=intelligence,
             fact_graph_context=fact_graph_context,
@@ -291,8 +300,7 @@ class LLMOrchestrator:
             has_price_conflict=has_price_conflict,
         )
 
-        # ── Final OpenAI messages format ──────────────────────────────────
-        # system = full layered prompt, user = customer message
+        # -- Final OpenAI messages format --
         final_prompt = (
             build_result.system_prompt
             + "\n\n---\nCUSTOMER MESSAGE:\n"
@@ -313,7 +321,7 @@ class LLMOrchestrator:
         }
 
         return final_prompt, prompt_obs
-    
+
     async def _call_openai_generation(
         self,
         prompt: str,
@@ -328,7 +336,6 @@ class LLMOrchestrator:
                 max_tokens=self.max_tokens,
                 timeout=30.0,
             )
-            # UTF-8 sanitize — ensures ₹ and other non-ASCII survive logging/DB writes
             response_text = sanitize_openai_response(
                 response.choices[0].message.content.strip()
             )
@@ -338,7 +345,70 @@ class LLMOrchestrator:
         except Exception as e:
             logger.error("OpenAI generation failed: %s", e, trace_id=trace_id)
             raise
-    
+
+    def _validate_catalog_response(
+        self,
+        response_text: str,
+        retrieval: Dict,
+        intelligence: Any,
+        grounding_result: Any,
+        message_content: str,
+    ) -> str:
+        """
+        Validate that when a customer asks about products/services and catalog
+        data was retrieved, the response actually contains catalog content.
+
+        If it contains only generic questions/suggestions, log a warning so the
+        issue can be monitored and the prompt tuned. Response is returned as-is
+        since we cannot re-generate inline without adding latency.
+        """
+        _CATALOG_REQUEST_SIGNALS = {
+            "product", "products", "service", "services", "catalog", "offer",
+            "offerings", "solution", "solutions", "wanna about", "want to know",
+            "what do you", "what you have", "what you offer",
+        }
+        msg_lower = message_content.lower()
+        is_catalog_request = any(s in msg_lower for s in _CATALOG_REQUEST_SIGNALS)
+
+        if not is_catalog_request:
+            return response_text
+
+        chunks = retrieval.get("chunks", [])
+        has_catalog_chunks = any(
+            str(c.get("chunk_type", "")).lower() in ("product_service", "data_analytics")
+            for c in chunks
+        )
+
+        if not has_catalog_chunks:
+            return response_text
+
+        response_lower = response_text.lower()
+        _GENERIC_ONLY_SIGNALS = [
+            "what discounts", "can you tell me", "how does", "would you like to know",
+            "what would you like", "what are you looking for", "could you clarify",
+            "please let me know what", "feel free to ask about",
+        ]
+        _CATALOG_CONTENT_SIGNALS = [
+            "price", "inr", "rs.", "rs ", "\u20b9", "$",
+            "model", "laptop", "gaming", "pro", "available",
+            "category", "categories", "range", "offer", "product",
+            "total", "we offer", "we have", "our products",
+        ]
+
+        has_catalog_content = any(s in response_lower for s in _CATALOG_CONTENT_SIGNALS)
+        generic_count = sum(1 for s in _GENERIC_ONLY_SIGNALS if s in response_lower)
+        is_only_generic = not has_catalog_content and generic_count >= 2
+
+        if is_only_generic:
+            logger.warning(
+                "catalog_response_validation_failed | response contains only generic "
+                "suggestions despite catalog data being retrieved | "
+                "chunks=%d message='%s'",
+                len(chunks), message_content[:80],
+            )
+
+        return response_text
+
     def _check_hallucination(
         self,
         response_text: str,
@@ -358,8 +428,6 @@ class LLMOrchestrator:
         - Response makes specific entity claims with ZERO context supporting them
         A generic helpful greeting/engagement response is NEVER hallucination.
         """
-        # Build context from validated chunks first; fall back to rejected
-        # (reject on score, not on tenant — all rejected chunks are same-tenant)
         context_chunks = validated_chunks
         if not context_chunks and rejected_chunks:
             context_chunks = [c for c in rejected_chunks if c.get("content", "")]
@@ -374,36 +442,27 @@ class LLMOrchestrator:
         response_lower = response_text.lower()
         violations: List[str] = []
 
-        # Pattern 1: Specific price claims with NO price in any retrieved context
         if "$" in response_text and "$" not in all_context:
             violations.append("invented_pricing")
 
-        # Pattern 2: Specific product-name claims with zero context when context exists
         hallucination_keywords = ["our price is", "costs $", "we charge", "launching on", "released in"]
         if all_context and any(kw in response_lower for kw in hallucination_keywords):
-            # Only a violation if the relevant product/price is not backed by any context
             if not any(kw.replace(" ", "") in all_context.replace(" ", "") for kw in hallucination_keywords):
                 violations.append("specific_claims_without_context")
 
-        # ── Grounding score ──────────────────────────────────────────────────
-        # Primary signal: use pre-gen grounding confidence when chunks were validated
-        # (it is the authoritative chunk-level quality signal from GroundingValidator)
         accepted = grounding_result.accepted_count if grounding_result else 0
         pre_gen_conf = grounding_result.overall_confidence if grounding_result else 0.0
 
         if accepted > 0:
-            # Validated chunks exist — anchor on pre-gen confidence
-            # Apply a small word-overlap adjustment (max ±0.10) as secondary signal
             response_words = set(response_lower.split())
             context_words  = set(context_text.split())
             if response_words and context_words:
                 overlap = len(response_words & context_words) / len(response_words)
-                adjustment = (overlap - 0.10) * 0.10   # small ±0.10 band
+                adjustment = (overlap - 0.10) * 0.10
             else:
                 adjustment = 0.0
             grounding_score = min(0.95, max(0.40, pre_gen_conf + adjustment))
         elif context_chunks:
-            # Only rejected chunks available — compute overlap but be generous
             response_words = set(response_lower.split())
             context_words  = set(context_text.split())
             if response_words and context_words:
@@ -412,22 +471,19 @@ class LLMOrchestrator:
             else:
                 grounding_score = 0.45
         else:
-            # Truly no context at all
             grounding_score = 0.45
 
         if violations:
             grounding_score = min(grounding_score, 0.40)
 
-        # Hallucination only when confirmed violations exist OR zero-context + specific claims
-        # A helpful engagement response with no violations is NEVER hallucination
         hallucination_detected = bool(violations)
 
         return {
             "hallucination_detected": hallucination_detected,
-            "grounding_score":       grounding_score,
-            "violations":            violations,
+            "grounding_score":        grounding_score,
+            "violations":             violations,
         }
-    
+
     def _calculate_generation_confidence(
         self,
         retrieval_confidence: float,
@@ -438,13 +494,13 @@ class LLMOrchestrator:
     ) -> float:
         """
         Calculate overall generation confidence (pre+post grounding aware).
-        fallback_confidence penalizes results from lower tiers (T2→T5 < 1.0).
+        fallback_confidence penalizes results from lower tiers (T2->T5 < 1.0).
         """
         base = (
-            retrieval_confidence       * 0.25 +
-            grounding_confidence       * 0.30 +
-            post_gen_grounding_score   * 0.30 +
-            intent_confidence          * 0.15
+            retrieval_confidence     * 0.25 +
+            grounding_confidence     * 0.30 +
+            post_gen_grounding_score * 0.30 +
+            intent_confidence        * 0.15
         )
         return min(0.95, max(0.05, base * fallback_confidence))
 

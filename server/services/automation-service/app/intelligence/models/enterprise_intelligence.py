@@ -176,8 +176,8 @@ class EnterpriseIntelligenceResult(BaseModel):
     # Intent classification
     primary_intents: List[IntentDefinition]
     secondary_intents: List[IntentDefinition] = Field(default_factory=list)
-    support_intents: List[str] = Field(default_factory=list)
-    sales_intents: List[str] = Field(default_factory=list)
+    support_intents: List[Any] = Field(default_factory=list)   # OpenAI may return str or dict
+    sales_intents: List[Any] = Field(default_factory=list)     # OpenAI may return str or dict
     
     # Entity extraction
     entities: EntityExtraction

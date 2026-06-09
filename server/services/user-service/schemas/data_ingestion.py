@@ -29,13 +29,15 @@ class SourceStatusEnum(str, Enum):
 
 class DataCategoryEnum(str, Enum):
     product_service     = "product_service"
-    pricing_payment     = "pricing_payment"
+    issue_resolution    = "issue_resolution"
     contact_support     = "contact_support"
     offers_promotions   = "offers_promotions"
     delivery_shipping   = "delivery_shipping"
     company_info        = "company_info"
     policies_legal      = "policies_legal"
     educational_content = "educational_content"
+    # Legacy — kept for backward compat; no new entries accepted via UI
+    pricing_payment     = "pricing_payment"
 
 
 # ── Manual Entry ──────────────────────────────────────────────────────────────

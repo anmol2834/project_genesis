@@ -1,0 +1,21 @@
+policy_id,policy_name,summary,visibility,effective_date,status
+POL-001,Privacy Policy,Collection and use of customer data,Public,2026-01-01,Active
+POL-002,Terms of Service,Rules governing use of products and services,Public,2026-01-01,Active
+POL-003,Warranty Policy,"Coverage, exclusions, and claim process",Public,2026-01-01,Active
+POL-004,Return Policy,Conditions for product returns and refunds,Public,2026-01-01,Active
+POL-005,Refund Policy,Eligibility and refund timelines,Public,2026-01-01,Active
+POL-006,Shipping Policy,"Delivery terms, timelines, and fees",Public,2026-01-01,Active
+POL-007,Cookie Policy,Use of cookies and tracking technologies,Public,2026-01-01,Active
+POL-008,Data Retention Policy,Retention and deletion of customer data,Internal,2026-01-01,Active
+POL-009,Acceptable Use Policy,Permitted and prohibited use cases,Public,2026-01-01,Active
+POL-010,Security Policy,Measures for protecting customer information,Internal,2026-01-01,Active
+POL-011,Intellectual Property Policy,Protection of trademarks and copyrights,Public,2026-01-01,Active
+POL-012,Accessibility Policy,Commitment to accessible services,Public,2026-01-01,Active
+POL-013,Environmental Policy,Sustainability and environmental practices,Public,2026-01-01,Active
+POL-014,Supplier Code of Conduct,Standards for suppliers and partners,Public,2026-01-01,Active
+POL-015,Anti-Fraud Policy,Prevention and reporting of fraud,Internal,2026-01-01,Active
+POL-016,Complaint Resolution Policy,Process for handling customer complaints,Public,2026-01-01,Active
+POL-017,Export Compliance Policy,International trade compliance requirements,Internal,2026-01-01,Active
+POL-018,Equal Opportunity Policy,Commitment to fair employment practices,Public,2026-01-01,Active
+POL-019,Vendor Agreement Terms,Legal terms for third-party vendors,Internal,2026-01-01,Active
+POL-020,Legal Disclaimer,Limitations of liability and warranties,Public,2026-01-01,Active

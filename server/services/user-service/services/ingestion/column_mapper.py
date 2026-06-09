@@ -26,44 +26,77 @@ logger = logging.getLogger(__name__)
 
 CANONICAL_FIELDS: List[Tuple[str, List[str]]] = [
     # ── Identity / Product ────────────────────────────────────────────────
-    ("product_id",   ["product id", "item id", "id", "product number", "item number", "record id"]),
-    ("name",         ["name", "product name", "item name", "title", "full name", "entry name"]),
-    ("description",  ["description", "details", "about", "summary", "overview", "info", "notes"]),
+    ("product_id",   ["product id", "item id", "id", "product number", "item number", "record id",
+                      "support id", "resource id", "shipping id", "offer id", "policy id",
+                      "comp id", "entry id", "row id", "reference id"]),
+    ("name",         ["name", "product name", "item name", "title", "full name", "entry name",
+                      "policy name", "offer name", "offer title", "campaign name",
+                      "shipping method", "information type", "resource title",
+                      "department name", "service name", "plan name"]),
+    ("description",  ["description", "details", "about", "summary", "overview", "info", "notes",
+                      "value", "policy summary", "policy details", "content", "body"]),
     ("sku",          ["sku", "stock keeping unit", "product code", "part number", "barcode", "item code"]),
-    ("category",     ["category", "product category", "type", "kind", "group", "segment", "class", "department"]),
+    ("category",     ["category", "product category", "type", "kind", "group", "segment", "class", "department",
+                      "offer type", "resource type", "information category"]),
     ("subcategory",  ["subcategory", "sub category", "sub type", "product type"]),
     ("brand",        ["brand", "brand name", "manufacturer", "make"]),
-    ("features",     ["features", "capabilities", "highlights", "key features", "benefits", "specifications", "specs"]),
+    ("features",     ["features", "capabilities", "highlights", "key features", "benefits",
+                      "specifications", "specs", "skill level", "level"]),
     ("tags",         ["tags", "labels", "keywords", "topics"]),
 
-    # ── Pricing ───────────────────────────────────────────────────────────
-    ("price",        ["price", "cost", "amount", "fee", "rate", "charge", "selling price", "unit price", "mrp", "price inr", "price usd"]),
+    # ── Pricing / Offers ──────────────────────────────────────────────────
+    ("price",        ["price", "cost", "amount", "fee", "rate", "charge", "selling price",
+                      "unit price", "mrp", "price inr", "price usd", "shipping cost",
+                      "shipping fee", "shipping charges", "delivery cost", "delivery fee"]),
     ("original_price", ["original price", "list price", "market price", "base price", "regular price"]),
-    ("discount",     ["discount", "offer", "deal", "reduction", "savings", "promo", "discount percent"]),
+    ("discount",     ["discount", "offer value", "deal value", "reduction", "savings", "promo",
+                      "discount percent", "offer amount"]),
     ("currency",     ["currency", "currency code"]),
-
-    # ── Inventory ─────────────────────────────────────────────────────────
-    ("stock",        ["stock", "stock quantity", "quantity", "inventory", "units available", "qty", "in stock", "stock level", "available quantity"]),
-    ("status",       ["status", "availability status", "product status", "state", "active", "enabled", "stock status"]),
-    ("supplier",     ["supplier", "vendor", "manufacturer", "brand", "distributor", "source", "supplied by"]),
-    ("location",     ["location", "warehouse", "store", "address", "city", "region"]),
+    ("offer_name",   ["offer name", "offer title", "deal name", "promotion name", "campaign name"]),
+    ("promo_code",   ["promo code", "coupon code", "voucher", "discount code"]),
+    ("offer_type",   ["offer type", "promotion type", "deal type", "discount type"]),
 
     # ── Dates ─────────────────────────────────────────────────────────────
-    ("created_date", ["created date", "creation date", "date added", "added on", "date created", "entry date", "launch date"]),
+    ("created_date", ["created date", "creation date", "date added", "added on", "date created",
+                      "entry date", "launch date", "effective date", "start date"]),
     ("updated_date", ["updated date", "last updated", "modified date", "last modified"]),
     ("valid_until",  ["expiry date", "expiry", "valid until", "expires", "end date", "deadline",
-                      "offer expiry", "valid through", "offer end date"]),
+                      "offer expiry", "valid through", "offer end date", "end_date"]),
+
+    # ── Inventory / Status ────────────────────────────────────────────────
+    ("stock",        ["stock", "stock quantity", "quantity", "inventory", "units available",
+                      "qty", "in stock", "stock level", "available quantity"]),
+    ("status",       ["status", "availability status", "product status", "state", "stock status",
+                      "record status", "entry status", "active status", "is active"]),
+    ("supplier",     ["supplier", "vendor", "manufacturer", "distributor", "source", "supplied by"]),
+    ("location",     ["location", "warehouse", "store", "address", "city", "region"]),
+
+    # ── Delivery / Shipping specific ──────────────────────────────────────
+    ("delivery_timeline",  ["delivery time", "delivery timeline", "delivery period", "transit time",
+                             "delivery days", "shipping time", "estimated delivery"]),
+    ("shipping_charges",   ["shipping cost", "shipping fee", "delivery cost", "delivery fee",
+                             "shipping charges", "freight cost"]),
+    ("return_window",      ["return window", "return period", "return policy days",
+                             "exchange period", "replacement window"]),
+    ("tracking_info",      ["tracking", "tracking available", "tracking included", "shipment tracking"]),
+    ("serviceable_regions",["region", "serviceable area", "delivery zone", "coverage area",
+                             "shipping region", "service area"]),
+    ("shipping_notes",     ["notes", "additional info", "shipping notes", "special notes", "remarks"]),
 
     # ── Contact ───────────────────────────────────────────────────────────
-    ("email",        ["email", "email address", "e-mail", "mail"]),
-    ("phone",        ["phone", "phone number", "contact no", "mobile", "telephone", "cell", "contact number"]),
+    ("email",        ["email", "email address", "e-mail", "mail", "support email", "contact email"]),
+    ("phone",        ["phone", "phone number", "contact no", "mobile", "telephone", "cell",
+                      "contact number", "support phone"]),
     ("website",      ["website", "url", "link", "web", "site"]),
     ("contact_name", ["contact name", "person name", "agent name", "representative name",
                       "staff name", "employee name", "full name of contact"]),
     ("department",   ["department", "team", "division", "support type", "contact type",
                       "role", "designation", "position"]),
-    ("working_hours",["working hours", "support hours", "availability", "office hours",
-                      "business hours", "timing", "timings", "hours of operation"]),
+    ("working_hours",["working hours", "support hours", "office hours",
+                      "business hours", "timing", "timings", "hours of operation",
+                      "availability hours", "open hours"]),
+    ("preferred_channel", ["preferred channel", "contact channel", "channel", "contact method",
+                            "preferred contact"]),
 
     # ── Pricing / Plans ───────────────────────────────────────────────────
     ("plan_name",    ["plan name", "plan", "tier", "subscription plan", "package"]),
@@ -74,12 +107,21 @@ CANONICAL_FIELDS: List[Tuple[str, List[str]]] = [
     # ── FAQ / Policy ──────────────────────────────────────────────────────
     ("question",     ["question", "query", "faq question", "q"]),
     ("answer",       ["answer", "response", "reply", "faq answer", "a"]),
-    ("policy_text",  ["policy", "terms", "conditions", "rules", "guidelines", "policy text"]),
+    ("policy_text",  ["policy", "policy text", "terms", "conditions", "rules", "guidelines",
+                      "policy body", "policy content"]),
+    ("visibility",   ["visibility", "access level", "audience", "public or internal", "scope"]),
 
-    # ── Offers ────────────────────────────────────────────────────────────
-    ("promo_code",   ["promo code", "coupon code", "voucher", "discount code"]),
-    ("offer_name",   ["offer name", "deal name", "promotion name"]),
-    ("valid_until",  ["valid until", "offer expiry", "valid through", "offer end date"]),
+    # ── Company Info specific ─────────────────────────────────────────────
+    ("information_type", ["information type", "info type", "field type", "data type", "record type"]),
+    ("mission",      ["mission", "mission statement", "company mission"]),
+    ("vision",       ["vision", "vision statement", "company vision"]),
+
+    # ── Educational / Support specific ───────────────────────────────────
+    ("resource_type",  ["resource type", "content type", "material type", "format",
+                         "learning format", "training type"]),
+    ("skill_level",    ["skill level", "difficulty", "level", "beginner intermediate advanced",
+                         "expertise level", "audience level"]),
+    ("topic",          ["topic", "subject", "area", "domain", "focus area"]),
 ]
 
 # ── Keyword override rules ────────────────────────────────────────────────────
@@ -88,8 +130,80 @@ CANONICAL_FIELDS: List[Tuple[str, List[str]]] = [
 # Ordered by specificity — more specific rules first.
 
 _KEYWORD_OVERRIDES: List[Tuple[str, str]] = [
-    ("product id",       "product_id"),
+    # ── ID fields — must fire first ───────────────────────────────────────
+    ("product_id",       "product_id"),
+    ("support_id",       "product_id"),
+    ("resource_id",      "product_id"),
+    ("shipping_id",      "product_id"),
+    ("offer_id",         "product_id"),
+    ("policy_id",        "product_id"),
+    ("record_id",        "product_id"),
+    ("comp_id",          "product_id"),
     ("item id",          "product_id"),
+
+    # ── Name / Title fields ───────────────────────────────────────────────
+    ("policy name",      "name"),
+    ("offer title",      "offer_name"),     # offer_title → offer_name (not name, to avoid clash with campaign_name)
+    ("offer name",       "offer_name"),
+    ("campaign name",    "name"),           # campaign_name is the primary name for offers
+    ("shipping method",  "name"),
+    ("information type", "name"),
+    ("product name",     "name"),
+    ("item name",        "name"),
+    ("resource title",   "name"),
+
+    # ── Description / Summary ─────────────────────────────────────────────
+    ("summary",          "description"),
+    ("policy summary",   "description"),
+    # company info CSV: "value" column holds the actual data (e.g. "IngenAI", "2024")
+    # We map it to "field_value" to avoid clash with the "description" column,
+    # then normalize_row merges them into a rich description.
+    ("value",            "field_value"),
+
+    # ── Delivery / Shipping specific ──────────────────────────────────────
+    ("delivery time",    "delivery_timeline"),
+    ("delivery_time",    "delivery_timeline"),
+    ("shipping cost",    "shipping_charges"),
+    ("shipping_cost",    "shipping_charges"),
+    ("return window",    "return_window"),
+    ("tracking",         "tracking_info"),
+    ("shipping notes",   "shipping_notes"),
+    ("shipping_notes",   "shipping_notes"),
+
+    # ── Offer / Discount fields ───────────────────────────────────────────
+    ("offer value",      "discount"),
+    ("offer_value",      "discount"),
+    ("offer type",       "offer_type"),
+    ("offer_type",       "offer_type"),
+    ("start date",       "created_date"),
+    ("start_date",       "created_date"),
+    ("end date",         "valid_until"),
+    ("end_date",         "valid_until"),
+
+    # ── Contact/Support specific ──────────────────────────────────────────
+    ("preferred channel","preferred_channel"),
+    ("support hours",    "working_hours"),
+    ("office hours",     "working_hours"),
+    ("working hours",    "working_hours"),
+    ("business hours",   "working_hours"),
+    ("timing",           "working_hours"),
+    # "availability" alone defaults to "status" (e.g. Active/Seasonal/Paused).
+    # Contact CSVs that mean "working hours" by availability will be caught
+    # by the normalizer's value-aware logic (detects "24/7", "Mon-Fri" patterns).
+    ("availability",     "status"),
+
+    # ── Education specific ────────────────────────────────────────────────
+    ("resource type",    "resource_type"),
+    ("skill level",      "skill_level"),
+
+    # ── Policy specific ───────────────────────────────────────────────────
+    ("visibility",       "visibility"),
+    ("effective date",   "created_date"),
+
+    # ── Company Info specific ─────────────────────────────────────────────
+    ("information_type", "information_type"),
+
+    # ── Generic high-priority mappings ────────────────────────────────────
     ("stock quantity",   "stock"),
     ("qty",              "stock"),
     ("quantity",         "stock"),
@@ -110,8 +224,6 @@ _KEYWORD_OVERRIDES: List[Tuple[str, str]] = [
     ("offer expiry",     "valid_until"),
     ("valid through",    "valid_until"),
     ("offer end",        "valid_until"),
-    ("product name",     "name"),
-    ("item name",        "name"),
     ("price",            "price"),
     ("cost",             "price"),
     ("mrp",              "price"),
@@ -130,11 +242,6 @@ _KEYWORD_OVERRIDES: List[Tuple[str, str]] = [
     ("agent name",       "contact_name"),
     ("representative",   "contact_name"),
     ("department",       "department"),
-    ("working hours",    "working_hours"),
-    ("support hours",    "working_hours"),
-    ("office hours",     "working_hours"),
-    ("availability",     "working_hours"),
-    ("timing",           "working_hours"),
 ]
 
 # Flatten to (canonical_key, phrase) pairs for embedding

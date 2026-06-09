@@ -154,12 +154,16 @@ class RetrievalOrchestrator:
                 )
 
             # ── Dedup already-shared chunks ───────────────────────────────
+            # IMPORTANT: data_analytics chunks are NEVER deduped — they contain
+            # pricing/catalog summaries that must be re-injected every turn so
+            # the LLM has authoritative data regardless of conversation history.
             dedup_removed = 0
             if already_shared_chunks and not allow_repeated:
                 original = len(chunks)
                 chunks = [
                     c for c in chunks
                     if c.get("chunk_id", c.get("id", "")) not in already_shared_chunks
+                    or str(c.get("chunk_type", "")).lower() == "data_analytics"
                 ]
                 dedup_removed = original - len(chunks)
                 if dedup_removed:
