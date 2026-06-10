@@ -68,11 +68,14 @@ export const metadata: Metadata = {
     images: [`${SITE_URL}/og-default.png`],
   },
   icons: {
-    icon: '/Proxipilot-logo.ico',
-    shortcut: '/Proxipilot-logo.ico',
-    apple: '/Proxipilot-logo.ico',
+    icon: [
+      { url: '/favicon.ico', rel: 'shortcut icon' },
+      { url: '/favicon-96x96.png', sizes: '96x96', type: 'image/png' },
+      { url: '/favicon.svg', type: 'image/svg+xml' },
+    ],
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180' }],
   },
-  manifest: '/manifest.webmanifest',
+  manifest: '/site.webmanifest',
   alternates: { canonical: SITE_URL },
 };
 
