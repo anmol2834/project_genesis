@@ -28,8 +28,8 @@ export default function PricingPage() {
     <>
       <JsonLd
         data={[
-          pricingPageSchema(),
           pricingFaqSchema(),
+          pricingPageSchema(),
           softwareApplicationSchema(),
         ]}
       />
