@@ -136,6 +136,17 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ── API routers (Task 18 / R4) ────────────────────────────────────────
+    from app.api.health   import router as health_router
+    from app.api.admin    import router as admin_router
+    from app.api.internal import router as internal_router
+    from app.api.metrics  import router as metrics_router
+
+    app.include_router(health_router,    prefix="/api/health")
+    app.include_router(admin_router,     prefix="/api/admin")
+    app.include_router(internal_router,  prefix="/api/internal")
+    app.include_router(metrics_router,   prefix="/api/metrics")
     
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):

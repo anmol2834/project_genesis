@@ -11,19 +11,56 @@ from enum import Enum
 
 
 class RetrievalSource(str, Enum):
-    """Source of retrieved chunk"""
-    L1_CONV_CACHE = "l1_conv_cache"
-    L2_EXACT_MATCH = "l2_exact_match"
-    L3_METADATA = "l3_metadata"
-    L4_BM25 = "l4_bm25"
-    L5_SEMANTIC = "l5_semantic"
-    L6_HYBRID = "l6_hybrid"
-    L7_RERANKED = "l7_reranked"
-    MEMORY_CACHE = "memory_cache"
+    """
+    Source of retrieved chunk — maps to the actual L1-L9 hierarchical pipeline layers.
+
+    Task 12 fix (R13): corrected layer numbering so enum values match the real
+    architecture defined in hierarchical_retriever.py:
+      L1 = Intent cache
+      L2 = Chunk/conversation cache
+      L3 = Exact match
+      L4 = Metadata filter
+      L5 = BM25 sparse keyword    ← was wrongly labelled L4_BM25
+      L6 = Dense semantic search  ← was wrongly labelled L5_SEMANTIC
+      L7 = RRF fusion
+      L8 = Cross-encoder rerank
+      L9 = Context validation
+
+    Backward-compat aliases keep old names pointing to the correct values so
+    existing code that references L4_BM25 / L5_SEMANTIC still works.
+    """
+    # ── Canonical names (match layer numbers in hierarchical_retriever.py) ──
+    L1_INTENT_CACHE = "l1_intent_cache"
+    L2_CHUNK_CACHE  = "l2_chunk_cache"
+    L3_EXACT_MATCH  = "l3_exact_match"
+    L4_METADATA     = "l4_metadata"
+    L5_BM25         = "l5_bm25"
+    L6_SEMANTIC     = "l6_semantic"
+    L7_RRF_FUSION   = "l7_rrf_fusion"
+    L8_RERANK       = "l8_rerank"
+    L9_VALIDATION   = "l9_validation"
+    MEMORY_CACHE    = "memory_cache"
+
+    # ── Backward-compat aliases (old names → correct values) ──
+    # Python enums allow aliases (same value, different name).
+    # Code using the old names continues to work; the canonical names are preferred.
+    #
+    # IMPORTANT: L2_EXACT_MATCH and L3_METADATA are the old names used in
+    # app/models/enums.py and earlier versions of exact_search/engine.py and
+    # metadata_search/engine.py.  Both engines have been updated to use the
+    # canonical L3_EXACT_MATCH and L4_METADATA names, but these aliases are
+    # retained for any code that still imports them from the schemas module.
+    L1_CONV_CACHE     = "l1_intent_cache"    # old name for L1 (still valid)
+    L2_EXACT_MATCH    = "l3_exact_match"     # OLD BUGGY NAME: mapped to L3_EXACT_MATCH (canonical)
+    L3_METADATA       = "l4_metadata"        # OLD BUGGY NAME: mapped to L4_METADATA (canonical)
+    L4_BM25           = "l5_bm25"            # old name was off-by-one → now alias of L5_BM25
+    L5_SEMANTIC       = "l6_semantic"        # old name was off-by-one → now alias of L6_SEMANTIC
+    L6_HYBRID         = "l6_semantic"        # old hybrid → semantic
+    L7_RERANKED       = "l8_rerank"          # old name → L8_RERANK
 
 
 class ChunkType(str, Enum):
-    """Type of knowledge chunk"""
+    """Type of knowledge chunk — values match the 'category' field in user_data_entries."""
     PROFILE = "profile"
     PRODUCT_SERVICE = "product_service"
     FAQ = "faq"
@@ -33,6 +70,15 @@ class ChunkType(str, Enum):
     LOCATION = "location"
     GENERAL = "general"
     DATA_ANALYTICS = "data_analytics"
+    # Full category names used in user_data_entries — added so retrieval engines
+    # can create RetrievedChunk objects without a ValueError on ChunkType(cat).
+    OFFERS_PROMOTIONS = "offers_promotions"
+    DELIVERY_SHIPPING = "delivery_shipping"
+    CONTACT_SUPPORT = "contact_support"
+    POLICIES_LEGAL = "policies_legal"
+    COMPANY_INFO = "company_info"
+    EDUCATIONAL_CONTENT = "educational_content"
+    ISSUE_RESOLUTION = "issue_resolution"
 
 
 @dataclass

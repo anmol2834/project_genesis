@@ -99,7 +99,7 @@ class LLMOrchestrator:
                 )
 
             # -- L10: Fact Graph Compression (validated chunks only) --
-            prompt, prompt_obs = await self._build_grounded_prompt_async(
+            prompt, prompt_obs, fact_graph = await self._build_grounded_prompt_async(
                 intelligence=intelligence,
                 retrieval_chunks=grounding_result.validated_chunks,
                 memory=memory,
@@ -142,6 +142,7 @@ class LLMOrchestrator:
                 intelligence=intelligence,
                 grounding_result=grounding_result,
                 message_content=message_content,
+                fact_graph=fact_graph,
             )
 
             # -- Confidence Calculation --
@@ -208,7 +209,7 @@ class LLMOrchestrator:
                          trace_id=trace_id, exc_info=True)
             elapsed = (time.perf_counter() - start) * 1000
             return {
-                "response_text":          "We apologize, but we're experiencing technical difficulties. A team member will assist you shortly.",
+                "response_text":          "We apologise for the inconvenience. Our systems are currently experiencing a temporary issue.\n\nHere is what we are doing:\n\n- Our technical team has been notified.\n- A team member will personally review your message and respond shortly.\n- For urgent matters, please reply to this email.\n\nThank you for your patience.",
                 "confidence":             0.05,
                 "hallucination_detected": False,
                 "grounding_score":        0.0,
@@ -253,12 +254,12 @@ class LLMOrchestrator:
 
         # -- L10: Fact Graph Compression --
         try:
-            int_dict = intelligence if isinstance(intelligence, dict) else (
-                intelligence.__dict__ if hasattr(intelligence, "__dict__") else {}
-            )
+            # Pass intelligence directly — compress_to_fact_graph handles both
+            # dataclass (Pydantic model) and dict. Using __dict__ on a Pydantic v2
+            # model does NOT produce a plain dict and corrupts nested objects.
             fact_graph = await compressor.compress_to_fact_graph(
                 retrieval_chunks=retrieval_chunks,
-                intelligence=int_dict,
+                intelligence=intelligence,
                 user_id=user_id,
                 grounding_confidence=grounding_confidence,
             )
@@ -267,8 +268,9 @@ class LLMOrchestrator:
             fact_graph = None
 
         # -- Format fact graph -> context string --
-        # Also include analytics even when no products/pricing so CATALOG OVERVIEW
-        # section reaches the prompt and Brain #2 can present catalog data.
+        # CRITICAL: The context must be formatted so the LLM treats it as authoritative
+        # ground truth. The VERIFIED CONTEXT section must contain explicit product names
+        # and prices exactly as stored — no numbered generic placeholders.
         if fact_graph and (
             fact_graph.get("products") or fact_graph.get("pricing")
             or fact_graph.get("support") or fact_graph.get("features")
@@ -276,11 +278,63 @@ class LLMOrchestrator:
         ):
             fact_graph_context = compressor.format_for_llm(fact_graph)
         elif retrieval_chunks:
-            fact_graph_context = "\n\n".join(
-                f"[{i}] {c.get('content', '')[:400]}"
-                for i, c in enumerate(retrieval_chunks[:3], 1)
-                if c.get("content")
-            ) or "No specific context available."
+            # IMPORTANT: Do NOT inject numbered [1] [2] [3] items here — the LLM
+            # interprets these as "Product 1", "Product 2", "Product 3" and hallucinates
+            # generic placeholder names.  Instead, try to build a minimal named product
+            # list directly from the chunk payloads before giving up.
+            named_lines = []
+            for c in retrieval_chunks[:8]:
+                meta = c.get("metadata", {})
+                if not isinstance(meta, dict):
+                    meta = {}
+                # Extract name from any available field
+                item_name = (
+                    meta.get("name", "")
+                    or meta.get("title", "")
+                    or (meta.get("attributes") or {}).get("name", "")
+                    or (meta.get("structured_data") or {}).get("product_name", "")
+                    or (meta.get("structured_data") or {}).get("offer_title", "")
+                    or (meta.get("structured_data") or {}).get("name", "")
+                ).strip()
+                if not item_name:
+                    # last resort: first Title Case sequence from content
+                    import re as _re_fb
+                    m = _re_fb.search(
+                        r"\b([A-Z][a-zA-Z0-9]*(?:\s+[A-Z][a-zA-Z0-9]*){1,4})\b",
+                        c.get("content", ""),
+                    )
+                    if m:
+                        item_name = m.group(1)
+                if not item_name:
+                    continue
+                # Extract price
+                attrs   = meta.get("attributes") or {}
+                sd      = meta.get("structured_data") or {}
+                price   = attrs.get("price") or sd.get("price") or ""
+                content = c.get("content", "")
+                # currency from content
+                import re as _re_c
+                if "\u20b9" in content or "INR" in content.upper():
+                    sym = "\u20b9"
+                elif "\u20ac" in content:
+                    sym = "\u20ac"
+                elif "\u00a3" in content:
+                    sym = "\u00a3"
+                else:
+                    sym = "$"
+                try:
+                    numeric = _re_c.sub(r"[^\d.]", "", str(price).replace(",", ""))
+                    price_str = f"{sym}{int(float(numeric))}" if numeric else ""
+                except Exception:
+                    price_str = ""
+                line = f"- {item_name}"
+                if price_str:
+                    line += f"  (Price: {price_str})"
+                named_lines.append(line)
+            if named_lines:
+                fact_graph_context = "AVAILABLE ITEMS:\n" + "\n".join(named_lines)
+            else:
+                fact_graph_context = "No specific verified information available for this query."
         else:
             fact_graph_context = "No specific verified information available for this query."
 
@@ -320,7 +374,7 @@ class LLMOrchestrator:
             "multilingual":        build_result.has_multilingual,
         }
 
-        return final_prompt, prompt_obs
+        return final_prompt, prompt_obs, fact_graph
 
     async def _call_openai_generation(
         self,
@@ -353,59 +407,442 @@ class LLMOrchestrator:
         intelligence: Any,
         grounding_result: Any,
         message_content: str,
+        fact_graph: Optional[Dict] = None,
     ) -> str:
         """
-        Validate that when a customer asks about products/services and catalog
-        data was retrieved, the response actually contains catalog content.
+        Post-generation validation gate.
 
-        If it contains only generic questions/suggestions, log a warning so the
-        issue can be monitored and the prompt tuned. Response is returned as-is
-        since we cannot re-generate inline without adding latency.
+        Catches three classes of LLM failure:
+          1. Spec hallucination — LLM assigns wrong specs to real product names
+             (e.g. "IngenAI Gamer 15: 8GB RAM" when Gamer 15 has 16GB RAM)
+          2. Generic placeholders — "Product 1", "Service A", etc.
+          3. Placeholder brackets — [Product Name A], [Price], etc.
+
+        When any violation is detected AND the fact_graph has real products,
+        the response is rebuilt deterministically from the fact_graph — NOT
+        from the LLM output. This guarantees accuracy.
+
+        For all other catalog responses, a lightweight catalog-content check
+        ensures the response contains actual product/service information.
         """
+        import re as _re_llm
+
+        # ─── Build fact-graph product registry for spec validation ────────────────
+        # Maps product_name_lower → {price, currency, specs, category}
+        # Used to detect when the LLM assigns wrong specs to a real product name.
+        _fg_products: Dict[str, Dict] = {}
+        if fact_graph and fact_graph.get("products"):
+            for p in fact_graph["products"]:
+                n = (p.get("name") or "").strip()
+                if n:
+                    _fg_products[n.lower()] = p
+
+        # Helper: build a full product listing from fact_graph (authoritative)
+        def _build_from_fact_graph(fg: Optional[Dict], header: str = "") -> str:
+            """Build a deterministic, accurate response from the fact graph.
+
+            Priority order:
+            1. support section (contact info, support articles, issue resolution)
+            2. products section (product/service catalog)
+            3. analytics section (catalog overview — NEVER renders raw internal titles)
+            4. policies section
+            5. features section
+            """
+            if not fg:
+                return ""
+
+            sections: List[str] = []
+            sym_map = {"INR": "\u20b9", "EUR": "\u20ac", "GBP": "\u00a3", "USD": "$"}
+
+            # Support section — contact details, issue resolution, FAQs
+            if fg.get("support"):
+                sup_lines: List[str] = []
+                for s in fg["support"]:
+                    topic = s.get("topic") or s.get("department") or ""
+                    solution = s.get("solution") or ""
+                    email = s.get("contact_email") or ""
+                    phone = s.get("contact_phone") or ""
+                    avail = s.get("availability") or ""
+                    if topic:
+                        line = f"- **{topic}**"
+                        if solution and solution != topic:
+                            line += f"\n   {solution[:200]}"
+                        if email:
+                            line += f"\n   Email: {email}"
+                        if phone:
+                            line += f"\n   Phone: {phone}"
+                        if avail:
+                            line += f"\n   Hours: {avail}"
+                        sup_lines.append(line)
+                    elif email or phone:
+                        line = "- Contact"
+                        if email:
+                            line += f"\n   Email: {email}"
+                        if phone:
+                            line += f"\n   Phone: {phone}"
+                        sup_lines.append(line)
+                    elif solution:
+                        sup_lines.append(f"- {solution[:200]}")
+                if sup_lines:
+                    hdr = header or "Here is the contact information:"
+                    sections.append(hdr + "\n\n" + "\n\n".join(sup_lines))
+
+            # Products section
+            if fg.get("products"):
+                prod_lines: List[str] = []
+                for p in fg["products"]:
+                    name = p.get("name", "Unknown")
+                    line = f"- **{name}**"
+                    price = p.get("price")
+                    if price and not p.get("price_conflict"):
+                        currency_val = p.get("currency") or "USD"
+                        sym = sym_map.get(currency_val.upper() if currency_val else "USD", "\u20b9")
+                        line += f"\n   - Price: {sym}{price}"
+                    cat = p.get("category")
+                    if cat:
+                        line += f"\n   - Category: {cat}"
+                    specs = p.get("specifications") or {}
+                    spec_parts = [f"{k.title()}: {v}" for k, v in list(specs.items())[:4] if v]
+                    if spec_parts:
+                        line += "\n   - Specs: " + ", ".join(spec_parts)
+                    feats = p.get("features") or []
+                    if feats:
+                        line += "\n   - Features: " + ", ".join(str(f) for f in feats[:3])
+                    prod_lines.append(line)
+                if prod_lines:
+                    hdr = header if header and not sections else (
+                        "Here are the available options in our catalog:" if not sections else ""
+                    )
+                    block = ("\n\n" if sections else "") + (hdr + "\n\n" if hdr else "") + "\n\n".join(prod_lines)
+                    sections.append(block.strip())
+
+            # Analytics section — ONLY use intelligence_summary, price_range, all_item_names
+            # NEVER use the analytics chunk title (which is an internal filename like
+            # "Analytics: ingenai_delivery_shipping_mock_data") as a display name.
+            if fg.get("analytics") and not sections:
+                ana_parts: List[str] = []
+                for a in fg["analytics"]:
+                    summary = a.get("intelligence_summary") or a.get("summary") or ""
+                    # Strip internal filename prefixes from summaries
+                    import re as _re_ana
+                    summary = _re_ana.sub(
+                        r"^Analytics:\s+\S+\s*\|?\s*", "", summary, flags=_re_ana.IGNORECASE
+                    ).strip()
+                    if summary and len(summary) > 20:
+                        ana_parts.append(summary)
+                    price_range = a.get("price_range")
+                    if price_range:
+                        ana_parts.append(f"Price range: {price_range}")
+                    all_names = a.get("all_item_names") or []
+                    if all_names:
+                        ana_parts.append("Items: " + ", ".join(str(n) for n in all_names[:10]))
+                if ana_parts:
+                    hdr = header or "Here is what we have available:"
+                    sections.append(hdr + "\n\n" + "\n\n".join(f"- {p}" for p in ana_parts))
+
+            # Policies section
+            if fg.get("policies") and not sections:
+                pol_lines = []
+                for pol in fg["policies"][:3]:
+                    pt = pol.get("policy_type", "Policy").replace("_", " ").title()
+                    sm = pol.get("summary", "")[:200]
+                    pol_lines.append(f"- **{pt}**: {sm}")
+                if pol_lines:
+                    hdr = header or "Here is the relevant policy information:"
+                    sections.append(hdr + "\n\n" + "\n".join(pol_lines))
+
+            return "\n\n".join(s for s in sections if s.strip())
+
+        # Helper: build from raw chunks (fallback when fact_graph unavailable)
+        def _build_from_chunks(chunks: List[Dict]) -> str:
+            product_lines: List[str] = []
+            seen: set = set()
+            _re_g = _re_llm
+            for c in chunks[:8]:
+                meta = c.get("metadata", {}) if isinstance(c, dict) else {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                attrs = meta.get("attributes") or {}
+                sd    = meta.get("structured_data") or {}
+                item_name = (
+                    meta.get("name", "") or meta.get("title", "")
+                    or attrs.get("name", "") or sd.get("product_name", "")
+                    or sd.get("offer_title", "") or sd.get("service_name", "")
+                    or sd.get("item_name", "")
+                ).strip()
+                if not item_name:
+                    m = _re_g.search(
+                        r"\b([A-Z][a-zA-Z0-9]*(?:\s+[A-Z][a-zA-Z0-9]*){1,4})\b",
+                        c.get("content", ""),
+                    )
+                    if m:
+                        item_name = m.group(1)
+                if not item_name or item_name.lower() in seen:
+                    continue
+                seen.add(item_name.lower())
+                raw_price = attrs.get("price") or sd.get("price") or ""
+                content_text = c.get("content", "") if isinstance(c, dict) else ""
+                if "\u20b9" in content_text or "INR" in content_text.upper():
+                    sym = "\u20b9"
+                elif "\u20ac" in content_text:
+                    sym = "\u20ac"
+                elif "\u00a3" in content_text:
+                    sym = "\u00a3"
+                else:
+                    sym = "$"
+                try:
+                    numeric = _re_g.sub(r"[^\d.]", "", str(raw_price).replace(",", ""))
+                    price_str = f"{sym}{int(float(numeric))}" if numeric else ""
+                except Exception:
+                    price_str = ""
+                line = f"- **{item_name}**"
+                if price_str:
+                    line += f"\n   - Price: {price_str}"
+                spec_parts = []
+                for sk in ("ram", "storage", "processor", "gpu", "display"):
+                    v = sd.get(sk) or attrs.get(sk)
+                    if v:
+                        spec_parts.append(f"{sk.title()}: {v}")
+                if spec_parts:
+                    line += "\n   - Specs: " + ", ".join(spec_parts[:3])
+                product_lines.append(line)
+            return "\n".join(product_lines)
+
+        # ─── Gather available chunks ──────────────────────────────────────────────
+        chunks = retrieval.get("chunks", [])
+        product_chunks = [
+            c for c in chunks
+            if str(c.get("chunk_type", "")).lower() in (
+                "product_service", "data_analytics", "offers_promotions"
+            )
+        ]
+        has_real_products = bool(product_chunks) or bool(_fg_products)
+
+        # ─── 1. Spec hallucination detection ─────────────────────────────────────
+        # The LLM assigns specs from the CUSTOMER'S REQUEST to real product names.
+        # E.g. customer asks "8GB RAM" → LLM writes "IngenAI Gamer 15: 8GB RAM"
+        # but Gamer 15 actually has 16GB RAM. This is the most dangerous failure.
+        #
+        # Detection: for each product name that appears in the response AND in the
+        # fact_graph, check if the response mentions a spec value that contradicts
+        # the fact_graph spec for that product.
+        if _fg_products and has_real_products:
+            _spec_val_pat = _re_llm.compile(
+                r"\b(\d+)\s*(gb|tb|mb|ghz|mhz)\b",
+                _re_llm.IGNORECASE,
+            )
+            spec_hallucination_found = False
+            response_lower = response_text.lower()
+
+            for prod_name_lower, prod_data in _fg_products.items():
+                # Only check if this product name appears in the response
+                if prod_name_lower not in response_lower:
+                    continue
+                fg_specs = prod_data.get("specifications") or {}
+
+                # Find spec claims in the response text near this product name
+                # Look for the product's occurrence and extract the paragraph/line around it
+                idx = response_lower.find(prod_name_lower)
+                while idx != -1:
+                    # Extract a ~200-char window around the product mention
+                    window = response_text[max(0, idx - 20):min(len(response_text), idx + 200)].lower()
+                    # Find all spec values in this window
+                    for m in _spec_val_pat.finditer(window):
+                        resp_num  = m.group(1)    # e.g. "8"
+                        resp_unit = m.group(2).lower()  # e.g. "gb"
+                        # Check if this contradicts a known spec for this product
+                        # Map unit to spec key
+                        unit_to_key = {"gb": ["ram", "storage"], "tb": ["storage"]}
+                        keys_to_check = unit_to_key.get(resp_unit, [])
+                        for spec_key in keys_to_check:
+                            fg_val = str(fg_specs.get(spec_key) or "").lower()
+                            if not fg_val:
+                                continue
+                            # Extract the number from the fact_graph spec value
+                            fg_num_m = _re_llm.search(r"\b(\d+)\b", fg_val)
+                            if fg_num_m and fg_num_m.group(1) != resp_num:
+                                # Mismatch! LLM said {resp_num}GB but fact_graph says {fg_val}
+                                logger.warning(
+                                    "spec_hallucination_detected | product=%s "
+                                    "response_claims=%s%s fact_graph_says=%s | "
+                                    "rebuilding from fact_graph",
+                                    prod_name_lower, resp_num, resp_unit, fg_val,
+                                )
+                                spec_hallucination_found = True
+                                break
+                        if spec_hallucination_found:
+                            break
+                    if spec_hallucination_found:
+                        break
+                    idx = response_lower.find(prod_name_lower, idx + 1)
+                if spec_hallucination_found:
+                    break
+
+            if spec_hallucination_found:
+                # Rebuild entirely from fact_graph — the LLM's product listing is wrong
+                rebuilt = _build_from_fact_graph(
+                    fact_graph,
+                    "Here are the available options in our catalog:"
+                )
+                if rebuilt:
+                    response_text = (
+                        rebuilt
+                        + "\n\nFeel free to reply if you have any questions or would like more details!"
+                    )
+                    logger.info("spec_hallucination_corrected | rebuilt from fact_graph")
+
+        # ─── 2. Spec refusal detection ────────────────────────────────────────────
+        _SPEC_REFUSAL_PAT = _re_llm.compile(
+            r"(?:while\s+(?:i|we)\s+don[''`]?t\s+have\s+(?:products?|any(?:thing)?|items?)"
+            r"|don[''`]?t\s+have\s+(?:any\s+)?(?:specific\s+)?(?:products?|items?|laptops?)"
+            r"|none\s+of\s+(?:our|the)\s+(?:products?|items?|laptops?)"
+            r"|no\s+(?:products?|items?|laptops?)\s+(?:that\s+)?(?:specifically\s+)?(?:match|meet)"
+            r"|unfortunately[,\s]+(?:i|we)\s+don[''`]?t\s+have)"
+            r".*?(?:specifications?|specs?|exact|specifically|those)",
+            _re_llm.IGNORECASE | _re_llm.DOTALL,
+        )
+
+        if has_real_products and _SPEC_REFUSAL_PAT.search(response_text):
+            logger.warning(
+                "spec_refusal_detected | rebuilding from fact_graph | msg='%s'",
+                message_content[:80],
+            )
+            # Always rebuild from fact_graph when spec refusal detected.
+            # The lossy "strip opener + keep tail" approach is NEVER used because
+            # the tail may list wrong products or hallucinated specs.
+            rebuilt = _build_from_fact_graph(
+                fact_graph,
+                "Here are the available options in our catalog:"
+            )
+            if rebuilt:
+                response_text = (
+                    rebuilt
+                    + "\n\nFeel free to reply if you have any questions or would like more details!"
+                )
+            else:
+                # fact_graph empty — use raw chunks
+                chunk_list = _build_from_chunks(product_chunks)
+                if chunk_list:
+                    response_text = (
+                        "Here are the available options in our catalog:\n\n"
+                        + chunk_list
+                        + "\n\nFeel free to reply if you'd like more details on any of these!"
+                    )
+
+        # ─── 3. No-pricing detection ──────────────────────────────────────────────
+        # The LLM says "I don't have pricing details" despite prices being in context.
+        # This happens when grounding_confidence < 0.60 and the risk prompt fires
+        # _RISK_PROMPT_NO_PRICING_DATA which blocks all price quoting.
+        # Fix: if fact_graph has products WITH prices and the response says no pricing,
+        # rebuild from fact_graph which always includes verified prices.
+        _NO_PRICING_PAT = _re_llm.compile(
+            r"(?:don[''`]?t\s+have\s+(?:specific\s+)?pricing\s+details?"
+            r"|no\s+(?:specific\s+)?pricing\s+(?:details?|information)"
+            r"|pricing\s+(?:details?|information)\s+(?:is\s+)?not\s+available"
+            r"|unable\s+to\s+(?:provide|confirm)\s+(?:specific\s+)?pricing"
+            r"|cannot\s+(?:provide|confirm)\s+(?:specific\s+)?pricing)",
+            _re_llm.IGNORECASE,
+        )
+        if _NO_PRICING_PAT.search(response_text) and _fg_products:
+            # Check if any fact_graph product actually has a price
+            has_fg_prices = any(p.get("price") for p in _fg_products.values())
+            if has_fg_prices:
+                logger.warning(
+                    "no_pricing_claim_detected | fact_graph has prices | rebuilding | "
+                    "msg='%s'", message_content[:80],
+                )
+                rebuilt = _build_from_fact_graph(
+                    fact_graph,
+                    "Here are the available options in our catalog:"
+                )
+                if rebuilt:
+                    response_text = (
+                        rebuilt
+                        + "\n\nFeel free to reply if you have any questions or would like more details!"
+                    )
+
+        # ─── 4. Generic product name detection ───────────────────────────────────
+        _GENERIC_PRODUCT_PAT = _re_llm.compile(
+            r"\*{0,2}(?:Product|Service|Option|Item|Model|Solution|Package|Plan|Tier)\s+"
+            r"(?:\d+|[A-Z])\*{0,2}",
+            _re_llm.IGNORECASE,
+        )
+        if _GENERIC_PRODUCT_PAT.search(response_text) and has_real_products:
+            logger.warning(
+                "generic_product_names_detected | rebuilding from fact_graph | msg='%s'",
+                message_content[:80],
+            )
+            rebuilt = _build_from_fact_graph(
+                fact_graph,
+                "Here are the available options in our catalog:"
+            )
+            if rebuilt:
+                response_text = (
+                    rebuilt
+                    + "\n\nFeel free to reply if you have any questions or would like more details on any of these!"
+                )
+            else:
+                chunk_list = _build_from_chunks(product_chunks)
+                if chunk_list:
+                    response_text = (
+                        "Here are the available options in our catalog:\n\n"
+                        + chunk_list
+                        + "\n\nFeel free to reply if you have any questions or would like more details on any of these!"
+                    )
+
+        # ─── 5. Placeholder bracket detection ────────────────────────────────────
+        _PLACEHOLDER_PAT = _re_llm.compile(
+            r'\[(?:Product Name|GPU Details|Price|Contact|TBD|Name|Details|Info|'
+            r'Category|Description|Feature|Spec|Model|Brand|SKU|ID|Email|Phone|'
+            r'Address|Date|Time|Amount|Quantity)[^\]]*\]',
+            _re_llm.IGNORECASE,
+        )
+        if _PLACEHOLDER_PAT.search(response_text):
+            logger.warning("placeholder_text_detected | msg='%s'", message_content[:80])
+            rebuilt = _build_from_fact_graph(fact_graph)
+            if rebuilt:
+                response_text = (
+                    "Here are the available options in our catalog:\n\n"
+                    + rebuilt
+                    + "\n\nFeel free to reply if you'd like more details!"
+                )
+            elif product_chunks:
+                response_text = (
+                    "Thank you for your inquiry. We have options available that may meet your "
+                    "requirements. Please reply and a team member will provide precise details!"
+                )
+
+        # ─── 6. Catalog content sanity check ─────────────────────────────────────
         _CATALOG_REQUEST_SIGNALS = {
             "product", "products", "service", "services", "catalog", "offer",
-            "offerings", "solution", "solutions", "wanna about", "want to know",
-            "what do you", "what you have", "what you offer",
+            "offers", "deal", "deals", "discount", "discounts", "promotion",
+            "promotions", "promo", "offerings", "solution", "solutions",
+            "wanna about", "want to know", "what do you", "what you have",
+            "what you offer",
         }
         msg_lower = message_content.lower()
         is_catalog_request = any(s in msg_lower for s in _CATALOG_REQUEST_SIGNALS)
 
-        if not is_catalog_request:
-            return response_text
-
-        chunks = retrieval.get("chunks", [])
-        has_catalog_chunks = any(
-            str(c.get("chunk_type", "")).lower() in ("product_service", "data_analytics")
-            for c in chunks
-        )
-
-        if not has_catalog_chunks:
-            return response_text
-
-        response_lower = response_text.lower()
-        _GENERIC_ONLY_SIGNALS = [
-            "what discounts", "can you tell me", "how does", "would you like to know",
-            "what would you like", "what are you looking for", "could you clarify",
-            "please let me know what", "feel free to ask about",
-        ]
-        _CATALOG_CONTENT_SIGNALS = [
-            "price", "inr", "rs.", "rs ", "\u20b9", "$",
-            "model", "laptop", "gaming", "pro", "available",
-            "category", "categories", "range", "offer", "product",
-            "total", "we offer", "we have", "our products",
-        ]
-
-        has_catalog_content = any(s in response_lower for s in _CATALOG_CONTENT_SIGNALS)
-        generic_count = sum(1 for s in _GENERIC_ONLY_SIGNALS if s in response_lower)
-        is_only_generic = not has_catalog_content and generic_count >= 2
-
-        if is_only_generic:
-            logger.warning(
-                "catalog_response_validation_failed | response contains only generic "
-                "suggestions despite catalog data being retrieved | "
-                "chunks=%d message='%s'",
-                len(chunks), message_content[:80],
-            )
+        if is_catalog_request and has_real_products:
+            response_lower = response_text.lower()
+            _GENERIC_ONLY_SIGNALS = [
+                "what discounts", "can you tell me", "how does", "would you like to know",
+                "what would you like", "what are you looking for", "could you clarify",
+                "please let me know what", "feel free to ask about",
+            ]
+            _CATALOG_CONTENT_SIGNALS = [
+                "price", "inr", "rs.", "rs ", "\u20b9", "$",
+                "model", "laptop", "gaming", "pro", "available",
+                "category", "categories", "range", "offer", "product",
+                "total", "we offer", "we have", "our products",
+            ]
+            has_catalog_content = any(s in response_lower for s in _CATALOG_CONTENT_SIGNALS)
+            generic_count = sum(1 for s in _GENERIC_ONLY_SIGNALS if s in response_lower)
+            if not has_catalog_content and generic_count >= 2:
+                logger.warning(
+                    "catalog_response_validation_failed | only generic content | "
+                    "chunks=%d message='%s'", len(chunks), message_content[:80],
+                )
 
         return response_text
 
@@ -442,8 +879,53 @@ class LLMOrchestrator:
         response_lower = response_text.lower()
         violations: List[str] = []
 
-        if "$" in response_text and "$" not in all_context:
-            violations.append("invented_pricing")
+        # Check for invented pricing in ANY currency not present in context.
+        # CRITICAL FIX: structured_data payloads may contain "$699" strings even
+        # when the business operates in INR (₹). We must check the CANONICAL currency
+        # symbol that was actually used in the response against what appears in the
+        # content text (search_text / title fields), NOT the raw payload string.
+        # Strategy: if the context contains ₹/INR signals, treat as INR business
+        # and never flag ₹ prices as invented. Only flag if the response invents
+        # a price in a currency that has NO numeric value in the context at all.
+        _CURRENCY_PATTERNS = [
+            ("\u20b9", r"\u20b9\s*\d"),   # INR ₹
+            ("\u20ac", r"\u20ac\s*\d"),   # EUR €
+            ("\u00a3", r"\u00a3\s*\d"),   # GBP £
+            ("$",      r"\$\s*\d"),        # USD $ — check LAST
+        ]
+        import re as _re
+
+        # Determine if context is an INR/non-USD business by checking content fields.
+        # We specifically check only the search_text/content/title portions of context,
+        # NOT raw payload JSON strings (which may have "$" from CSV structured_data).
+        # A chunk with "₹699" in its search_text is INR regardless of structured_data.
+        context_is_inr = "\u20b9" in all_context or "inr" in all_context.lower()
+        context_is_eur = "\u20ac" in all_context or "eur" in all_context.lower()
+        context_is_gbp = "\u00a3" in all_context or "gbp" in all_context.lower()
+
+        for sym, pat in _CURRENCY_PATTERNS:
+            if not _re.search(pat, response_text):
+                continue  # response doesn't use this currency symbol at all
+            # Response uses this symbol — check if it's plausible given the context
+            if sym == "\u20b9" and context_is_inr:
+                continue  # INR in response, INR in context — correct
+            if sym == "\u20ac" and context_is_eur:
+                continue
+            if sym == "\u00a3" and context_is_gbp:
+                continue
+            if sym == "$":
+                # $ in response is only a violation if context has ZERO numeric price
+                # data AND context is clearly a non-USD business (has ₹/INR signals).
+                # If context_is_inr, the business uses ₹ — $ in response is a
+                # formatting error from fact_graph, not actual hallucination.
+                # Only flag if context has truly no price data at all.
+                if context_is_inr or context_is_eur or context_is_gbp:
+                    continue  # non-USD business — $ in response is a formatting issue, not hallucination
+                if sym not in all_context:
+                    violations.append(f"invented_pricing_{sym}")
+            else:
+                if sym not in all_context:
+                    violations.append(f"invented_pricing_{sym}")
 
         hallucination_keywords = ["our price is", "costs $", "we charge", "launching on", "released in"]
         if all_context and any(kw in response_lower for kw in hallucination_keywords):

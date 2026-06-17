@@ -129,9 +129,14 @@ class HandoffOrchestrator:
                 esc_reason = "low_confidence"
                 esc_priority = "medium" if priority <= Priority.P1_HIGH else "low"
             else:
+                # ENTERPRISE FIX: draft is an INTERNAL routing state — the customer
+                # MUST still receive a response. should_send=True always delivers
+                # the AI response while flagging internally for human review.
+                # This matches the escalate branch behavior: the response is sent
+                # to the customer AND the human team is notified separately.
                 action = "draft"
-                should_send = False
-                esc_reason = "medium_confidence"
+                should_send = True
+                esc_reason = "medium_confidence_review"
                 esc_priority = "low"
 
             decision = {

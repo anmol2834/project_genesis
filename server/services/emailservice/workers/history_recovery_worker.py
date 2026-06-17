@@ -264,7 +264,8 @@ class HistoryRecoveryWorker:
                     params=params,
                 )
             except Exception as e:
-                logger.error("History API error for %s: %s", email, e)
+                logger.error("History API error for %s: %s: %s",
+                             email, type(e).__name__, e or "(no message)")
                 break
 
             if resp.status_code == 429:
@@ -273,7 +274,15 @@ class HistoryRecoveryWorker:
                 backoff = min(backoff * 2, 120)
                 continue
             if resp.status_code == 404:
-                logger.warning("historyId expired for %s — gap too large, skipping", email)
+                logger.warning("historyId expired for %s — gap too large, resetting cursor to current", email)
+                # Advance cursor to the latest known historyId from the account
+                # so future runs start from a valid point instead of looping on 404
+                try:
+                    from token_cache import advance_history_cursor as _advance
+                    await _advance(acct.get("id", snap.get("id", "")), start_id, email)
+                    logger.info("HistoryRecovery: cursor reset for %s to %s", email, start_id)
+                except Exception as _ce:
+                    logger.warning("HistoryRecovery: cursor reset failed for %s: %s", email, _ce)
                 break
             if resp.status_code != 200:
                 logger.warning("History API %d for %s", resp.status_code, email)

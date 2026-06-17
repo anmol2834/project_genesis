@@ -80,14 +80,15 @@ class RetrievalSource(str, Enum):
 
 class ChunkType(str, Enum):
     """Type of knowledge chunk"""
-    PROFILE = "profile"
+    PROFILE         = "profile"
     PRODUCT_SERVICE = "product_service"
-    FAQ = "faq"
-    POLICY = "policy"
-    SUPPORT = "support"
-    TEAM = "team"
-    LOCATION = "location"
-    GENERAL = "general"
+    FAQ             = "faq"
+    POLICY          = "policy"
+    SUPPORT         = "support"
+    TEAM            = "team"
+    LOCATION        = "location"
+    GENERAL         = "general"
+    DATA_ANALYTICS  = "data_analytics"   # Task 10 (R25): analytics chunks used by retrieval pipeline
 
 
 # ══════════════════════════════════════════════════════════════════════════════

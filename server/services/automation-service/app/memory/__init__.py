@@ -60,10 +60,16 @@ Architecture:
 See IMPLEMENTATION.md for complete architecture documentation.
 """
 
-# Main API
-from app.memory.hot.orchestrator import (
+# ── Main API ─────────────────────────────────────────────────────────────────
+# Task 3 fix: was pointing to app.memory.hot.orchestrator (broken stub that
+# calls a non-existent `memory_engine` module via sys.path hacks).
+# Now correctly points to the production 8-tier Redis orchestrator at
+# app.memory.orchestrator which is what execution_engine.py already imports
+# directly.  Any code doing `from app.memory import get_memory_orchestrator`
+# now gets the same production instance as the execution engine.
+from app.memory.orchestrator import (
     MemoryOrchestrator,
-    get_memory_orchestrator
+    get_memory_orchestrator,
 )
 
 # Schemas (for type hints)

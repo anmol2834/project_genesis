@@ -72,19 +72,33 @@ class IntentRetrievalPlan:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _INTENT_CHUNK_HINTS: Dict[str, List[str]] = {
-    "pricing_inquiry":            ["product_service", "faq", "policy"],
-    "product_inquiry":            ["product_service", "faq"],
-    "support_request":            ["support", "faq", "policy"],
-    "technical_support_request":  ["support", "faq"],
-    "technical_assistance":       ["support", "faq"],
-    "technical_question":         ["support", "faq"],
-    "complaint":                  ["support", "policy"],
-    "refund_request":             ["policy", "support"],
-    "billing_inquiry":            ["policy", "product_service"],
-    "customization_request":      ["product_service", "faq"],
-    "bulk_purchase":              ["product_service", "policy"],
-    "onboarding":                 ["faq", "support"],
-    "general_inquiry":            ["faq", "product_service"],
+    # The 8 real Qdrant categories:
+    #   product_service, offers_promotions, delivery_shipping, company_info,
+    #   educational_content, contact_support, policies_legal, issue_resolution
+    #
+    # pricing_inquiry: prices live in product_service (inline product prices),
+    # offers_promotions (discounted/promo prices), AND delivery_shipping (shipping costs).
+    # All three are included so the query planner searches all price-bearing categories.
+    "pricing_inquiry":            ["product_service", "offers_promotions", "delivery_shipping"],
+    "product_inquiry":            ["product_service"],
+    "offers_inquiry":             ["offers_promotions"],
+    "shipping_inquiry":           ["delivery_shipping"],
+    "company_inquiry":            ["company_info"],
+    "educational_inquiry":        ["educational_content"],
+    "support_request":            ["contact_support", "policies_legal"],
+    "technical_support_request":  ["issue_resolution", "contact_support"],
+    "technical_assistance":       ["issue_resolution", "contact_support"],
+    "technical_question":         ["issue_resolution", "contact_support"],
+    "complaint":                  ["contact_support", "policies_legal"],
+    "refund_request":             ["policies_legal", "contact_support"],
+    "billing_inquiry":            ["policies_legal", "product_service"],
+    "customization_request":      ["product_service"],
+    "bulk_purchase":              ["product_service", "policies_legal"],
+    "onboarding":                 ["educational_content", "contact_support"],
+    "general_inquiry":            ["product_service"],
+    # issue_resolution: dedicated category for known error/fix records
+    "issue_inquiry":              ["issue_resolution", "contact_support"],
+    "issue_resolution":           ["issue_resolution", "contact_support"],
 }
 
 
@@ -141,7 +155,16 @@ class QueryDecomposer:
 
         entities_obj = int_dict.get("entities", {})
         ed = _to_dict(entities_obj) if not isinstance(entities_obj, dict) else entities_obj
-        all_entities = (ed.get("products") or []) + (ed.get("features") or [])
+        # Include technical_terms (hardware specs: "8GB RAM", "512GB SSD", etc.)
+        # in all_entities so spec queries get unique cache fingerprints and correct
+        # retrieval context. Without this, product_inquiry + ["8GB RAM"] generates
+        # the same cache key as product_inquiry + [] (generic query), returning stale
+        # high-RAM product chunks instead of the spec-matching ones.
+        all_entities = (
+            (ed.get("products") or [])
+            + (ed.get("features") or [])
+            + (ed.get("technical_terms") or [])
+        )
 
         units: List[AtomicSearchUnit] = []
         used_intent_types: set = set()
@@ -331,6 +354,27 @@ def _queries_for_intent(
         queries += (search_plan.get("pricing_queries") or [])[:3]
         queries += (search_plan.get("exact_search_queries") or [])[:2]
 
+    elif "offers" in intent_type:
+        # Offers/promotions: semantic queries are most reliable
+        queries += (search_plan.get("semantic_queries") or [])[:3]
+        queries += (search_plan.get("exact_search_queries") or [])[:2]
+        if not queries:
+            queries = ["offers promotions discounts", "available offers", "current deals"]
+
+    elif "shipping" in intent_type or "delivery" in intent_type:
+        queries += (search_plan.get("semantic_queries") or [])[:3]
+        if not queries:
+            queries = ["shipping delivery options", "delivery timeline", "shipping charges"]
+
+    elif "company" in intent_type:
+        queries += (search_plan.get("semantic_queries") or [])[:3]
+        if not queries:
+            queries = ["about company", "company information", "who we are"]
+
+    elif "educational" in intent_type:
+        queries += (search_plan.get("semantic_queries") or [])[:3]
+        queries += (search_plan.get("support_queries") or [])[:2]
+
     elif "support" in intent_type or "technical" in intent_type or "complaint" in intent_type:
         queries += (search_plan.get("support_queries") or [])[:3]
         queries += (search_plan.get("semantic_queries") or [])[:2]
@@ -362,27 +406,42 @@ def _queries_for_intent(
 
 
 def _metadata_filters_for_intent(intent_type: str) -> Dict[str, Any]:
-    """Build Qdrant metadata pre-filters for an intent."""
-    if "support" in intent_type or "technical" in intent_type:
-        return {"chunk_type": "support"}
-    if "refund" in intent_type or "policy" in intent_type:
-        return {"chunk_type": "policy"}
+    """Build Qdrant metadata pre-filters for an intent.
+    Values must match the exact 'category' strings in user_data_entries."""
+    if "support" in intent_type or "technical" in intent_type or "complaint" in intent_type:
+        return {"chunk_type": "contact_support"}
+    if "refund" in intent_type or "policy" in intent_type or "legal" in intent_type:
+        return {"chunk_type": "policies_legal"}
+    if "offers" in intent_type or "promotion" in intent_type or "discount" in intent_type:
+        return {"chunk_type": "offers_promotions"}
+    if "shipping" in intent_type or "delivery" in intent_type:
+        return {"chunk_type": "delivery_shipping"}
+    if "company" in intent_type:
+        return {"chunk_type": "company_info"}
+    if "educational" in intent_type:
+        return {"chunk_type": "educational_content"}
+    if "issue" in intent_type or "resolution" in intent_type:
+        return {"chunk_type": "issue_resolution"}
     if "pricing" in intent_type or "billing" in intent_type:
-        return {}  # pricing info spans product_service and faq
+        return {}  # pricing info spans product_service
     return {}
 
 
 def _intent_to_query_fragment(intent_type: str) -> str:
     _MAP = {
-        "pricing_inquiry":   "price cost",
-        "product_inquiry":   "details features",
-        "support_request":   "support help",
+        "pricing_inquiry":           "price cost",
+        "product_inquiry":           "details features",
+        "offers_inquiry":            "offers discounts promotions deals",
+        "shipping_inquiry":          "shipping delivery options",
+        "company_inquiry":           "company information about",
+        "educational_inquiry":       "guide tutorial how-to",
+        "support_request":           "support help",
         "technical_support_request": "technical support",
-        "complaint":         "complaint resolution",
-        "refund_request":    "refund policy",
-        "billing_inquiry":   "billing invoice",
-        "onboarding":        "setup guide",
-        "general_inquiry":   "information",
+        "complaint":                 "complaint resolution",
+        "refund_request":            "refund policy",
+        "billing_inquiry":           "billing invoice",
+        "onboarding":                "setup guide",
+        "general_inquiry":           "information",
     }
     for k, v in _MAP.items():
         if k in intent_type:
@@ -410,9 +469,20 @@ def _check_intent_reuse(
             return True, f"same_intent_entities_as_turn_n-{last_intents.index(rec)+1}"
 
     # Also check last_intent string for same-type match
+    # CRITICAL: Only flag reuse when entities ALSO match.
+    # "same_as_last_intent" alone is NOT enough for reuse —
+    # two product_inquiry turns about DIFFERENT specs (8GB RAM vs gaming GPU)
+    # must NOT reuse each other's cache or both get wrong results.
     last_intent = memory.get("last_intent", "")
-    if last_intent == intent_type:
-        return True, "same_as_last_intent"
+    if last_intent == intent_type and entity_set:
+        # Only reuse if there is real entity overlap with the last turn
+        last_intents = memory.get("last_intents", [])
+        if last_intents and isinstance(last_intents[0], dict):
+            prev_entities = {str(e).lower() for e in last_intents[0].get("entities", [])}
+            if entity_set and prev_entities and entity_set & prev_entities:
+                return True, "same_as_last_intent_with_entity_overlap"
+        # No entity overlap even though intent matches — do NOT reuse
+        return False, ""
 
     return False, ""
 

@@ -265,8 +265,10 @@ async def _initialize_retrieval():
 
     # 1. Load and validate embedding model (in thread pool — non-blocking)
     registry = get_embedding_registry()
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, registry.initialize)
+    # asyncio.to_thread() is the modern Python 3.9+ equivalent of
+    # loop.run_in_executor(None, fn) — cleaner and avoids the deprecated
+    # asyncio.get_event_loop() call (Task 13 / R23).
+    await asyncio.to_thread(registry.initialize)
 
     if not registry.is_collection_compatible():
         raise RuntimeError(
@@ -283,7 +285,7 @@ async def _initialize_retrieval():
             embedder.encode(prefix + "warmup", normalize_embeddings=True, show_progress_bar=False)
             logger.info("Embedding model warm-up complete | model=%s", registry.get_model_name())
 
-    await loop.run_in_executor(None, _warmup)
+    await asyncio.to_thread(_warmup)
 
     # 2. Verify live Qdrant collection dimensions via REST (avoids qdrant-client parse bug)
     try:

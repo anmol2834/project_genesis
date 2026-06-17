@@ -29,8 +29,17 @@ class ExecutionState:
     FAILED = "failed"
     RETRY_PENDING = "retry_pending"
 
-class ExecutionContext:
-    """Global execution context for workflow"""
+class WorkflowExecutionContext:
+    """
+    Workflow execution context for a single pipeline run.
+
+    Renamed from ExecutionContext → WorkflowExecutionContext (Task 9 / R19)
+    to eliminate the name collision with app.core.execution_context.ExecutionContext
+    (the dataclass with contextvars propagation).  The collision broke distributed
+    trace propagation because workers set the core ExecutionContext in contextvars
+    but the orchestration engine stored a completely different object under the
+    same name, making trace IDs non-propagatable across the worker → pipeline boundary.
+    """
     def __init__(
         self,
         trace_id: str,
@@ -49,7 +58,7 @@ class ExecutionContext:
         self.metadata: Dict[str, Any] = {}
         self.layer_results: Dict[str, Any] = {}
         self.timings: Dict[str, float] = {}
-    
+
     def set_state(self, state: str):
         """Update execution state"""
         self.state = state
@@ -61,21 +70,21 @@ class ExecutionEngine:
     def __init__(self):
         self.tracer = get_tracer()
         self.metrics = get_metrics_collector()
-        self.active_executions: Dict[str, ExecutionContext] = {}
-    
-    def create_execution_context(self, event: AutomationEvent) -> ExecutionContext:
-        """Create execution context from event"""
+        self.active_executions: Dict[str, WorkflowExecutionContext] = {}
+
+    def create_execution_context(self, event: AutomationEvent) -> WorkflowExecutionContext:
+        """Create workflow execution context from event"""
         execution_id = str(uuid.uuid4())
         workflow_id = f"wf_{event.conversation_id}"
-        
-        ctx = ExecutionContext(
+
+        ctx = WorkflowExecutionContext(
             trace_id=event.trace_id or str(uuid.uuid4()),
             correlation_id=event.correlation_id or event.trace_id or str(uuid.uuid4()),
             user_id=event.user_id,
             workflow_id=workflow_id,
             execution_id=execution_id
         )
-        
+
         self.active_executions[execution_id] = ctx
         return ctx
     
@@ -107,7 +116,7 @@ class ExecutionEngine:
             if ctx.execution_id in self.active_executions:
                 del self.active_executions[ctx.execution_id]
     
-    async def _execute_stages(self, ctx: ExecutionContext, event: AutomationEvent) -> Dict[str, Any]:
+    async def _execute_stages(self, ctx: WorkflowExecutionContext, event: AutomationEvent) -> Dict[str, Any]:
         """Execute workflow stages with full distributed tracing, tenant isolation, and priority routing."""
         import time
         from app.memory.orchestrator import get_memory_orchestrator
@@ -466,11 +475,48 @@ class ExecutionEngine:
         existing_chunks = retrieval.get("chunks", [])
         conf = retrieval.get("retrieval_confidence", 0.0)
 
+        # SOURCE PRIORITY ENFORCEMENT
+        # Analytics MUST be lowest priority. Append AFTER existing chunks,
+        # not before. Give analytics a capped score so they never outrank
+        # real product/service records in the fact graph.
+        _ANALYTICS_MAX_SCORE = 0.40
+
         generic_intents = {"follow_up", "general_inquiry", "greeting", "unknown", "follow-up"}
         intent_str = "unknown"
+        analytics_allowed = False
         if hasattr(intelligence, "primary_intents") and intelligence.primary_intents:
             t = intelligence.primary_intents[0].type
             intent_str = (t.value if hasattr(t, "value") else str(t)).lower()
+        # Check Brain #1's explicit analytics_allowed flag
+        if hasattr(intelligence, "retrieval_strategy") and intelligence.retrieval_strategy:
+            analytics_allowed = getattr(intelligence.retrieval_strategy, "analytics_allowed", False)
+
+        # Analytics are ONLY allowed when:
+        # 1. Brain #1 explicitly set analytics_allowed=True, OR
+        # 2. User explicitly asked for stats/reports/analytics/trends/insights, OR
+        # 3. Message contains catalog-overview signals (range, how many, list all, etc.)
+        _ANALYTICS_EXPLICIT_SIGNALS = {
+            "analytics", "statistics", "stats", "report", "reports",
+            "trend", "trends", "insight", "insights", "summary", "summaries",
+            "how many", "total count", "overview report",
+        }
+        # Catalog-overview signals: user wants a high-level view of what's available.
+        # These ALWAYS need analytics context because individual product chunks
+        # cannot answer "what range do you have" or "how many products" questions.
+        _CATALOG_OVERVIEW_SIGNALS = {
+            "range", "ranges", "overview", "all products", "all services",
+            "what do you have", "what do you offer", "what you have",
+            "what you offer", "what you sell", "list of products", "list of services",
+            "show me all", "show all", "full catalog", "complete catalog",
+            "catalogue", "how many products", "how many items", "total products",
+            "price range", "pricing range", "cost range", "minimum price",
+            "maximum price", "cheapest", "most expensive", "starting from",
+            "starts at", "from what price", "what is the range",
+            "entire range", "whole range", "product line", "service line",
+        }
+        combined_text = f"{message_content} {subject}".lower()
+        user_wants_analytics = any(s in combined_text for s in _ANALYTICS_EXPLICIT_SIGNALS)
+        user_wants_catalog_overview = any(s in combined_text for s in _CATALOG_OVERVIEW_SIGNALS)
 
         # Relevance gate: analytics should NOT inject for pure greetings or
         # generic questions (contact, help, etc.) unrelated to products/pricing.
@@ -482,11 +528,13 @@ class ExecutionEngine:
             "laptop", "model", "compare", "recommend", "option",
             "cheapest", "expensive", "budget", "premium", "gaming",
             "wanna", "want", "tell me", "show", "list", "what do you", "what you have",
+            # Company/contact signals
+            "company", "business", "about", "who are", "contact", "reach", "support",
+            "phone", "email", "address", "help", "team", "department",
         }
         # Block analytics injection when query is clearly off-catalog
-        # (contact info, account issues, generic help, etc.)
+        # (account issues, generic help, etc.)
         _ANALYTICS_BLOCKLIST = {
-            "contact", "phone", "email", "address", "location", "office",
             "account", "login", "password", "reset", "sign in", "sign up",
         }
         combined_text = f"{message_content} {subject}".lower()
@@ -505,13 +553,47 @@ class ExecutionEngine:
             or has_discovery_signal
         )
 
+        # Analytics inject ONLY when:
+        # - user explicitly wants analytics (stats/reports/trends), OR
+        # - Brain #1 explicitly permitted it, AND
+        # - existing product chunks are insufficient
+        # Analytics NEVER inject for product_inquiry when product chunks already exist.
+        product_intents = {"product_inquiry", "pricing_inquiry", "feature_request"}
+        # Intents that ALWAYS need business_context injection regardless of existing chunks
+        business_context_intents = {"company_inquiry", "contact_inquiry"}
+        has_product_chunks = any(
+            str(c.get("chunk_type", "")).lower() in ("product_service", "product")
+            for c in existing_chunks
+        )
+
+        # Block analytics when product chunks already satisfy product/pricing requests
+        # EXCEPTION: catalog overview queries ("range", "all products", "what do you have")
+        # always need analytics context even if individual product chunks exist.
+        if intent_str in product_intents and has_product_chunks and not user_wants_catalog_overview:
+            logger.debug(
+                "analytics_injection_blocked | product_chunks_exist=%d intent=%s",
+                len([c for c in existing_chunks if str(c.get("chunk_type", "")).lower() in ("product_service", "product")]),
+                intent_str,
+            )
+            return retrieval
+
+        # Company inquiry ALWAYS needs business_context injection — no gate
+        is_business_context_request = intent_str in business_context_intents
+
+        # Only inject when no product data exists and it's a discovery/generic query
         needs_analytics = (
-            has_info_intent
-            and (
+            is_business_context_request   # company/contact queries always get context
+            or (analytics_allowed or user_wants_analytics)
+            or user_wants_catalog_overview  # catalog-overview queries always need analytics
+            or (
+                has_discovery_signal
+                and not has_product_chunks
+                and intent_str not in product_intents
+            )
+            or (
+                # Fallback: no chunks at all — inject analytics as last resort
                 not existing_chunks
-                or conf < 0.30
-                or intent_str in generic_intents
-                or intent_str in catalog_intents  # always inject for catalog intents
+                and has_discovery_signal
             )
         )
 
@@ -522,14 +604,20 @@ class ExecutionEngine:
         mem = memory or {}
         cached_discovery = mem.get("discovery_context")
         if cached_discovery and isinstance(cached_discovery, list) and cached_discovery:
+            # Apply score cap before injecting from cache
+            capped_cache = [
+                dict(c, score=min(c.get("score", 0.4), _ANALYTICS_MAX_SCORE))
+                for c in cached_discovery
+            ]
             logger.info(
                 "discovery_mode_triggered | analytics_cache_hit=True "
                 "intent=%s chunks_from_cache=%d",
-                intent_str, len(cached_discovery),
+                intent_str, len(capped_cache),
                 trace_id=trace_id,
             )
             retrieval = dict(retrieval)
-            retrieval["chunks"] = cached_discovery + existing_chunks
+            # Analytics APPENDED AFTER product chunks — never before
+            retrieval["chunks"] = existing_chunks + capped_cache
             retrieval["_analytics_injected"] = True
             retrieval["_analytics_from_cache"] = True
             retrieval["retrieval_confidence"] = max(conf, 0.45)
@@ -545,6 +633,45 @@ class ExecutionEngine:
         try:
             from app.core.resource_management import get_resource_manager
             qdrant_repo = get_resource_manager().get_qdrant_repository()
+
+            # For company_inquiry: fetch from business_context collection (profile data)
+            # which contains business_core, use_case, audience, tone, instruction records
+            if intent_str == "company_inquiry":
+                # Fetch business context profile chunks
+                profile_chunks = await qdrant_repo.scroll(
+                    user_id=user_id,
+                    filters={"chunk_type": "profile"},  # profile type in business_context
+                    limit=5,
+                )
+                if profile_chunks:
+                    formatted = []
+                    for record in profile_chunks:
+                        payload = record.get("payload", {})
+                        content = payload.get("content") or ""
+                        if content:
+                            formatted.append({
+                                "content":         content,
+                                "score":           0.70,
+                                "chunk_type":      "profile",
+                                "chunk_id":        str(record.get("id", "")),
+                                "source":          "business_context",
+                                "retrieval_layer": "L_BUSINESS_CONTEXT",
+                                "metadata":        payload,
+                                "user_id":         user_id,
+                            })
+                    if formatted:
+                        retrieval = dict(retrieval)
+                        retrieval["chunks"] = existing_chunks + formatted
+                        retrieval["_analytics_injected"] = True
+                        retrieval["_analytics_from_cache"] = False
+                        retrieval["retrieval_confidence"] = max(conf, 0.65)
+                        if "L_BUSINESS_CONTEXT" not in retrieval.get("layers_used", []):
+                            retrieval["layers_used"] = retrieval.get("layers_used", []) + ["L_BUSINESS_CONTEXT"]
+                        logger.info(
+                            "business_context_injected | intent=%s profile_chunks=%d",
+                            intent_str, len(formatted), trace_id=trace_id,
+                        )
+                        return retrieval
 
             analytics_chunks = await qdrant_repo.scroll(
                 user_id=user_id,
@@ -563,7 +690,6 @@ class ExecutionEngine:
                 formatted = []
                 for record in analytics_chunks:
                     payload = record.get("payload", {})
-                    # Robust content extraction — try every known field name
                     content = (
                         payload.get("content")
                         or payload.get("search_text")
@@ -573,7 +699,6 @@ class ExecutionEngine:
                         or payload.get("text")
                         or ""
                     )
-                    # If still empty, synthesise from structured fields
                     if not content:
                         sd = payload.get("structured_data") or {}
                         attrs = payload.get("attributes") or {}
@@ -598,9 +723,11 @@ class ExecutionEngine:
                                         parts.append(str(caps))
                         content = " ".join(parts) or "business analytics data"
 
+                    # SOURCE PRIORITY: analytics score capped at 0.40 — always below
+                    # real product chunks which score 0.50+ from semantic search
                     formatted.append({
                         "content":         content,
-                        "score":           0.80,
+                        "score":           _ANALYTICS_MAX_SCORE,  # CAPPED — never outranks products
                         "chunk_type":      "data_analytics",
                         "chunk_id":        str(record.get("id", "")),
                         "source":          "analytics",
@@ -618,17 +745,17 @@ class ExecutionEngine:
                 )
 
                 retrieval = dict(retrieval)
-                retrieval["chunks"] = formatted + existing_chunks
+                # CRITICAL FIX: analytics APPENDED AFTER product chunks — never before
+                retrieval["chunks"] = existing_chunks + formatted
                 retrieval["_analytics_injected"] = True
                 retrieval["_analytics_from_cache"] = False
-                # Store formatted chunks so memory layer can cache them
                 retrieval["_analytics_chunks"] = formatted
                 retrieval["retrieval_confidence"] = max(conf, 0.45)
                 if "L_ANALYTICS" not in retrieval.get("layers_used", []):
                     retrieval["layers_used"] = retrieval.get("layers_used", []) + ["L_ANALYTICS"]
 
                 logger.info(
-                    "analytics_retrieved | intent=%s chunks=%d conf=%.2f→%.2f",
+                    "analytics_retrieved | intent=%s chunks=%d conf=%.2f→%.2f position=AFTER_PRODUCTS",
                     intent_str, len(formatted), conf, retrieval["retrieval_confidence"],
                     trace_id=trace_id,
                 )
@@ -765,7 +892,7 @@ class ExecutionEngine:
 
         return False
 
-    def _create_response_event(self, ctx: ExecutionContext, original_event: AutomationEvent, result: Dict) -> ResponseEvent:
+    def _create_response_event(self, ctx: WorkflowExecutionContext, original_event: AutomationEvent, result: Dict) -> ResponseEvent:
         """Create response event from execution results"""
         decision     = result["decision"]
         llm_result   = result["llm_result"]
@@ -805,4 +932,4 @@ class ExecutionEngine:
 
 execution_engine = ExecutionEngine()
 
-__all__ = ["ExecutionEngine", "ExecutionContext", "ExecutionState", "execution_engine"]
+__all__ = ["ExecutionEngine", "WorkflowExecutionContext", "ExecutionState", "execution_engine"]

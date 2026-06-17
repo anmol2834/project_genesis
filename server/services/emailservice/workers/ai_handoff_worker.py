@@ -22,7 +22,10 @@ from metrics import M, timer
 logger = logging.getLogger("emailservice.ai_handoff")
 
 TOPIC_AUTOMATION = "automation_events"
-WAKE_CHANNEL     = "automation:wake"
+# Notification key: automation-service listens on this Redis List via BLPOP.
+# emailservice does LPUSH <count> here after every XADD batch so the
+# automation-service wakes exactly once per batch (not once per message).
+TOPIC_AUTOMATION_NOTIFY = "automation_notify"
 
 # Dedicated Redis client for publishing to automationservice Redis (REDIS_URL)
 _automation_redis: aioredis.Redis | None = None
@@ -154,11 +157,16 @@ class AIHandoffWorker(BaseWorker):
                     maxlen=10_000,
                     approximate=True,
                 )
-            # Wake signal in same pipeline
-            pipe.publish(WAKE_CHANNEL, "1")
+            # Push a notification token to automation_notify LIST.
+            # The value encodes the batch size so automation-service knows
+            # exactly how many messages to pull without over-polling.
+            # LPUSH is O(1) and does not block the pipeline.
+            pipe.lpush(TOPIC_AUTOMATION_NOTIFY, str(len(truly_new)))
             await pipe.execute()
-            logger.info("AI handoff → automation_events (REDIS_URL) | events=%d (deduped from %d)",
-                        len(truly_new), len(events))
+            logger.info(
+                "AI handoff → automation_events (REDIS_URL) | events=%d (deduped from %d) | notify sent",
+                len(truly_new), len(events),
+            )
             return True
         except Exception as e:
             logger.warning("automation_events publish failed: %s — HTTP fallback", e)

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -149,10 +150,16 @@ class MemoryOrchestrator:
                 "last_retrieval_confidence":   retrieval_mem.get("last_retrieval_confidence", 0.0),
                 "last_retrieval_layers":       retrieval_mem.get("last_retrieval_layers", []),
                 "retrieval_reuse_count":       retrieval_mem.get("retrieval_reuse_count", 0),
-                # Discovery context cache — analytics chunks from previous discovery turn
-                # loaded here so _inject_analytics_if_needed can serve cache-first
+                # Discovery context cache
                 "discovery_context":           retrieval_mem.get("discovery_context", []),
                 "catalog_summary_cached":      retrieval_mem.get("catalog_summary_cached", False),
+                # ── Catalog pagination state (Problem #8/#9 fix) ──
+                "shown_products":              retrieval_mem.get("shown_products", []),
+                "shown_services":              retrieval_mem.get("shown_services", []),
+                "shown_offers":                retrieval_mem.get("shown_offers", []),
+                "shown_support_articles":      retrieval_mem.get("shown_support_articles", []),
+                "catalog_position":            retrieval_mem.get("catalog_position", 0),
+                "catalog_exhausted":           retrieval_mem.get("catalog_exhausted", False),
 
                 # Tier 4 — Response Memory (repetition prevention)
                 "already_shared_entities":     retrieval_mem.get("already_shared_entities", []),
@@ -257,7 +264,37 @@ class MemoryOrchestrator:
             ent_dict  = _to_dict(ent_obj) if not isinstance(ent_obj, dict) else ent_obj
             products  = ent_dict.get("products", [])
             features  = ent_dict.get("features", [])
+            # CRITICAL: Only store REAL PRODUCT NAMES as shared entities.
+            # Hardware specs (8GB RAM, 512GB SSD, RTX 4070), generic terms (laptop, product),
+            # and dimension strings (16GB, 1TB) are search CRITERIA not product identities.
+            # Storing them as "already_shared_entities" causes the dedup logic to wrongly
+            # block future retrieval and prompt building for those spec terms.
+            _SPEC_PATTERN_MEM = re.compile(
+                r"^\d+\s*(?:gb|tb|mb|ghz|mhz|inch|\")\b"
+                r"|ram$|ssd$|hdd$|gpu$|cpu$|vram$"
+                r"|^(?:rtx|gtx|rx|ryzen|intel|amd|nvidia)\s+\d",
+                re.IGNORECASE,
+            )
+            _GENERIC_TERMS_MEM = {
+                "laptop", "laptops", "product", "products", "item", "items",
+                "service", "services", "option", "options", "device", "devices",
+            }
+
+            def _is_real_product_name(name: str) -> bool:
+                """True when name looks like an actual product (not a spec/generic term)."""
+                n = name.strip()
+                if not n or len(n) < 3:
+                    return False
+                if n.lower() in _GENERIC_TERMS_MEM:
+                    return False
+                if _SPEC_PATTERN_MEM.search(n):
+                    return False
+                return True
+
+            # all_entities for topic/reasoning (keeps everything including specs)
             all_entities = list(dict.fromkeys(products + features))
+            # real_product_names for already_shared_entities (only actual product names)
+            real_product_names = [e for e in all_entities if _is_real_product_name(e)]
 
             # Topic
             br        = int_dict.get("business_reasoning", {})
@@ -350,13 +387,58 @@ class MemoryOrchestrator:
             # ── Tier 3+4 — Retrieval + Response memory ───────────────────
             old_ret = await self._load_raw(redis, f"mem:retrieval:{thread_id}")
 
-            # Accumulate already-shared chunk IDs
+            # Accumulate already-shared chunk IDs.
+            # FIX #1: When the ENTIRE current entity set is hardware specs (8GB RAM,
+            # 512GB SSD) with NO real product names, do NOT accumulate stale chunk
+            # IDs from previous turns. Those old IDs came from a different query
+            # context (e.g., gaming laptops) and deduplicating against them causes
+            # the system to return zero chunks for the new spec query.
+            # FIX #2: When the intent CHANGES between turns (e.g., product_inquiry →
+            # offers_inquiry → shipping_inquiry), reset the accumulated chunk IDs.
+            # Different intents retrieve from completely different Qdrant categories —
+            # there is no valid reason to dedup an "offers" chunk against a "product"
+            # chunk from 3 turns ago. Cross-intent dedup is the primary cause of
+            # "only 1 offer shown" and "no shipping info" failures after turn 3+.
             existing_chunk_ids = old_ret.get("already_shared_chunks", [])
-            merged_chunks = list(dict.fromkeys(existing_chunk_ids + chunk_ids))[:_MAX_SHARED_CHUNKS]
+            prev_intent = old_ret.get("last_intent_for_dedup", resolved_intent)
+            _intent_changed_for_dedup = (prev_intent and prev_intent != resolved_intent
+                                         and resolved_intent not in ("follow_up", "general_inquiry", "unknown"))
+
+            _all_specs = bool(all_entities) and not bool(real_product_names)
+            if _all_specs:
+                # Spec-only turn: start fresh — don't carry over chunk IDs from
+                # product-name turns that are semantically unrelated.
+                merged_chunks = list(dict.fromkeys(chunk_ids))[:_MAX_SHARED_CHUNKS]
+                logger.info(
+                    "Chunk dedup reset: all entities are specs (%s), "
+                    "not accumulating %d stale chunk IDs",
+                    all_entities[:3], len(existing_chunk_ids),
+                )
+            elif _intent_changed_for_dedup:
+                # Intent changed: reset cross-category chunk accumulation.
+                # Each intent category (products/offers/shipping/support) has its own
+                # Qdrant collection bucket. Carrying chunk IDs across intent categories
+                # blocks fresh retrieval in the new category on every subsequent turn.
+                # We keep only the CURRENT turn's chunk IDs so dedup can still prevent
+                # exact same chunks being shown twice within the SAME turn.
+                merged_chunks = list(dict.fromkeys(chunk_ids))[:_MAX_SHARED_CHUNKS]
+                logger.info(
+                    "Chunk dedup reset: intent changed %s→%s, "
+                    "clearing %d stale cross-category chunk IDs",
+                    prev_intent, resolved_intent, len(existing_chunk_ids),
+                )
+            else:
+                merged_chunks = list(dict.fromkeys(existing_chunk_ids + chunk_ids))[:_MAX_SHARED_CHUNKS]
 
             # Accumulate already-shared entities
+            # CRITICAL: Only store REAL PRODUCT NAMES (not specs/generic terms)
             existing_ents = old_ret.get("already_shared_entities", [])
-            merged_ents   = list(dict.fromkeys(existing_ents + all_entities))[:50]
+            if _all_specs:
+                # Spec-only turn: clear entity accumulation too so stale spec
+                # strings don't persist in Redis and confuse future dedup checks.
+                merged_ents = []
+            else:
+                merged_ents = list(dict.fromkeys(existing_ents + real_product_names))[:50]
 
             # Accumulate already-shared products
             existing_prods = old_ret.get("already_shared_products", [])
@@ -382,9 +464,8 @@ class MemoryOrchestrator:
                 "last_retrieval_confidence":  retrieval_conf,
                 "last_retrieval_layers":      layers_used,
                 "retrieval_reuse_count":      old_ret.get("retrieval_reuse_count", 0) + (1 if ret_dict.get("cache_hit") else 0),
-                # Discovery context cache — persist analytics chunks for reuse on continuation turns.
-                # _inject_analytics_if_needed sets _analytics_chunks on the first discovery turn;
-                # we store them here so subsequent turns skip Qdrant entirely.
+                "last_intent_for_dedup":      resolved_intent,  # track intent for cross-intent dedup reset
+                # Discovery context cache
                 "discovery_context":          (
                     ret_dict.get("_analytics_chunks")
                     or old_ret.get("discovery_context", [])
@@ -400,6 +481,22 @@ class MemoryOrchestrator:
                 "support_info_shared":        old_ret.get("support_info_shared", []),
                 "last_response_summary":      resp_text[:300] if resp_text else "",
                 "updated_at":                 now_iso,
+                # Catalog pagination state (Problem #8/#9)
+                "shown_products":             list(dict.fromkeys(
+                    old_ret.get("shown_products", []) + products
+                ))[:200],
+                # shown_services should only contain real product/service names,
+                # NOT hardware specs (8GB RAM, 512GB SSD) which are search criteria.
+                "shown_services":             list(dict.fromkeys(
+                    old_ret.get("shown_services", []) + [
+                        e for e in all_entities
+                        if e not in products and _is_real_product_name(e)
+                    ]
+                ))[:200],
+                "shown_offers":               old_ret.get("shown_offers", []),
+                "shown_support_articles":     old_ret.get("shown_support_articles", []),
+                "catalog_position":           old_ret.get("catalog_position", 0) + len(products),
+                "catalog_exhausted":          old_ret.get("catalog_exhausted", False),
             }
 
             await redis.setex(f"mem:retrieval:{thread_id}", _TTL_RETRIEVAL, json.dumps(ret_mem))
@@ -546,7 +643,7 @@ class MemoryOrchestrator:
                 )
 
             return ResponseFilterResult(
-                allow_repeated_injection=is_explicit_reask,
+                allow_repeated_injection=is_explicit_reask,  # True ONLY on explicit re-ask
                 already_shared_entities=shared_entities,
                 already_shared_chunks=shared_chunks,
                 already_shared_products=shared_products,
@@ -728,6 +825,9 @@ def _empty_memory(user_id: str, conversation_id: str, thread_id: str, error: str
         "last_retrieval_confidence": 0.0, "last_retrieval_layers": [],
         "retrieval_reuse_count": 0,
         "discovery_context": [], "catalog_summary_cached": False,
+        # Catalog pagination state
+        "shown_products": [], "shown_services": [], "shown_offers": [],
+        "shown_support_articles": [], "catalog_position": 0, "catalog_exhausted": False,
         "already_shared_entities": [], "already_shared_products": [],
         "pricing_already_shared": [], "support_info_shared": [], "last_response_summary": "",
         "active_topics": [], "active_topic": "", "semantic_topic_cluster": [],

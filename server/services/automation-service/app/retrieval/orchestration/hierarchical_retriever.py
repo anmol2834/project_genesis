@@ -3,25 +3,25 @@ Hierarchical Retrieval Orchestrator
 ====================================
 TRUE L1-L10 hierarchical retrieval with early exit at every layer.
 
-Architecture (CPU memory hierarchy model):
-  L1:  Intent Cache (Redis)        <5ms   → STOP if confidence >= 0.90
-  L2:  Conversation/Chunk Cache    <10ms  → STOP if confidence >= 0.88
-  L3:  Exact Match (Redis+Qdrant)  <20ms  → STOP if confidence >= 0.92
-  L4:  Metadata Filter (Qdrant)    <30ms  → STOP if confidence >= 0.85
-  L5:  Sparse BM25 (keyword)       <60ms  → STOP if confidence >= 0.80
-  L6:  Dense Semantic (Qdrant)     <120ms → continues to L7 always
-  L7:  RRF Fusion (multi-source)   <20ms
-  L8:  Cross-Encoder Rerank        <100ms
-  L9:  Context Validation          <10ms
-  L10: Fact Graph Compression      → handled by LLM orchestrator
+Architecture:
+  L1:  Intent Cache (Redis)                   <5ms   → STOP if confidence >= 0.90
+  L2:  Conversation/Chunk Cache               <10ms  → STOP if confidence >= 0.88
+  L3:  Exact Match (Redis+Qdrant)             <20ms  → STOP if confidence >= 0.92
+  L4:  Metadata Filter (Qdrant)              <30ms  → STOP if confidence >= 0.85
+  L5:  Category Keyword Scan (Qdrant scroll) <80ms  → STOP if confidence >= 0.85
+  L6:  Dense Vector Search (e5-base-v2)      <200ms → always continues to L7
+  L7:  RRF Fusion (multi-source)             <20ms
+  L8:  Score-blend Rerank                    <10ms
+  L9:  Context Validation                    <10ms
+  L10: Fact Graph Compression                → handled by LLM orchestrator
 
-Each layer returns a LayerDecision(continue_pipeline, confidence, chunks).
-The pipeline STOPS immediately when a layer signals sufficient confidence.
-Tenant isolation (chunk.user_id == current user_id) is enforced at EVERY layer.
+L5 is a pure Python token-overlap scan (NO BM25 library) using Qdrant scroll.
+It scores every field: content, search_text, title, keywords[], ai_tags[],
+and ALL structured_data / attributes key+value pairs.
+This is complementary to L6 dense vector search (e5-base-v2, 768-dim).
 """
 
 import time
-import math
 import json
 import hashlib
 import logging
@@ -48,12 +48,13 @@ LAYER_STOP_THRESHOLDS: Dict[str, float] = {
     "L2_CHUNK_CACHE":  0.88,
     "L3_EXACT_MATCH":  0.92,   # exact entity → highest trust
     "L4_METADATA":     0.85,
-    "L5_BM25":         0.80,
+    "L5_BM25":         0.85,   # raised: only stop if BM25 is highly confident
     # L6 semantic: never stops early — it's the expensive fallback
 }
 
 # Minimum chunks required before a stop decision is considered valid
-MIN_CHUNKS_FOR_STOP = 3
+# Raised to 5: categories have 20+ entries, we want broad retrieval
+MIN_CHUNKS_FOR_STOP = 5
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -378,6 +379,50 @@ class HierarchicalRetriever:
         threshold = LAYER_STOP_THRESHOLDS["L1_INTENT_CACHE"]
 
         try:
+            # ── SPEC BYPASS: Skip L1 cache for spec-only queries ─────────────
+            # When all entities are hardware specs (8GB RAM, 512GB SSD, RTX 4070)
+            # with no real product names, the cache key is identical to a generic
+            # product_inquiry — it will serve wrong (stale) chunks from a previous
+            # broad query. Force fresh retrieval for spec queries so L5 BM25 can
+            # find products that actually match the specs in Qdrant.
+            all_entity_values = (
+                list(entities.get("products", []) or [])
+                + list(entities.get("features", []) or [])
+                + list(entities.get("technical_terms", []) or [])
+            )
+            if all_entity_values:
+                _spec_bypass_pat = re.compile(
+                    r"^\d+\s*(?:gb|tb|mb|ghz|mhz|inch|\")\b"
+                    r"|ram$|ssd$|hdd$|gpu$|cpu$|vram$",
+                    re.IGNORECASE,
+                )
+                _generic_bypass = {
+                    "laptop", "laptops", "product", "products",
+                    "item", "items", "service", "services",
+                }
+                real_product_entities = [
+                    e for e in all_entity_values
+                    if e and not _spec_bypass_pat.search(str(e).strip())
+                    and str(e).lower() not in _generic_bypass
+                    and len(str(e).strip()) >= 3
+                ]
+                if not real_product_entities:
+                    # All entities are specs — bypass L1 cache, force deep retrieval
+                    logger.info(
+                        "L1 cache bypassed: spec-only query entities=%s "
+                        "— forcing fresh deep retrieval",
+                        all_entity_values[:4],
+                    )
+                    return LayerDecision(
+                        layer="L1_INTENT_CACHE",
+                        confidence=0.0,
+                        continue_pipeline=True,
+                        chunks=[],
+                        retrieval_latency_ms=(time.perf_counter() - t) * 1000,
+                        cache_hit=False,
+                        decision_reason="spec_query_cache_bypass",
+                    )
+
             # Build intent fingerprint key
             cache_key = self._build_intent_cache_key(user_id, intent, entities)
             raw = await self.redis.get(cache_key)
@@ -665,7 +710,7 @@ class HierarchicalRetriever:
             )
 
     # ══════════════════════════════════════════════════════════════════════
-    # L5 — BM25 Sparse Keyword Search
+    # L5 — Category-Scoped Keyword + Structured-Data Scan
     # ══════════════════════════════════════════════════════════════════════
 
     async def _layer_l5_bm25(
@@ -677,16 +722,27 @@ class HierarchicalRetriever:
         top_k: int,
     ) -> LayerDecision:
         """
-        BM25 keyword-based sparse search.
-        Implemented using Qdrant scroll + in-process BM25 scoring
-        (no external sparse index required).
+        Category-scoped keyword scan using Qdrant scroll.
+
+        Fetches ALL records for the target category (tenant-safe), then scores
+        each record by token-overlap across ALL text fields AND structured_data
+        key/value pairs.  This is purely additive to L4 (metadata) and L6
+        (dense vector) — it catches records that have exact keyword hits in
+        title, search_text, keywords[], or structured_data values but that may
+        score lower in dense vector space.
+
+        NO BM25 library required — plain Python token overlap is sufficient
+        because the embedding model (e5-base-v2) already handles semantic
+        similarity in L6.  This layer only needs to surface records with strong
+        literal matches that vector search might rank too low.
         """
+
         t = time.perf_counter()
         threshold = LAYER_STOP_THRESHOLDS["L5_BM25"]
 
         try:
-            # Extract keywords from query plan
-            keywords = self._extract_bm25_keywords(query, query_plan)
+            # Extract query keywords (stop-word filtered)
+            keywords = self._extract_query_keywords(query, query_plan)
             if not keywords:
                 return LayerDecision(
                     layer="L5_BM25",
@@ -694,17 +750,18 @@ class HierarchicalRetriever:
                     continue_pipeline=True,
                     chunks=[],
                     retrieval_latency_ms=(time.perf_counter() - t) * 1000,
-                    decision_reason="no_bm25_keywords",
+                    decision_reason="no_keywords_for_scan",
                 )
 
-            # Fetch candidate documents from Qdrant via scroll (tenant-safe)
-            chunk_type_filter = self._intent_to_chunk_type(intent)
+            # Determine category filter from Brain #1 target_categories or intent mapping
+            chunk_type_filter = self._intent_to_chunk_type(intent, query_plan)
             filters = {"chunk_type": chunk_type_filter} if chunk_type_filter else {}
 
+            # Fetch ALL records for this category (up to 300) — categories have 20+ entries
             candidates = await self.qdrant.scroll(
                 user_id=user_id,
                 filters=filters,
-                limit=min(top_k * 5, 50),  # over-fetch for BM25 scoring
+                limit=300,
             )
 
             if not candidates:
@@ -714,12 +771,49 @@ class HierarchicalRetriever:
                     continue_pipeline=True,
                     chunks=[],
                     retrieval_latency_ms=(time.perf_counter() - t) * 1000,
-                    decision_reason="bm25_no_candidates",
+                    decision_reason="l5_no_candidates",
                 )
 
-            # Score candidates with BM25
-            scored = self._bm25_score(keywords, candidates)
-            scored = scored[:top_k]
+            # Score each record by token overlap across ALL payload fields
+            scored = self._keyword_overlap_score(keywords, candidates)
+
+            # Dynamic overlap threshold based on query type:
+            # - Spec queries (containing hardware keywords like "8gb", "512gb", "ssd")
+            #   produce a naturally smaller keyword set after stop-word filtering.
+            #   A lower threshold ensures spec-matching records are not filtered out.
+            # - General queries with many words have a larger denominator so we
+            #   use the standard 0.25 threshold.
+            # - Category-level queries ("all offers", "shipping") use 0 so all
+            #   records in the category are returned for reranking.
+            _SPEC_KW_PAT = re.compile(
+                r"^\d+\s*(?:gb|tb|mb|ghz|mhz)\b"
+                r"|^(?:ssd|hdd|ram|gpu|cpu|vram|nvme|ddr)$",
+                re.IGNORECASE,
+            )
+            spec_keyword_count = sum(1 for kw in keywords if _SPEC_KW_PAT.match(kw))
+            is_spec_query = spec_keyword_count >= 1
+
+            # Lower threshold for spec queries — spec terms are high-signal,
+            # matching even 1 spec keyword out of 5 clean keywords is significant.
+            MIN_OVERLAP = 0.15 if is_spec_query else 0.25
+
+            above_threshold = [s for s in scored if s["overlap_score"] >= MIN_OVERLAP]
+
+            if above_threshold:
+                scored = above_threshold[:top_k * 2]
+            else:
+                # Category-level query: assign base score 0.50 to all category records
+                scored = []
+                for doc in candidates:
+                    doc_copy = dict(doc)
+                    doc_copy["overlap_score"] = 0.50
+                    scored.append(doc_copy)
+                scored = scored[:top_k * 2]
+                logger.info(
+                    "L5 keyword scan | no overlap above %.2f for intent=%s — "
+                    "returning all %d category records with base score",
+                    MIN_OVERLAP, intent, len(scored),
+                )
 
             if not scored:
                 return LayerDecision(
@@ -728,21 +822,29 @@ class HierarchicalRetriever:
                     continue_pipeline=True,
                     chunks=[],
                     retrieval_latency_ms=(time.perf_counter() - t) * 1000,
-                    decision_reason="bm25_no_scored_results",
+                    decision_reason="l5_no_candidates_after_score",
                 )
 
             chunks = []
             for item in scored:
                 payload = item["payload"]
-                # Tenant safety — double-check
                 if payload.get("user_id") != user_id:
                     continue
+                display_content = (
+                    payload.get("content")
+                    or payload.get("search_text", "")
+                    or payload.get("title", "")
+                )
+                try:
+                    ct = ChunkType(payload.get("chunk_type", "general"))
+                except ValueError:
+                    ct = ChunkType.GENERAL
                 chunk = RetrievedChunk(
-                    content=payload.get("content", ""),
-                    score=item["bm25_score"],
-                    chunk_type=ChunkType(payload.get("chunk_type", "general")),
-                    chunk_id=payload.get("chunk_id", str(item.get("id", ""))),
-                    source=RetrievalSource.L4_BM25,
+                    content=display_content,
+                    score=item["overlap_score"],
+                    chunk_type=ct,
+                    chunk_id=payload.get("chunk_id", payload.get("entry_id", str(item.get("id", "")))),
+                    source=RetrievalSource.L5_BM25,
                     user_id=user_id,
                     metadata=payload,
                     retrieval_layer="L5",
@@ -756,10 +858,12 @@ class HierarchicalRetriever:
                     continue_pipeline=True,
                     chunks=[],
                     retrieval_latency_ms=(time.perf_counter() - t) * 1000,
-                    decision_reason="bm25_all_rejected_tenant",
+                    decision_reason="l5_all_rejected_tenant",
                 )
 
             top_score = chunks[0].score
+            # Only stop pipeline if highly confident — otherwise always continue to L6
+            # so dense vector search can complement keyword matches.
             stop = top_score >= threshold and len(chunks) >= MIN_CHUNKS_FOR_STOP
 
             return LayerDecision(
@@ -769,14 +873,14 @@ class HierarchicalRetriever:
                 chunks=chunks,
                 retrieval_latency_ms=(time.perf_counter() - t) * 1000,
                 decision_reason=(
-                    f"bm25_stop score={top_score:.3f}"
+                    f"l5_keyword_stop score={top_score:.3f} matched={len(chunks)}"
                     if stop else
-                    f"bm25_continue score={top_score:.3f}"
+                    f"l5_keyword_continue score={top_score:.3f} matched={len(chunks)}"
                 ),
             )
 
         except Exception as e:
-            logger.warning("L5 BM25 error: %s", e)
+            logger.warning("L5 keyword scan error: %s", e)
             return LayerDecision(
                 layer="L5_BM25",
                 confidence=0.0,
@@ -800,6 +904,8 @@ class HierarchicalRetriever:
         """
         Dense vector semantic search — the EXPENSIVE fallback.
         Only executes when L1-L5 all failed to meet confidence thresholds.
+        Applies category filter from Brain #1's target_categories so semantic
+        search never returns policy/analytics chunks for product queries.
         """
         t = time.perf_counter()
 
@@ -818,12 +924,61 @@ class HierarchicalRetriever:
             # Build semantic queries from query plan
             queries = self._extract_semantic_queries(query, query_plan)
 
+            # ── Category filter for L6: use Brain #1's target_categories ──
+            # This is the most critical fix: without this, L6 returns policy/FAQ
+            # chunks for product queries because vector similarity doesn't know
+            # about intent. The filter forces Qdrant to search only the correct
+            # category bucket, e.g. product_service for product_inquiry.
+            chunk_type_filter = self._intent_to_chunk_type(
+                # Extract intent string from query_plan
+                (
+                    str(getattr(
+                        getattr(query_plan, "primary_intents", [{}])[0]
+                        if hasattr(query_plan, "primary_intents") and getattr(query_plan, "primary_intents", [])
+                        else {},
+                        "type", "general_inquiry"
+                    ))
+                    if not isinstance(query_plan, dict)
+                    else (
+                        (query_plan.get("primary_intents") or [{}])[0].get("type", "general_inquiry")
+                        if query_plan.get("primary_intents")
+                        else "general_inquiry"
+                    )
+                ),
+                query_plan,
+            )
+
+            # Resolve the Qdrant category value (user_data_entries uses "category" field)
+            # chunk_type_filter is the ChunkType string e.g. "product_service"
+            # which maps back to category="product_service" in user_data_entries
+            semantic_filters: Optional[Dict] = None
+            if chunk_type_filter:
+                semantic_filters = {"chunk_type": chunk_type_filter}
+                logger.debug(
+                    "L6 semantic | applying category filter: %s", chunk_type_filter
+                )
+
             chunks = await engine.search_multi_query(
                 user_id=user_id,
                 queries=queries,
-                top_k_per_query=max(3, top_k // len(queries)),
-                score_threshold=0.28,
+                top_k_per_query=max(3, top_k // max(len(queries), 1)),
+                score_threshold=0.25,
+                filters=semantic_filters,
             )
+
+            # If filtered search returned nothing, retry WITHOUT filter as fallback
+            # (prevents total failure when the category has low vector coverage)
+            if not chunks and semantic_filters:
+                logger.info(
+                    "L6 semantic | no results with filter=%s, retrying without filter",
+                    chunk_type_filter,
+                )
+                chunks = await engine.search_multi_query(
+                    user_id=user_id,
+                    queries=queries,
+                    top_k_per_query=max(3, top_k // max(len(queries), 1)),
+                    score_threshold=0.25,
+                )
 
             # Tenant safety — semantic engine already filters but we double-check
             chunks = [c for c in chunks if c.user_id == user_id]
@@ -846,7 +1001,7 @@ class HierarchicalRetriever:
                 continue_pipeline=False,  # L6 is the last retrieval layer
                 chunks=chunks,
                 retrieval_latency_ms=(time.perf_counter() - t) * 1000,
-                decision_reason=f"semantic_done score={avg_score:.3f}",
+                decision_reason=f"semantic_done score={avg_score:.3f} filter={chunk_type_filter}",
             )
 
         except Exception as e:
@@ -964,65 +1119,148 @@ class HierarchicalRetriever:
         return valid[:top_k], passed, rejected
 
     # ══════════════════════════════════════════════════════════════════════
-    # BM25 Helpers
+    # Keyword Scan Helpers (replaces BM25 — uses e5-compatible token overlap)
     # ══════════════════════════════════════════════════════════════════════
 
-    def _bm25_score(
-        self,
-        keywords: List[str],
-        candidates: List[Dict],
-        k1: float = 1.5,
-        b: float = 0.75,
-    ) -> List[Dict]:
+    def _keyword_overlap_score(self, keywords: List[str], candidates: List[Dict]) -> List[Dict]:
         """
-        In-process BM25 scoring against fetched Qdrant documents.
-        Returns candidates sorted by bm25_score descending.
+        Score each Qdrant record by keyword token overlap across ALL payload fields.
+
+        Scoring strategy:
+          1. Build a unified token set per record from: content, search_text, title,
+             keywords[], ai_tags[], AND every key+value pair in structured_data and
+             attributes dicts.  This catches "ram": "16GB" when user asks "8gb ram".
+          2. Score = (matched_keywords / total_keywords) normalized to [0, 1].
+          3. Bonus +0.1 per keyword found as a structured_data VALUE (exact spec match).
+
+        SPEC EQUALITY FIX:
+          Hardware specs like "8gb" and "16gb" share the token "gb". A naive token
+          overlap would match "8gb" against ANY product that has "gb" anywhere, giving
+          false positive scores to 16GB/32GB products.
+          
+          Fix: For spec keywords (digits + unit like "8gb", "512gb", "16ghz"), require
+          the FULL spec token to match, not just the unit. The unit ("gb", "tb", "mhz")
+          alone is NOT considered a match. Only the full "8gb" or "512gb" string counts.
+
+        Returns candidates sorted by overlap_score descending.
+        Records with score == 0 are excluded.
         """
         if not candidates or not keywords:
             return []
 
-        # Compute average document length
-        doc_lengths = []
-        tokenized = []
-        for doc in candidates:
-            content = doc.get("payload", {}).get("content", "")
-            tokens = re.findall(r"\w+", content.lower())
-            tokenized.append(tokens)
-            doc_lengths.append(len(tokens))
+        kw_lower = [k.lower() for k in keywords]
 
-        avg_dl = sum(doc_lengths) / len(doc_lengths) if doc_lengths else 1
-        N = len(candidates)
+        # Identify which keywords are hardware specs (digit+unit) for strict matching
+        _SPEC_NUM_FULL = re.compile(r'^(\d+)\s*(gb|tb|mb|ghz|mhz|nm)$', re.IGNORECASE)
+        spec_keywords = {kw for kw in kw_lower if _SPEC_NUM_FULL.match(kw)}
+        # Unit-only tokens that should NOT count as standalone matches (they're too generic)
+        _UNIT_ONLY = {"gb", "tb", "mb", "ghz", "mhz", "nm", "ram", "ssd", "hdd", "gpu", "cpu"}
+        # Pure unit tokens should be removed from scoring keywords since they match
+        # everything that has memory/storage specs regardless of the actual value
+        scoring_keywords = [kw for kw in kw_lower if kw not in _UNIT_ONLY or kw in spec_keywords]
+        if not scoring_keywords:
+            scoring_keywords = kw_lower
 
-        # IDF per keyword
-        idf: Dict[str, float] = {}
-        for kw in keywords:
-            kw_lower = kw.lower()
-            df = sum(1 for tokens in tokenized if kw_lower in tokens)
-            idf[kw_lower] = math.log((N - df + 0.5) / (df + 0.5) + 1)
+        def _payload_token_set(payload: Dict) -> set:
+            tokens: set = set()
+            # Primary text fields
+            for field in ("content", "search_text", "title"):
+                val = payload.get(field, "")
+                if val:
+                    tokens.update(re.findall(r"\w+", str(val).lower()))
+            # keywords[] list stored in payload — these are pre-computed by ingestion
+            for kw in payload.get("keywords", []) or []:
+                tokens.update(re.findall(r"\w+", str(kw).lower()))
+            # ai_tags[]
+            for tag in payload.get("ai_tags", []) or []:
+                tokens.update(re.findall(r"\w+", str(tag).lower()))
+            # structured_data — include both keys AND values
+            sd = payload.get("structured_data") or {}
+            if isinstance(sd, dict):
+                for k, v in sd.items():
+                    tokens.update(re.findall(r"\w+", str(k).lower()))
+                    tokens.update(re.findall(r"\w+", str(v).lower()))
+            # attributes — include both keys AND values
+            attrs = payload.get("attributes") or {}
+            if isinstance(attrs, dict):
+                for k, v in attrs.items():
+                    tokens.update(re.findall(r"\w+", str(k).lower()))
+                    tokens.update(re.findall(r"\w+", str(v).lower()))
+            return tokens
 
-        # Score each document
+        def _structured_data_value_tokens(payload: Dict) -> set:
+            """Token set from structured_data VALUES only — for exact spec bonus."""
+            tokens: set = set()
+            for src in (payload.get("structured_data") or {}, payload.get("attributes") or {}):
+                if isinstance(src, dict):
+                    for v in src.values():
+                        tokens.update(re.findall(r"\w+", str(v).lower()))
+            return tokens
+
+        def _full_text_for_spec_check(payload: Dict) -> str:
+            """Return the full searchable text blob for spec equality checking."""
+            parts = []
+            for field in ("content", "search_text", "title"):
+                val = payload.get(field, "")
+                if val:
+                    parts.append(str(val).lower())
+            sd = payload.get("structured_data") or {}
+            if isinstance(sd, dict):
+                for v in sd.values():
+                    parts.append(str(v).lower())
+            attrs = payload.get("attributes") or {}
+            if isinstance(attrs, dict):
+                for v in attrs.values():
+                    parts.append(str(v).lower())
+            return " ".join(parts)
+
         scored = []
-        for i, doc in enumerate(candidates):
-            tokens = tokenized[i]
-            dl = doc_lengths[i]
-            tf_dict: Dict[str, int] = defaultdict(int)
-            for token in tokens:
-                tf_dict[token] += 1
+        for doc in candidates:
+            payload = doc.get("payload", {})
+            token_set = _payload_token_set(payload)
+            sd_value_tokens = _structured_data_value_tokens(payload)
+            full_text = _full_text_for_spec_check(payload)
 
-            score = 0.0
-            for kw in keywords:
-                kw_lower = kw.lower()
-                tf = tf_dict.get(kw_lower, 0)
-                numerator = tf * (k1 + 1)
-                denominator = tf + k1 * (1 - b + b * dl / avg_dl)
-                score += idf.get(kw_lower, 0) * (numerator / denominator if denominator else 0)
+            matched = 0
+            for kw in scoring_keywords:
+                # For spec keywords (e.g. "8gb", "512gb"), require the FULL spec token
+                # to appear in the full text. The unit alone ("gb") is NOT a match.
+                if kw in spec_keywords:
+                    # Check that "8gb" appears as a contiguous token in full_text
+                    # This prevents "16gb" from matching a "8gb" query
+                    # We match: "8gb", "8 gb", "8gb", or "8 GB" but NOT "16gb"
+                    m = _SPEC_NUM_FULL.match(kw)
+                    if m:
+                        num_val = m.group(1)
+                        unit_val = m.group(2).lower()
+                        # Look for exact spec: the number followed immediately by unit
+                        # e.g. "8gb", "8 gb", "8GB" — but NOT "16gb" or "32gb"
+                        spec_exact = re.compile(
+                            rf'\b{re.escape(num_val)}\s*{re.escape(unit_val)}\b',
+                            re.IGNORECASE,
+                        )
+                        if spec_exact.search(full_text):
+                            matched += 1
+                        # NO partial credit for unit-only matches — that's the whole point
+                else:
+                    if kw in token_set:
+                        matched += 1
 
-            if score > 0:
-                doc_copy = dict(doc)
-                doc_copy["bm25_score"] = min(1.0, score / (len(keywords) * 3))
-                scored.append(doc_copy)
+            if matched == 0:
+                continue
 
-        scored.sort(key=lambda x: x["bm25_score"], reverse=True)
+            base_score = matched / len(scoring_keywords)
+
+            # Bonus for exact structured_data value matches (e.g. "16gb", "512gb")
+            sd_matches = sum(1 for kw in spec_keywords if kw in sd_value_tokens)
+            bonus = min(0.30, sd_matches * 0.10)  # up to +0.30 bonus
+
+            overlap_score = min(1.0, base_score + bonus)
+            doc_copy = dict(doc)
+            doc_copy["overlap_score"] = overlap_score
+            scored.append(doc_copy)
+
+        scored.sort(key=lambda x: x["overlap_score"], reverse=True)
         return scored
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1111,37 +1349,66 @@ class HierarchicalRetriever:
                 continue
         return result
 
-    def _extract_bm25_keywords(self, query: str, query_plan: Any) -> List[str]:
-        """Extract keywords for BM25 from query and query plan."""
-        keywords: List[str] = []
+    def _extract_query_keywords(self, query: str, query_plan: Any) -> List[str]:
+        """
+        Extract query keywords for L5 keyword scan.
+        Pulls from: raw query, semantic_queries, exact_search_queries, pricing_queries.
+        Stop-word filtered; deduplicated; order preserved.
+        """
+        _STOP = {
+            # Articles, prepositions, conjunctions
+            "the", "a", "an", "and", "or", "but", "nor", "so", "yet",
+            "in", "on", "at", "to", "for", "of", "with", "by", "from",
+            "into", "onto", "upon", "about", "above", "below", "after",
+            "before", "between", "through", "during", "against", "among",
+            # Pronouns
+            "i", "me", "my", "we", "our", "you", "your", "it", "its",
+            "he", "she", "they", "them", "his", "her", "their",
+            # Auxiliary/modal verbs
+            "is", "are", "was", "were", "be", "been", "being",
+            "do", "does", "did", "will", "would", "can", "could",
+            "may", "might", "shall", "should", "have", "has", "had",
+            # Interrogative/relative
+            "what", "which", "who", "whom", "whose", "where", "when",
+            "why", "how",
+            # Common filler words
+            "any", "all", "some", "too", "also", "just", "now", "then",
+            "very", "much", "more", "most", "less", "such", "own", "same",
+            "other", "another", "each", "every", "both", "few", "many",
+            # Action/intent words that add no retrieval value
+            "want", "need", "give", "show", "know", "like", "tell",
+            "get", "got", "let", "use", "make", "take", "see", "look",
+            "find", "give", "help", "ask", "say", "said", "go", "come",
+            # Question words
+            "please", "thanks", "thank",
+            # Common short words passing len>2 check that add no value
+            "not", "yes", "via", "per", "etc", "vs",
+        }
+        raw: List[str] = []
 
         if query:
-            stop = {
-                "the", "a", "an", "is", "are", "was", "were", "for",
-                "to", "in", "on", "of", "do", "does", "can", "could",
-                "what", "how", "tell", "me", "and", "or", "with",
-            }
-            keywords.extend(
-                w for w in re.findall(r"\w+", query.lower())
-                if w not in stop and len(w) > 2
-            )
+            raw.extend(re.findall(r"\w+", query.lower()))
 
+        # Also pull from Brain #1 search plan queries
+        sp = None
         if isinstance(query_plan, dict):
-            for q in query_plan.get("exact_search_queries", []):
-                keywords.extend(re.findall(r"\w+", str(q).lower()))
+            sp = query_plan.get("search_plan") or query_plan
         elif hasattr(query_plan, "search_plan"):
             sp = query_plan.search_plan
-            for q in getattr(sp, "exact_search_queries", []):
-                keywords.extend(re.findall(r"\w+", str(q).lower()))
 
-        # Deduplicate, keep order
+        if sp is not None:
+            for field in ("semantic_queries", "exact_search_queries", "pricing_queries", "support_queries"):
+                items = (sp.get(field, []) if isinstance(sp, dict) else getattr(sp, field, []) or [])
+                for q in items:
+                    raw.extend(re.findall(r"\w+", str(q).lower()))
+
         seen: set = set()
         unique: List[str] = []
-        for k in keywords:
-            if k not in seen:
-                seen.add(k)
-                unique.append(k)
-        return unique[:15]
+        for w in raw:
+            if w not in _STOP and len(w) > 2 and w not in seen:
+                seen.add(w)
+                unique.append(w)
+        return unique[:20]
 
     def _extract_semantic_queries(self, query: str, query_plan: Any) -> List[str]:
         """Extract semantic query strings for L6 dense search."""
@@ -1160,19 +1427,58 @@ class HierarchicalRetriever:
 
         return [q for q in queries if q][:5]  # max 5 semantic queries
 
-    def _intent_to_chunk_type(self, intent: str) -> Optional[str]:
-        """Map intent string to a Qdrant chunk_type filter value."""
+    def _intent_to_chunk_type(self, intent: str, query_plan: Any = None) -> Optional[str]:
+        """Map intent string to a Qdrant chunk_type filter value.
+        
+        Respects target_categories from the search plan (set by Brain #1).
+        Falls back to intent mapping when no explicit categories are set.
+        """
+        # Brain #1 explicit routing takes priority
+        if query_plan is not None:
+            sp = (query_plan.get("search_plan", {}) if isinstance(query_plan, dict)
+                  else getattr(query_plan, "search_plan", None))
+            if sp is not None:
+                target = (sp.get("target_categories", []) if isinstance(sp, dict)
+                          else getattr(sp, "target_categories", []))
+                if target:
+                    return target[0]  # use first target category as primary filter
+
+        # Fallback: intent-based mapping
+        # Maps every IntentType to the correct Qdrant category field value.
+        # This is the canonical routing table — every new intent MUST have an entry.
+        # Values MUST match the exact "category" strings stored in user_data_entries.
+        # None means "no category filter" — all categories are searched (used when
+        # pricing data spans multiple categories: product_service, offers_promotions).
         mapping = {
-            "pricing_inquiry":          "product_service",
-            "product_inquiry":          "product_service",
-            "support_request":          "support",
-            "technical_support_request": "support",
-            "technical_assistance":     "support",
-            "feature_request":          "product_service",
-            "general_inquiry":          None,
-            "follow_up":                None,
+            # pricing_inquiry: prices live in product_service AND offers_promotions AND
+            # delivery_shipping — using None removes the category filter so all are searched.
+            "pricing_inquiry":           None,
+            "product_inquiry":           "product_service",
+            "offers_inquiry":            "offers_promotions",
+            "shipping_inquiry":          "delivery_shipping",
+            "company_inquiry":           "company_info",
+            "educational_inquiry":       "educational_content",
+            "support_request":           "contact_support",
+            # technical_support_request = specific bug/error report → issue_resolution
+            "technical_support_request": "issue_resolution",
+            "technical_assistance":      "issue_resolution",
+            "technical_question":        "issue_resolution",
+            "feature_request":           "product_service",
+            "complaint":                 "contact_support",
+            "refund_request":            "policies_legal",
+            "billing_inquiry":           "product_service",
+            "general_inquiry":           "product_service",
+            "issue_inquiry":             "issue_resolution",
+            "issue_resolution":          "issue_resolution",
+            "follow_up":                 None,
+            "unknown":                   None,
         }
-        return mapping.get(intent)
+        # Normalise intent string — handles both "pricing_inquiry" and
+        # "IntentType.PRICING_INQUIRY" enum string representations
+        intent_lower = intent.lower() if intent else ""
+        if "." in intent_lower:
+            intent_lower = intent_lower.split(".")[-1]
+        return mapping.get(intent_lower)
 
     def _get_semantic_engine(self):
         """Lazy-load semantic search engine."""

@@ -1,212 +1,190 @@
 """
-Handoff Metrics Collector - Complete observability for escalation system
+Handoff Metrics Collector - Complete observability for escalation system.
+
+Task 6 fix (R8): all Redis calls are now async-safe.
+record_* methods fire-and-forget coroutines on the running event loop.
+get_* read methods are async def for use in API/dashboard handlers.
 """
+import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
-from redis import Redis
-import json
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _get_redis():
+    from app.core.resource_management import get_resource_manager
+    return get_resource_manager().get_redis()
+
+
+def _fire(coro):
+    """Schedule coro on running loop; discard if no loop."""
+    try:
+        asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:
+        try:
+            coro.close()
+        except Exception:
+            pass
+
+
 class HandoffMetrics:
-    """Collects and aggregates handoff system metrics"""
-    
-    def __init__(self, redis_client: Redis, postgres_conn):
-        self.redis = redis_client
-        self.pg_conn = postgres_conn
+    """
+    Collects handoff system metrics.
+
+    record_* -- sync-callable, fire-and-forget async Redis writes.
+    get_*    -- async, for use in async API handlers / dashboards.
+    """
+
+    def __init__(self, redis_client=None, postgres_conn=None):
         self.metrics_prefix = "handoff:metrics:"
-    
-    def record_handoff_decision(
-        self,
-        tenant_id: str,
-        decision: str,
-        confidence_score: float,
-        risk_level: str,
-        latency_ms: float
-    ):
-        """Record handoff decision metrics"""
+
+    # ------------------------------------------------------------------
+    # Sync-safe write methods
+    # ------------------------------------------------------------------
+
+    def record_handoff_decision(self, tenant_id, decision, confidence_score, risk_level, latency_ms):
+        _fire(self._write_decision(tenant_id, decision, confidence_score, risk_level, latency_ms))
+
+    def record_escalation(self, tenant_id, priority, escalation_reason, queue_time_ms):
+        _fire(self._write_escalation(tenant_id, priority, escalation_reason, queue_time_ms))
+
+    def record_sla_breach(self, tenant_id, priority, breach_minutes):
+        _fire(self._write_sla_breach(tenant_id, priority, breach_minutes))
+
+    def record_ai_reentry(self, tenant_id, success, confidence):
+        _fire(self._write_ai_reentry(tenant_id, success, confidence))
+
+    # ------------------------------------------------------------------
+    # Async write implementations
+    # ------------------------------------------------------------------
+
+    async def _write_decision(self, tenant_id, decision, confidence_score, risk_level, latency_ms):
         try:
-            # Daily counters
+            redis = _get_redis()
             date_key = datetime.utcnow().strftime("%Y%m%d")
-            
-            # Total decisions
-            self.redis.hincrby(f"{self.metrics_prefix}decisions:{date_key}", tenant_id, 1)
-            
-            # Decisions by type
-            decision_key = f"{self.metrics_prefix}decisions:{date_key}:{decision}"
-            self.redis.hincrby(decision_key, tenant_id, 1)
-            
-            # Confidence score histogram (bucketed)
-            confidence_bucket = self._bucket_confidence(confidence_score)
-            conf_key = f"{self.metrics_prefix}confidence:{date_key}:{confidence_bucket}"
-            self.redis.hincrby(conf_key, tenant_id, 1)
-            
-            # Risk level distribution
-            risk_key = f"{self.metrics_prefix}risk:{date_key}:{risk_level}"
-            self.redis.hincrby(risk_key, tenant_id, 1)
-            
-            # Latency tracking (running average)
-            latency_key = f"{self.metrics_prefix}latency:{tenant_id}"
-            self.redis.lpush(latency_key, latency_ms)
-            self.redis.ltrim(latency_key, 0, 999)  # Keep last 1000 samples
-            
-            # Set expiry on daily keys (7 days)
-            self.redis.expire(f"{self.metrics_prefix}decisions:{date_key}", 604800)
-            
-        except Exception as e:
-            logger.error(f"Failed to record handoff metrics: {e}")
-    
-    def record_escalation(
-        self,
-        tenant_id: str,
-        priority: str,
-        escalation_reason: str,
-        queue_time_ms: float
-    ):
-        """Record escalation metrics"""
+            p = self.metrics_prefix
+            bucket = self._bucket(confidence_score)
+            pipe = redis.pipeline(transaction=False)
+            pipe.hincrby(f"{p}decisions:{date_key}", tenant_id, 1)
+            pipe.hincrby(f"{p}decisions:{date_key}:{decision}", tenant_id, 1)
+            pipe.hincrby(f"{p}confidence:{date_key}:{bucket}", tenant_id, 1)
+            pipe.hincrby(f"{p}risk:{date_key}:{risk_level}", tenant_id, 1)
+            pipe.lpush(f"{p}latency:{tenant_id}", latency_ms)
+            pipe.ltrim(f"{p}latency:{tenant_id}", 0, 999)
+            pipe.expire(f"{p}decisions:{date_key}", 604800)
+            await pipe.execute(raise_on_error=False)
+        except Exception as exc:
+            logger.debug("record_handoff_decision write failed: %s", exc)
+
+    async def _write_escalation(self, tenant_id, priority, escalation_reason, queue_time_ms):
         try:
+            redis = _get_redis()
             date_key = datetime.utcnow().strftime("%Y%m%d")
-            
-            # Total escalations
-            self.redis.hincrby(f"{self.metrics_prefix}escalations:{date_key}", tenant_id, 1)
-            
-            # Escalations by priority
-            priority_key = f"{self.metrics_prefix}priority:{date_key}:{priority}"
-            self.redis.hincrby(priority_key, tenant_id, 1)
-            
-            # Queue time tracking
-            queue_key = f"{self.metrics_prefix}queue_time:{tenant_id}"
-            self.redis.lpush(queue_key, queue_time_ms)
-            self.redis.ltrim(queue_key, 0, 999)
-            
-        except Exception as e:
-            logger.error(f"Failed to record escalation metrics: {e}")
-    
-    def record_sla_breach(self, tenant_id: str, priority: str, breach_minutes: float):
-        """Record SLA breach"""
+            p = self.metrics_prefix
+            pipe = redis.pipeline(transaction=False)
+            pipe.hincrby(f"{p}escalations:{date_key}", tenant_id, 1)
+            pipe.hincrby(f"{p}priority:{date_key}:{priority}", tenant_id, 1)
+            pipe.lpush(f"{p}queue_time:{tenant_id}", queue_time_ms)
+            pipe.ltrim(f"{p}queue_time:{tenant_id}", 0, 999)
+            await pipe.execute(raise_on_error=False)
+        except Exception as exc:
+            logger.debug("record_escalation write failed: %s", exc)
+
+    async def _write_sla_breach(self, tenant_id, priority, breach_minutes):
         try:
+            redis = _get_redis()
             date_key = datetime.utcnow().strftime("%Y%m%d")
-            
-            # SLA breach counter
-            breach_key = f"{self.metrics_prefix}sla_breach:{date_key}"
-            self.redis.hincrby(breach_key, tenant_id, 1)
-            
-            # Breach time distribution
-            breach_time_key = f"{self.metrics_prefix}breach_time:{tenant_id}"
-            self.redis.lpush(breach_time_key, breach_minutes)
-            self.redis.ltrim(breach_time_key, 0, 999)
-            
-        except Exception as e:
-            logger.error(f"Failed to record SLA breach: {e}")
-    
-    def record_ai_reentry(self, tenant_id: str, success: bool, confidence: float):
-        """Record AI re-entry attempt"""
+            p = self.metrics_prefix
+            pipe = redis.pipeline(transaction=False)
+            pipe.hincrby(f"{p}sla_breach:{date_key}", tenant_id, 1)
+            pipe.lpush(f"{p}breach_time:{tenant_id}", breach_minutes)
+            pipe.ltrim(f"{p}breach_time:{tenant_id}", 0, 999)
+            await pipe.execute(raise_on_error=False)
+        except Exception as exc:
+            logger.debug("record_sla_breach write failed: %s", exc)
+
+    async def _write_ai_reentry(self, tenant_id, success, confidence):
         try:
+            redis = _get_redis()
             date_key = datetime.utcnow().strftime("%Y%m%d")
-            
-            # Total reentry attempts
-            self.redis.hincrby(f"{self.metrics_prefix}reentry:{date_key}", tenant_id, 1)
-            
-            # Success/failure tracking
+            p = self.metrics_prefix
             outcome = "success" if success else "failure"
-            outcome_key = f"{self.metrics_prefix}reentry:{date_key}:{outcome}"
-            self.redis.hincrby(outcome_key, tenant_id, 1)
-            
-        except Exception as e:
-            logger.error(f"Failed to record AI reentry: {e}")
-    
-    def get_handoff_rate(self, tenant_id: str, hours: int = 24) -> float:
-        """Calculate handoff rate (escalations / total decisions)"""
+            pipe = redis.pipeline(transaction=False)
+            pipe.hincrby(f"{p}reentry:{date_key}", tenant_id, 1)
+            pipe.hincrby(f"{p}reentry:{date_key}:{outcome}", tenant_id, 1)
+            await pipe.execute(raise_on_error=False)
+        except Exception as exc:
+            logger.debug("record_ai_reentry write failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Async read methods
+    # ------------------------------------------------------------------
+
+    async def get_handoff_rate(self, tenant_id, hours=24):
         try:
-            total_decisions = 0
-            total_escalations = 0
-            
+            redis = _get_redis()
+            decisions = escalations = 0
             for h in range(hours):
-                date_key = (datetime.utcnow() - timedelta(hours=h)).strftime("%Y%m%d")
-                
-                decisions = int(self.redis.hget(f"{self.metrics_prefix}decisions:{date_key}", tenant_id) or 0)
-                escalations = int(self.redis.hget(f"{self.metrics_prefix}escalations:{date_key}", tenant_id) or 0)
-                
-                total_decisions += decisions
-                total_escalations += escalations
-            
-            if total_decisions == 0:
-                return 0.0
-            
-            return total_escalations / total_decisions
-        except Exception as e:
-            logger.error(f"Failed to calculate handoff rate: {e}")
+                dk = (datetime.utcnow() - timedelta(hours=h)).strftime("%Y%m%d")
+                d = await redis.hget(f"{self.metrics_prefix}decisions:{dk}", tenant_id)
+                e = await redis.hget(f"{self.metrics_prefix}escalations:{dk}", tenant_id)
+                decisions += int(d or 0)
+                escalations += int(e or 0)
+            return escalations / decisions if decisions else 0.0
+        except Exception:
             return 0.0
-    
-    def get_average_latency(self, tenant_id: str) -> float:
-        """Get average handoff decision latency"""
+
+    async def get_average_latency(self, tenant_id):
         try:
-            latency_key = f"{self.metrics_prefix}latency:{tenant_id}"
-            samples = self.redis.lrange(latency_key, 0, -1)
-            
+            redis = _get_redis()
+            samples = await redis.lrange(f"{self.metrics_prefix}latency:{tenant_id}", 0, -1)
             if not samples:
                 return 0.0
-            
-            latencies = [float(s) for s in samples]
-            return sum(latencies) / len(latencies)
-        except Exception as e:
-            logger.error(f"Failed to calculate average latency: {e}")
+            vals = [float(s) for s in samples]
+            return sum(vals) / len(vals)
+        except Exception:
             return 0.0
-    
-    def get_sla_compliance_rate(self, tenant_id: str, hours: int = 24) -> float:
-        """Calculate SLA compliance rate"""
+
+    async def get_sla_compliance_rate(self, tenant_id, hours=24):
         try:
-            total_escalations = 0
-            total_breaches = 0
-            
+            redis = _get_redis()
+            total = breaches = 0
             for h in range(hours):
-                date_key = (datetime.utcnow() - timedelta(hours=h)).strftime("%Y%m%d")
-                
-                escalations = int(self.redis.hget(f"{self.metrics_prefix}escalations:{date_key}", tenant_id) or 0)
-                breaches = int(self.redis.hget(f"{self.metrics_prefix}sla_breach:{date_key}", tenant_id) or 0)
-                
-                total_escalations += escalations
-                total_breaches += breaches
-            
-            if total_escalations == 0:
-                return 1.0
-            
-            return 1.0 - (total_breaches / total_escalations)
-        except Exception as e:
-            logger.error(f"Failed to calculate SLA compliance: {e}")
+                dk = (datetime.utcnow() - timedelta(hours=h)).strftime("%Y%m%d")
+                e = await redis.hget(f"{self.metrics_prefix}escalations:{dk}", tenant_id)
+                b = await redis.hget(f"{self.metrics_prefix}sla_breach:{dk}", tenant_id)
+                total += int(e or 0)
+                breaches += int(b or 0)
+            return 1.0 if total == 0 else 1.0 - (breaches / total)
+        except Exception:
             return 0.0
-    
-    def get_priority_distribution(self, tenant_id: str, hours: int = 24) -> Dict[str, int]:
-        """Get escalation priority distribution"""
+
+    async def get_priority_distribution(self, tenant_id, hours=24):
         try:
-            distribution = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-            
+            redis = _get_redis()
+            out = {"critical": 0, "high": 0, "medium": 0, "low": 0}
             for h in range(hours):
-                date_key = (datetime.utcnow() - timedelta(hours=h)).strftime("%Y%m%d")
-                
-                for priority in distribution.keys():
-                    priority_key = f"{self.metrics_prefix}priority:{date_key}:{priority}"
-                    count = int(self.redis.hget(priority_key, tenant_id) or 0)
-                    distribution[priority] += count
-            
-            return distribution
-        except Exception as e:
-            logger.error(f"Failed to get priority distribution: {e}")
+                dk = (datetime.utcnow() - timedelta(hours=h)).strftime("%Y%m%d")
+                for pri in out:
+                    v = await redis.hget(f"{self.metrics_prefix}priority:{dk}:{pri}", tenant_id)
+                    out[pri] += int(v or 0)
+            return out
+        except Exception:
             return {}
-    
-    def get_dashboard_metrics(self, tenant_id: str) -> Dict:
-        """Get comprehensive dashboard metrics"""
+
+    async def get_dashboard_metrics(self, tenant_id):
         return {
-            "handoff_rate_24h": self.get_handoff_rate(tenant_id, 24),
-            "avg_latency_ms": self.get_average_latency(tenant_id),
-            "sla_compliance_24h": self.get_sla_compliance_rate(tenant_id, 24),
-            "priority_distribution_24h": self.get_priority_distribution(tenant_id, 24),
-            "generated_at": datetime.utcnow().isoformat()
+            "handoff_rate_24h":          await self.get_handoff_rate(tenant_id),
+            "avg_latency_ms":            await self.get_average_latency(tenant_id),
+            "sla_compliance_24h":        await self.get_sla_compliance_rate(tenant_id),
+            "priority_distribution_24h": await self.get_priority_distribution(tenant_id),
+            "generated_at":              datetime.utcnow().isoformat(),
         }
-    
-    def _bucket_confidence(self, confidence: float) -> str:
-        """Bucket confidence score for histogram"""
+
+    @staticmethod
+    def _bucket(confidence):
         if confidence >= 0.9:
             return "0.9-1.0"
         elif confidence >= 0.8:
@@ -215,5 +193,9 @@ class HandoffMetrics:
             return "0.7-0.8"
         elif confidence >= 0.6:
             return "0.6-0.7"
-        else:
-            return "0.0-0.6"
+        return "0.0-0.6"
+
+    _bucket_confidence = _bucket
+
+
+__all__ = ["HandoffMetrics"]
