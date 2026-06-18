@@ -132,12 +132,14 @@ async def process_event(event: dict) -> dict:
     for s in si:
         logger.info("[INTENT]  secondary: %-22s  conf=%.2f", s.get("category", "?"), s.get("confidence", 0.0))
     products = ee.get("products", [])
+    specs    = ee.get("specifications", [])
     techs    = ee.get("technologies", [])
     industs  = ee.get("industries", [])
-    if products:  logger.info("[ENTITIES] products     : %s", ", ".join(products))
-    if techs:     logger.info("[ENTITIES] technologies : %s", ", ".join(techs))
-    if industs:   logger.info("[ENTITIES] industries   : %s", ", ".join(industs))
-    if not products and not techs and not industs:
+    if products: logger.info("[ENTITIES] products        : %s", ", ".join(products))
+    if specs:    logger.info("[ENTITIES] specifications  : %s", ", ".join(specs))
+    if techs:    logger.info("[ENTITIES] technologies    : %s", ", ".join(techs))
+    if industs:  logger.info("[ENTITIES] industries      : %s", ", ".join(industs))
+    if not any([products, specs, techs, industs]):
         logger.info("[ENTITIES] none extracted")
     for cat_entry in rs.get("categories", []):
         logger.info("[RETRIEVAL] cat=%-22s  priority=%d  queries=%d",
@@ -152,6 +154,12 @@ async def process_event(event: dict) -> dict:
     logger.info("[CONSTRAINTS] must_include=%s  min_confidence=%.2f",
                 rc.get("must_include_categories", []),
                 rc.get("minimum_confidence", 0.75))
+    rd = p1_output.get("routing_decision", {})
+    logger.info("[ROUTING]  human_needed=%s  escalation=%s  dept=%s  priority=%s",
+                rd.get("requires_human_attention", False),
+                rd.get("escalation_requested", False),
+                rd.get("routing_department", "?"),
+                rd.get("routing_priority", "?"))
     if p1_status == "fallback":
         logger.warning("[P1 STATUS] FALLBACK — reason: %s", p1_meta.get("reason", "unknown"))
     else:

@@ -1,28 +1,24 @@
 """
 automationservice — LLM Processor #1: Analysis & Retrieval Planning
 
-Responsibilities:
-  - Build a structured conversation string for the LLM
-  - Call OpenAI with the enterprise system prompt
-  - Validate and repair the JSON output against the required schema
-  - Return a guaranteed-valid Processor1Output dict
-
-Enterprise hardening:
-  - Pre-flight analytics keyword check (avoids LLM mistake on analytics flag)
-  - Retry with exponential backoff (up to OPENAI_MAX_RETRIES from config)
-  - JSON extraction from markdown fences if model wraps output
-  - Schema validation with field-level type coercion
-  - Fallback to safe minimal output on total failure (never raises to caller)
-  - Strict allowed-category enforcement (strips hallucinated categories)
+Fixes applied (all 8 problems from log analysis):
+  1. Action-first intent: ESCALATION_TRIGGER_WORDS override sentiment-based classification
+  2. Query specificity: minimum 2 queries per category enforced in validator
+  3. Entity expansion: specifications[] field added alongside products/technologies/industries
+  4. Confidence calibration: short/greeting messages capped at 0.45 before validation
+  5. Conversation topic specificity: validated in prompt (no code-level fix needed)
+  6. Current focus enforcement: handled in prompt (latest message priority)
+  7. Context-aware query rewriting: handled in prompt + user template
+  8. Escalation detection: routing_decision{} block validated and repaired
 """
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import os
 import re
 import sys
 import time
-import asyncio
 from typing import Any
 
 _LLM_DIR      = os.path.dirname(os.path.abspath(__file__))
@@ -46,7 +42,6 @@ from llm.prompts import (
 
 logger = logging.getLogger("automationservice.processor_1")
 
-# Lazy singleton client — created once, reused across all calls
 _client: AsyncOpenAI | None = None
 
 
@@ -57,7 +52,7 @@ def _get_client() -> AsyncOpenAI:
         _client = AsyncOpenAI(
             api_key=cfg.OPENAI_API_KEY,
             timeout=cfg.OPENAI_TIMEOUT_SECONDS,
-            max_retries=0,   # we handle retries ourselves for precise control
+            max_retries=0,
         )
     return _client
 
@@ -68,7 +63,17 @@ VALID_STAGES     = {"awareness", "discovery", "evaluation", "comparison", "purch
                     "post_purchase", "support", "escalation", "renewal", "retention", "unknown"}
 VALID_SENTIMENTS = {"positive", "neutral", "negative", "frustrated", "urgent", "unknown"}
 VALID_URGENCY    = {"low", "normal", "high", "critical"}
+VALID_PRIORITY   = {"critical", "high", "normal", "low"}
 ALLOWED_CAT_SET  = set(ALLOWED_CATEGORIES)
+
+# Words that FORCE contact_support into the intent regardless of sentiment
+ESCALATION_TRIGGER_WORDS = {
+    "manager", "senior", "supervisor", "escalate", "escalation",
+    "connect me", "transfer me", "speak to", "talk to", "another person",
+    "someone else", "your team", "support team", "contact details",
+    "phone number", "email address", "customer success", "head of",
+    "in charge", "department", "representative",
+}
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
@@ -80,20 +85,11 @@ async def run_processor_1(
 ) -> dict:
     """
     Execute LLM Call #1: Analysis & Retrieval Planning.
-
-    Args:
-        messages:          Full conversation history (oldest → newest), each a row from es_messages.
-        latest_message:    The triggering incoming message row from es_messages.
-        conversation_meta: The es_conversations row for this thread.
-
-    Returns:
-        A guaranteed-valid Processor1Output dict. Never raises.
-        On total failure, returns a safe fallback dict with status="fallback".
+    Never raises. Returns a guaranteed-valid dict.
     """
-    t0 = time.monotonic()
+    t0  = time.monotonic()
     cfg = get_config()
 
-    # ── Build inputs ───────────────────────────────────────────────────────────
     conversation_str = _build_conversation_string(messages, latest_message)
     latest_body      = (latest_message.get("content") or "").strip()
     subject          = conversation_meta.get("subject") or ""
@@ -110,28 +106,37 @@ async def run_processor_1(
         participants         = ", ".join(participants) if participants else "unknown",
     )
 
-    # ── Pre-flight analytics detection ────────────────────────────────────────
-    # Check analytics keywords in the ENTIRE conversation, not just latest message.
-    # This catches cases where the LLM might miss the keyword.
-    all_text_lower = " ".join(
-        (m.get("content") or "") for m in messages
-    ).lower()
+    # ── Pre-flight checks ──────────────────────────────────────────────────────
+    all_text_lower      = " ".join((m.get("content") or "") for m in messages).lower()
     preflight_analytics = bool(ANALYTICS_KEYWORDS & set(re.findall(r'\b\w+\b', all_text_lower)))
 
-    # ── Call OpenAI with retry ─────────────────────────────────────────────────
-    raw_output = None
-    last_error = None
+    # Detect escalation triggers in latest message for post-validation override
+    latest_lower      = latest_body.lower()
+    preflight_escalation = any(t in latest_lower for t in ESCALATION_TRIGGER_WORDS)
+
+    # Calibrate max confidence for very short messages before sending to LLM.
+    # The LLM has a tendency to return 0.95 for everything including "hello".
+    body_word_count = len(latest_body.split()) if latest_body else 0
+    if body_word_count <= 2:
+        max_confidence = 0.45   # "hi", "ok", "yes" — genuinely ambiguous
+    elif body_word_count <= 5:
+        max_confidence = 0.75   # "any offers?" — partial context
+    else:
+        max_confidence = 1.0    # full sentence — no cap
+
+    # ── OpenAI call with retry ─────────────────────────────────────────────────
+    raw_output  = None
+    last_error  = None
     max_retries = max(1, cfg.OPENAI_MAX_RETRIES)
 
     for attempt in range(1, max_retries + 1):
         try:
-            client = _get_client()
-            response = await client.chat.completions.create(
-                model       = cfg.OPENAI_MODEL,
-                temperature = 0.0,        # deterministic — critical for extraction tasks
-                top_p       = 1.0,
-                seed        = 42,         # reproducible outputs across identical inputs
-                response_format = {"type": "json_object"},  # forces JSON mode
+            response = await _get_client().chat.completions.create(
+                model           = cfg.OPENAI_MODEL,
+                temperature     = 0.0,
+                top_p           = 1.0,
+                seed            = 42,
+                response_format = {"type": "json_object"},
                 messages = [
                     {"role": "system", "content": PROCESSOR_1_SYSTEM_PROMPT},
                     {"role": "user",   "content": user_prompt},
@@ -143,26 +148,22 @@ async def run_processor_1(
         except RateLimitError as e:
             last_error = e
             wait = 2 ** attempt
-            logger.warning("[P1] rate limit on attempt %d/%d — waiting %ds: %s",
-                           attempt, max_retries, wait, e)
+            logger.warning("[P1] rate limit attempt %d/%d — wait %ds", attempt, max_retries, wait)
             if attempt < max_retries:
                 await asyncio.sleep(wait)
 
         except (APITimeoutError, APIConnectionError) as e:
             last_error = e
-            wait = 1 * attempt
-            logger.warning("[P1] transient error on attempt %d/%d — waiting %ds: %s",
-                           attempt, max_retries, wait, e)
+            wait = attempt
+            logger.warning("[P1] transient error attempt %d/%d — wait %ds: %s", attempt, max_retries, wait, e)
             if attempt < max_retries:
                 await asyncio.sleep(wait)
 
         except APIStatusError as e:
             last_error = e
-            # 5xx → retry; 4xx (except 429) → do not retry
             if e.status_code >= 500 and attempt < max_retries:
                 wait = 2 ** attempt
-                logger.warning("[P1] API status %d on attempt %d/%d — waiting %ds",
-                               e.status_code, attempt, max_retries, wait)
+                logger.warning("[P1] API %d attempt %d/%d — wait %ds", e.status_code, attempt, max_retries, wait)
                 await asyncio.sleep(wait)
             else:
                 logger.error("[P1] non-retryable API error %d: %s", e.status_code, e)
@@ -170,23 +171,27 @@ async def run_processor_1(
 
         except Exception as e:
             last_error = e
-            logger.error("[P1] unexpected error on attempt %d/%d: %s", attempt, max_retries, e)
+            logger.error("[P1] unexpected error attempt %d/%d: %s", attempt, max_retries, e)
             break
 
     elapsed_ms = (time.monotonic() - t0) * 1000
 
     if raw_output is None:
-        logger.error("[P1] all attempts failed | last_error=%s | elapsed=%.0fms",
-                     last_error, elapsed_ms)
+        logger.error("[P1] all attempts failed | %s | elapsed=%.0fms", last_error, elapsed_ms)
         return _build_fallback(latest_body, subject, str(last_error))
 
-    # ── Parse & validate ───────────────────────────────────────────────────────
     parsed = _parse_json(raw_output)
     if parsed is None:
         logger.error("[P1] JSON parse failure | raw=%s...", raw_output[:200])
         return _build_fallback(latest_body, subject, "json_parse_failure")
 
-    validated = _validate_and_repair(parsed, latest_body, preflight_analytics)
+    validated = _validate_and_repair(
+        parsed,
+        latest_body,
+        preflight_analytics,
+        preflight_escalation,
+        max_confidence,
+    )
     validated["_meta"] = {
         "elapsed_ms": round(elapsed_ms, 1),
         "model":      cfg.OPENAI_MODEL,
@@ -194,71 +199,53 @@ async def run_processor_1(
         "status":     "ok",
     }
 
+    total_queries = sum(
+        len(c.get("search_queries", []))
+        for c in validated.get("retrieval_strategy", {}).get("categories", [])
+    )
     logger.info(
-        "[P1] complete | intent=%s confidence=%.2f queries=%d analytics=%s elapsed=%.0fms",
+        "[P1] complete | intent=%s conf=%.2f queries=%d analytics=%s escalation=%s elapsed=%.0fms",
         validated.get("intent_analysis", {}).get("primary_intent", {}).get("category", "?"),
         validated.get("conversation_analysis", {}).get("confidence", 0.0),
-        sum(
-            len(c.get("search_queries", []))
-            for c in validated.get("retrieval_strategy", {}).get("categories", [])
-        ),
+        total_queries,
         validated.get("analytics_decision", {}).get("requires_analytics", False),
+        validated.get("routing_decision", {}).get("escalation_requested", False),
         elapsed_ms,
     )
-
     return validated
 
 
 # ── Conversation string builder ────────────────────────────────────────────────
 
 def _build_conversation_string(messages: list[dict], latest_message: dict) -> str:
-    """
-    Format the conversation history into a clean, LLM-readable string.
-    Excludes the latest message (it is passed separately).
-    Direction labels: CUSTOMER / AGENT
-    """
-    lines = []
+    lines     = []
     latest_id = latest_message.get("message_id", "")
-
     for msg in messages:
         if msg.get("message_id") == latest_id:
-            continue  # latest message is passed separately
+            continue
         direction = (msg.get("direction") or "").upper()
-        role = "CUSTOMER" if direction == "INCOMING" else "AGENT"
-        content = (msg.get("content") or "").strip()
-        ts      = (msg.get("timestamp") or "")[:16]
+        role      = "CUSTOMER" if direction == "INCOMING" else "AGENT"
+        content   = (msg.get("content") or "").strip()
+        ts        = (msg.get("timestamp") or "")[:16]
         if content:
             lines.append(f"[{ts}] {role}: {content}")
-
-    if not lines:
-        return "(no prior conversation history)"
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "(no prior conversation history)"
 
 
 # ── JSON parsing ───────────────────────────────────────────────────────────────
 
 def _parse_json(raw: str) -> dict | None:
-    """
-    Parse JSON from the model output.
-    Handles: clean JSON, markdown code fences, leading/trailing whitespace.
-    """
     raw = raw.strip()
-
-    # Try direct parse first
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
-
-    # Strip markdown fences: ```json ... ``` or ``` ... ```
-    fence_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", raw)
-    if fence_match:
+    m = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", raw)
+    if m:
         try:
-            return json.loads(fence_match.group(1))
+            return json.loads(m.group(1))
         except json.JSONDecodeError:
             pass
-
-    # Find the outermost JSON object by bracket matching
     start = raw.find("{")
     if start != -1:
         depth = 0
@@ -272,105 +259,132 @@ def _parse_json(raw: str) -> dict | None:
                         return json.loads(raw[start:i + 1])
                     except json.JSONDecodeError:
                         break
-
     return None
 
 
 # ── Schema validation & repair ─────────────────────────────────────────────────
 
-def _validate_and_repair(data: dict, latest_body: str, preflight_analytics: bool) -> dict:
-    """
-    Validate the parsed output against the required schema.
-    Repairs field-by-field rather than rejecting the whole output.
-    Enforces allowed categories and pre-flight analytics override.
-    """
+def _validate_and_repair(
+    data: dict,
+    latest_body: str,
+    preflight_analytics: bool,
+    preflight_escalation: bool,
+    max_confidence: float,
+) -> dict:
 
-    # ── pipeline_version ──────────────────────────────────────────────────────
     data["pipeline_version"] = "1.0"
 
     # ── conversation_analysis ─────────────────────────────────────────────────
     ca = data.get("conversation_analysis") if isinstance(data.get("conversation_analysis"), dict) else {}
 
-    ca["conversation_topic"]  = _str(ca.get("conversation_topic"),  "unknown")
-    ca["current_focus"]       = _str(ca.get("current_focus"),       "unknown")
-    ca["customer_goal"]       = _str(ca.get("customer_goal"),       "unknown")
-    ca["latest_message"]      = _str(ca.get("latest_message"),      latest_body or "unknown")
-    ca["resolved_reference"]  = _str(ca.get("resolved_reference"),  ca["latest_message"])
-    ca["standalone_query"]    = _str(ca.get("standalone_query"),     ca["current_focus"])
-    ca["conversation_stage"]  = ca.get("conversation_stage") if ca.get("conversation_stage") in VALID_STAGES else "unknown"
-    ca["customer_sentiment"]  = ca.get("customer_sentiment") if ca.get("customer_sentiment") in VALID_SENTIMENTS else "unknown"
-    ca["urgency"]             = ca.get("urgency") if ca.get("urgency") in VALID_URGENCY else "normal"
-    ca["confidence"]          = _clamp(ca.get("confidence"), 0.0, 1.0, 0.5)
-
+    ca["conversation_topic"] = _str(ca.get("conversation_topic"), "unknown")
+    ca["current_focus"]      = _str(ca.get("current_focus"),      "unknown")
+    ca["customer_goal"]      = _str(ca.get("customer_goal"),       "unknown")
+    ca["latest_message"]     = _str(ca.get("latest_message"),      latest_body or "unknown")
+    ca["resolved_reference"] = _str(ca.get("resolved_reference"),  ca["latest_message"])
+    ca["standalone_query"]   = _str(ca.get("standalone_query"),    ca["current_focus"])
+    ca["conversation_stage"] = ca.get("conversation_stage") if ca.get("conversation_stage") in VALID_STAGES else "unknown"
+    ca["customer_sentiment"] = ca.get("customer_sentiment") if ca.get("customer_sentiment") in VALID_SENTIMENTS else "unknown"
+    ca["urgency"]            = ca.get("urgency") if ca.get("urgency") in VALID_URGENCY else "normal"
+    # Apply max_confidence cap — prevents LLM returning 0.95 for "hello"
+    raw_conf             = _clamp(ca.get("confidence"), 0.0, 1.0, 0.5)
+    ca["confidence"]     = min(raw_conf, max_confidence)
     data["conversation_analysis"] = ca
 
     # ── intent_analysis ───────────────────────────────────────────────────────
     ia = data.get("intent_analysis") if isinstance(data.get("intent_analysis"), dict) else {}
 
-    pi = ia.get("primary_intent") if isinstance(ia.get("primary_intent"), dict) else {}
+    pi     = ia.get("primary_intent") if isinstance(ia.get("primary_intent"), dict) else {}
     pi_cat = pi.get("category", "")
     if pi_cat not in ALLOWED_CAT_SET:
-        # Attempt to infer from standalone_query
         pi_cat = _infer_category(ca.get("standalone_query", ""))
     pi["category"]   = pi_cat
     pi["confidence"] = _clamp(pi.get("confidence"), 0.0, 1.0, 0.5)
     pi["reason"]     = _str(pi.get("reason"), "inferred from conversation")
+
+    # ESCALATION OVERRIDE (Problem 1 fix):
+    # If pre-flight detected escalation triggers AND primary is not contact_support,
+    # demote current primary to secondary and force contact_support as primary.
+    raw_secondary = ia.get("secondary_intents") if isinstance(ia.get("secondary_intents"), list) else []
+    secondary_cats = {
+        s["category"]: _clamp(s.get("confidence"), 0.0, 1.0, 0.5)
+        for s in raw_secondary
+        if isinstance(s, dict) and s.get("category") in ALLOWED_CAT_SET
+    }
+
+    if preflight_escalation and pi["category"] != "contact_support":
+        # Demote current primary to secondary
+        if pi["category"] and pi["category"] not in secondary_cats:
+            secondary_cats[pi["category"]] = pi["confidence"]
+        # Force contact_support as primary
+        pi["category"]   = "contact_support"
+        pi["confidence"] = max(pi["confidence"], 0.90)
+        pi["reason"]     = "Customer explicitly requested escalation or contact with a representative."
+
     ia["primary_intent"] = pi
 
-    # Secondary intents — strip invalid categories
-    raw_secondary = ia.get("secondary_intents") if isinstance(ia.get("secondary_intents"), list) else []
     ia["secondary_intents"] = [
-        {"category": s["category"], "confidence": _clamp(s.get("confidence"), 0.0, 1.0, 0.5)}
-        for s in raw_secondary
-        if isinstance(s, dict) and s.get("category") in ALLOWED_CAT_SET and _clamp(s.get("confidence"), 0.0, 1.0, 0.0) > 0.4
+        {"category": cat, "confidence": conf}
+        for cat, conf in secondary_cats.items()
+        if cat != pi["category"] and conf > 0.4
     ]
-
-    all_cats = list({pi["category"]} | {s["category"] for s in ia["secondary_intents"]} if pi["category"] else set())
+    all_cats = list({pi["category"]} | {s["category"] for s in ia["secondary_intents"]})
     ia["all_categories"] = all_cats
     data["intent_analysis"] = ia
 
-    # ── entity_extraction ─────────────────────────────────────────────────────
+    # ── entity_extraction (expanded — Problem 3 fix) ──────────────────────────
     ee = data.get("entity_extraction") if isinstance(data.get("entity_extraction"), dict) else {}
-    ee["products"]      = _str_list(ee.get("products"))
-    ee["technologies"]  = _str_list(ee.get("technologies"))
-    ee["industries"]    = _str_list(ee.get("industries"))
+    ee["products"]       = _str_list(ee.get("products"))
+    ee["specifications"] = _str_list(ee.get("specifications"))
+    ee["technologies"]   = _str_list(ee.get("technologies"))
+    ee["industries"]     = _str_list(ee.get("industries"))
     data["entity_extraction"] = ee
 
-    # ── retrieval_strategy ────────────────────────────────────────────────────
-    rs = data.get("retrieval_strategy") if isinstance(data.get("retrieval_strategy"), dict) else {}
+    # ── retrieval_strategy (minimum 2 queries enforced — Problem 2 fix) ───────
+    rs       = data.get("retrieval_strategy") if isinstance(data.get("retrieval_strategy"), dict) else {}
     raw_cats = rs.get("categories") if isinstance(rs.get("categories"), list) else []
 
     valid_cats = []
     seen_cats  = set()
+    standalone = ca.get("standalone_query", "")
+
     for entry in raw_cats:
         if not isinstance(entry, dict):
             continue
         cat = entry.get("category", "")
         if cat not in ALLOWED_CAT_SET or cat in seen_cats:
             continue
-        queries = _str_list(entry.get("search_queries"))
-        # Filter blank/too-short queries
-        queries = [q for q in queries if len(q.strip()) > 8]
+        queries = [q.strip() for q in _str_list(entry.get("search_queries")) if len(q.strip()) > 8]
         if not queries:
             continue
+
+        # Enforce minimum 2 queries per category (Problem 2 fix)
+        if len(queries) < 2 and standalone and standalone not in queries:
+            queries.append(standalone)
+
         valid_cats.append({
             "category":      cat,
             "priority":      max(1, min(5, int(entry.get("priority", 99)))),
-            "search_queries": queries[:5],  # cap at 5 per category
+            "search_queries": queries[:5],
         })
         seen_cats.add(cat)
-        if len(valid_cats) >= 3:  # max 3 categories
+        if len(valid_cats) >= 3:
             break
 
-    # Guarantee primary intent category is always in retrieval_strategy
+    # Guarantee primary intent is always present in retrieval_strategy
     if pi["category"] and pi["category"] not in seen_cats:
-        fallback_query = ca.get("standalone_query") or ca.get("current_focus") or "general inquiry"
+        q1 = standalone or ca.get("current_focus") or "general inquiry"
+        # Build a second query from resolved_reference for minimum-2 enforcement
+        q2 = ca.get("resolved_reference", "")
+        queries = [q for q in [q1, q2] if q and len(q) > 8 and q != q1 or q == q1]
+        queries = list(dict.fromkeys(queries))  # deduplicate preserving order
+        if len(queries) < 2:
+            queries.append(f"{pi['category'].replace('_', ' ')} inquiry")
         valid_cats.insert(0, {
             "category":      pi["category"],
             "priority":      1,
-            "search_queries": [fallback_query],
+            "search_queries": queries[:5],
         })
-        # Re-sort by priority
         valid_cats = sorted(valid_cats, key=lambda x: x["priority"])
 
     rs["categories"] = valid_cats
@@ -378,13 +392,10 @@ def _validate_and_repair(data: dict, latest_body: str, preflight_analytics: bool
 
     # ── analytics_decision ────────────────────────────────────────────────────
     ad = data.get("analytics_decision") if isinstance(data.get("analytics_decision"), dict) else {}
-
-    # Pre-flight override: if keywords detected but LLM missed it, force True
     requires_analytics = bool(ad.get("requires_analytics", False))
     if preflight_analytics and not requires_analytics:
         requires_analytics = True
         logger.debug("[P1] pre-flight analytics override applied")
-
     if not requires_analytics:
         ad["requires_analytics"]   = False
         ad["analytics_categories"] = []
@@ -392,30 +403,61 @@ def _validate_and_repair(data: dict, latest_body: str, preflight_analytics: bool
         ad["requires_analytics"] = True
         raw_ac = ad.get("analytics_categories") if isinstance(ad.get("analytics_categories"), list) else []
         ad["analytics_categories"] = [
-            {"primary_category": _str(a.get("primary_category"), "unknown"), "reason": _str(a.get("reason"), "analytics keyword detected")}
-            for a in raw_ac
-            if isinstance(a, dict)
-        ] or [{"primary_category": pi["category"] or "product_service", "reason": "analytics keyword detected in conversation"}]
-
+            {
+                "primary_category": _str(a.get("primary_category"), "unknown"),
+                "reason":           _str(a.get("reason"), "analytics keyword detected"),
+            }
+            for a in raw_ac if isinstance(a, dict)
+        ] or [{"primary_category": pi["category"] or "product_service",
+               "reason": "analytics keyword detected in conversation"}]
     data["analytics_decision"] = ad
 
     # ── retrieval_constraints ─────────────────────────────────────────────────
-    rc = data.get("retrieval_constraints") if isinstance(data.get("retrieval_constraints"), dict) else {}
-
-    mic = _str_list(rc.get("must_include_categories"))
-    mic = [c for c in mic if c in ALLOWED_CAT_SET]
+    rc  = data.get("retrieval_constraints") if isinstance(data.get("retrieval_constraints"), dict) else {}
+    mic = [c for c in _str_list(rc.get("must_include_categories")) if c in ALLOWED_CAT_SET]
     if not mic and pi["category"]:
         mic = [pi["category"]]
-
-    mec = _str_list(rc.get("must_exclude_categories"))
-    mec = [c for c in mec if c in ALLOWED_CAT_SET and c not in mic]
-
+    mec      = [c for c in _str_list(rc.get("must_exclude_categories")) if c in ALLOWED_CAT_SET and c not in mic]
     min_conf = _clamp(rc.get("minimum_confidence"), 0.5, 1.0, 0.75)
-
     rc["must_include_categories"] = mic
     rc["must_exclude_categories"] = mec
     rc["minimum_confidence"]      = min_conf
     data["retrieval_constraints"] = rc
+
+    # ── routing_decision (Problem 8 fix — new block) ──────────────────────────
+    rd = data.get("routing_decision") if isinstance(data.get("routing_decision"), dict) else {}
+
+    escalation_requested = bool(rd.get("escalation_requested", False)) or preflight_escalation
+
+    sentiment  = ca.get("customer_sentiment", "unknown")
+    urgency    = ca.get("urgency", "normal")
+    is_issue   = pi["category"] == "issue_resolution"
+    is_contact = pi["category"] == "contact_support"
+
+    requires_human = (
+        escalation_requested
+        or sentiment in ("frustrated",)
+        or urgency in ("high", "critical")
+        or (is_issue and sentiment in ("negative", "frustrated"))
+    )
+
+    # Routing priority
+    if escalation_requested and sentiment == "frustrated":
+        r_priority = "critical"
+    elif escalation_requested or urgency == "high":
+        r_priority = "high"
+    elif urgency == "critical":
+        r_priority = "critical"
+    else:
+        r_priority = _str(rd.get("routing_priority"), "normal")
+        if r_priority not in VALID_PRIORITY:
+            r_priority = "normal"
+
+    rd["requires_human_attention"] = requires_human
+    rd["escalation_requested"]     = escalation_requested
+    rd["routing_department"]       = _str(rd.get("routing_department"), pi["category"] or "product_service")
+    rd["routing_priority"]         = r_priority
+    data["routing_decision"] = rd
 
     return data
 
@@ -423,14 +465,9 @@ def _validate_and_repair(data: dict, latest_body: str, preflight_analytics: bool
 # ── Fallback output ────────────────────────────────────────────────────────────
 
 def _build_fallback(latest_body: str, subject: str, reason: str) -> dict:
-    """
-    Return a safe minimal output when Processor 1 fails completely.
-    This allows the pipeline to continue with degraded quality rather than crashing.
-    The fallback always generates at least one search query from the available text.
-    """
     query = (latest_body or subject or "customer inquiry").strip()
     cat   = _infer_category(query)
-
+    q2    = f"{cat.replace('_', ' ')} related inquiry"
     return {
         "pipeline_version": "1.0",
         "conversation_analysis": {
@@ -450,15 +487,21 @@ def _build_fallback(latest_body: str, subject: str, reason: str) -> dict:
             "secondary_intents": [],
             "all_categories":    [cat],
         },
-        "entity_extraction": {"products": [], "technologies": [], "industries": []},
+        "entity_extraction": {"products": [], "specifications": [], "technologies": [], "industries": []},
         "retrieval_strategy": {
-            "categories": [{"category": cat, "priority": 1, "search_queries": [query[:300]]}],
+            "categories": [{"category": cat, "priority": 1, "search_queries": [query[:300], q2]}],
         },
-        "analytics_decision": {"requires_analytics": False, "analytics_categories": []},
+        "analytics_decision":  {"requires_analytics": False, "analytics_categories": []},
         "retrieval_constraints": {
             "must_include_categories": [cat],
             "must_exclude_categories": [],
             "minimum_confidence":      0.6,
+        },
+        "routing_decision": {
+            "requires_human_attention": False,
+            "escalation_requested":     False,
+            "routing_department":       cat,
+            "routing_priority":         "normal",
         },
         "_meta": {"status": "fallback", "reason": reason, "elapsed_ms": 0.0},
     }
@@ -467,15 +510,12 @@ def _build_fallback(latest_body: str, subject: str, reason: str) -> dict:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _str(value: Any, default: str = "unknown") -> str:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return default
+    return value.strip() if isinstance(value, str) and value.strip() else default
 
 
 def _clamp(value: Any, lo: float, hi: float, default: float) -> float:
     try:
-        v = float(value)
-        return max(lo, min(hi, v))
+        return max(lo, min(hi, float(value)))
     except (TypeError, ValueError):
         return default
 
@@ -487,10 +527,6 @@ def _str_list(value: Any) -> list[str]:
 
 
 def _infer_category(text: str) -> str:
-    """
-    Simple keyword-based category inference used when the LLM returns
-    an invalid or missing category. Returns the most likely allowed category.
-    """
     t = text.lower()
     if any(w in t for w in ("ship", "deliver", "track", "logistic", "dispatch")):
         return "delivery_shipping"
@@ -500,7 +536,7 @@ def _infer_category(text: str) -> str:
         return "policies_legal"
     if any(w in t for w in ("problem", "issue", "error", "bug", "broken", "not working", "complaint")):
         return "issue_resolution"
-    if any(w in t for w in ("contact", "support", "help", "reach", "phone", "email address")):
+    if any(w in t for w in ("contact", "support", "help", "reach", "phone", "email address", "manager", "senior")):
         return "contact_support"
     if any(w in t for w in ("about", "company", "who are", "mission", "history", "location")):
         return "company_info"
