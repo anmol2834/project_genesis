@@ -184,12 +184,21 @@ def _build_category_filter(user_id: str, category: str):
         user_id  == user_id    (multi-tenancy isolation — NON-NEGOTIABLE)
         category == category   (category isolation — reduces noise)
         is_deleted != true     (exclude soft-deleted entries if indexed)
+
+    For offers_promotions: additionally filters status == "active" at vector
+    search time to exclude inactive/scheduled offers before scoring.
     """
     from qdrant_client.models import Filter, FieldCondition, MatchValue
-    return Filter(must=[
+    conditions = [
         FieldCondition(key="user_id",  match=MatchValue(value=user_id)),
         FieldCondition(key="category", match=MatchValue(value=category)),
-    ])
+    ]
+    # Fix 6: For offers, only search active offers at the Qdrant filter level
+    if category == "offers_promotions":
+        conditions.append(
+            FieldCondition(key="status", match=MatchValue(value="active"))
+        )
+    return Filter(must=conditions)
 
 
 def _build_analytics_filter(user_id: str, primary_category: str):
@@ -288,7 +297,7 @@ async def _analytics_dense_search(
 
 # ── Metadata retrieval ─────────────────────────────────────────────────────────
 
-def _metadata_score(payload: dict[str, Any], query_tokens: frozenset[str]) -> float:
+def _metadata_score(payload: dict[str, Any], query_tokens: frozenset[str], escalation_boost: bool = False) -> float:
     """
     Score a Qdrant payload against a set of query tokens.
 
@@ -369,6 +378,20 @@ def _metadata_score(payload: dict[str, Any], query_tokens: frozenset[str]) -> fl
     hits = len(query_tokens & st_tokens)
     score += (hits / n) * 0.15
 
+    # Escalation boost (Fix 5): prioritize senior/manager/escalation contacts
+    if escalation_boost:
+        ESCALATION_WORDS = {
+            "senior", "manager", "escalation", "head", "director",
+            "vip", "priority", "dedicated", "lead", "specialist",
+        }
+        all_text = (
+            str(payload.get("title", "")) + " " +
+            str(payload.get("search_text", "")) + " " +
+            " ".join(str(v) for v in _json_values(payload.get("attributes") or {}))
+        ).lower()
+        if any(w in all_text for w in ESCALATION_WORDS):
+            score = min(score + 0.30, 1.0)
+
     return min(score, 1.0)
 
 
@@ -377,6 +400,7 @@ async def _metadata_search(
     user_id: str,
     category: str,
     top_k: int = METADATA_TOP_K,
+    escalation_boost: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Metadata-driven scroll search.
@@ -403,7 +427,9 @@ async def _metadata_search(
         scored = []
         for p in points:
             payload = p.payload or {}
-            ms = _metadata_score(payload, q_tokens)
+            if not _is_offer_valid(payload):   # Fix 6: skip invalid offers
+                continue
+            ms = _metadata_score(payload, q_tokens, escalation_boost)
             if ms > 0.0:
                 scored.append({"id": str(p.id), "metadata_score": ms, "payload": payload})
         scored.sort(key=lambda x: x["metadata_score"], reverse=True)
@@ -529,6 +555,105 @@ def _fuse_results(
     return fused
 
 
+# ── Score normalization ────────────────────────────────────────────────────────
+
+def _normalize_scores(fused: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Apply min-max normalization to spread fusion scores across [0.20, 1.00].
+
+    Without normalization, fusion scores cluster tightly (e.g. 0.67–0.68)
+    making it impossible to distinguish best from weakest results.
+
+    After normalization:
+        best result  → 1.00
+        worst result → 0.20
+        others       → linearly spread between
+
+    Preserves the relative ranking. Only changes the absolute values.
+    Skips normalization if all scores are identical (avoids div-by-zero).
+    """
+    if len(fused) <= 1:
+        return fused
+    scores = [r["score"] for r in fused]
+    min_s, max_s = min(scores), max(scores)
+    if max_s - min_s < 1e-6:
+        return fused   # all identical — nothing to spread
+
+    OUT_MIN, OUT_MAX = 0.20, 1.00
+    spread    = OUT_MAX - OUT_MIN
+    raw_spread = max_s - min_s
+
+    for r in fused:
+        normalized = OUT_MIN + ((r["score"] - min_s) / raw_spread) * spread
+        r["score"] = round(normalized, 4)
+    return fused
+
+
+# ── Offer validity filter (Fix 6) ─────────────────────────────────────────────
+
+def _is_offer_valid(payload: dict[str, Any]) -> bool:
+    """
+    Check if an offer/promotion is currently valid.
+
+    Rules:
+        1. status must be "active" (case-insensitive) — excludes "scheduled",
+           "inactive", "expired"
+        2. valid_until (if present) must be >= today
+
+    Applied ONLY to offers_promotions category.
+    For all other categories, always returns True.
+
+    Date format support: DD-MM-YYYY, MM/DD/YYYY, YYYY-MM-DD (ISO), DD/MM/YYYY
+    """
+    import datetime as _dt
+
+    category = str(payload.get("category", "")).lower()
+    if category != "offers_promotions":
+        return True
+
+    # Check status
+    attrs  = payload.get("attributes") or {}
+    sd     = payload.get("structured_data") or {}
+    status = str(attrs.get("status") or sd.get("status") or "active").lower().strip()
+
+    if status not in ("active", ""):
+        return False   # scheduled, inactive, expired, paused → exclude
+
+    # Check valid_until date
+    valid_until_raw = str(
+        attrs.get("valid_until") or sd.get("end_date") or sd.get("valid_until") or ""
+    ).strip()
+    if not valid_until_raw:
+        return True   # no date — assume active
+
+    today = _dt.date.today()
+
+    # Try multiple date formats
+    for fmt in ("%d-%m-%Y", "%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            expiry = _dt.datetime.strptime(valid_until_raw, fmt).date()
+            return expiry >= today
+        except ValueError:
+            continue
+
+    # If date can't be parsed — include it (don't wrongly exclude)
+    return True
+
+
+# ── Diversity score (Fix 8) ────────────────────────────────────────────────────
+
+def _compute_diversity_score(results: list[dict[str, Any]]) -> float:
+    """
+    Measure retrieval diversity: what fraction of returned results have
+    DIFFERENT categories. A diverse result set = 1.0, all same category = 0.0.
+    """
+    if len(results) < 2:
+        return 1.0
+    cats = [r.get("category", "") for r in results]
+    unique_cats = len(set(cats))
+    return round((unique_cats - 1) / max(len(cats) - 1, 1), 3)
+
+
 # ── Per-category search ────────────────────────────────────────────────────────
 
 async def _search_category(
@@ -537,6 +662,7 @@ async def _search_category(
     user_id:   str,
     analytics: bool = False,
     analytics_primary_category: str = "",
+    escalation_boost: bool = False,   # Fix 5
 ) -> dict[str, Any]:
     """
     Execute all queries for a single category in parallel (dense + metadata).
@@ -562,7 +688,7 @@ async def _search_category(
         tasks = []
         for q in queries:
             tasks.append(_dense_search(q, user_id, category))
-            tasks.append(_metadata_search(q, user_id, category))
+            tasks.append(_metadata_search(q, user_id, category, escalation_boost=escalation_boost))
 
     all_results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -591,6 +717,7 @@ async def _search_category(
     metadata_dedup = _dedup_max(all_metadata, "metadata_score")
 
     fused = _fuse_results(dense_dedup, metadata_dedup)
+    fused = _normalize_scores(fused)   # Fix 3: spread scores across [0.20, 1.00]
     top   = fused[:PER_CATEGORY_TOP_K]
 
     return {
@@ -839,16 +966,25 @@ async def _run_hybrid_retrieval_inner(
             analytics_categories = [primary_intent_cat]
 
     # ── Launch all category searches in parallel ──────────────────────────
-    tasks: list[tuple[str, bool, str, list[str]]] = []
-    # (category_label, is_analytics, analytics_primary_cat, query_list)
+    tasks: list[tuple[str, bool, str, list[str], bool]] = []
+    # (category_label, is_analytics, analytics_primary_cat, query_list, escalation_boost)
+
+    # Fix 5: Detect if this is an escalation search
+    open_esc = p1_output.get("open_escalation", {})
+    is_escalation_search = (
+        open_esc.get("open", False) or
+        (pi.get("category") == "contact_support" and
+         p1_output.get("routing_decision", {}).get("escalation_requested", False))
+    )
 
     for cat, qs in cat_queries.items():
-        tasks.append((cat, False, "", qs))
+        boost = is_escalation_search and cat == "contact_support"
+        tasks.append((cat, False, "", qs, boost))
 
     for ac_primary in analytics_categories:
         # Use standalone_query as the analytics search query
         qs = [standalone_query] if standalone_query else [ac_primary.replace("_", " ") + " analytics"]
-        tasks.append(("data_analytics", True, ac_primary, qs))
+        tasks.append(("data_analytics", True, ac_primary, qs, False))
 
     if not tasks:
         logger.warning("[hybrid_retrieval] no tasks built | user=%s ... falling back", user_id[:8])
@@ -866,7 +1002,7 @@ async def _run_hybrid_retrieval_inner(
 
     # Execute all tasks concurrently
     coro_list = []
-    for (cat, is_analytics, ac_primary, qs) in tasks:
+    for (cat, is_analytics, ac_primary, qs, boost) in tasks:
         coro_list.append(
             _search_category(
                 category   = cat,
@@ -874,6 +1010,7 @@ async def _run_hybrid_retrieval_inner(
                 user_id    = user_id,
                 analytics  = is_analytics,
                 analytics_primary_category = ac_primary,
+                escalation_boost           = boost,
             )
         )
 
@@ -890,7 +1027,7 @@ async def _run_hybrid_retrieval_inner(
     total_queries_run     = 0
 
     for idx, (task_def, raw) in enumerate(zip(tasks, category_raw_results)):
-        cat, is_analytics, ac_primary, qs = task_def
+        cat, is_analytics, ac_primary, qs, boost = task_def
 
         if isinstance(raw, Exception):
             logger.warning("[hybrid_retrieval] category task failed cat=%s: %s", cat, raw)
@@ -935,9 +1072,18 @@ async def _run_hybrid_retrieval_inner(
         seen_entries.add(key)
         deduped.append(r)
 
+    # Fix 6: Filter out invalid offers from final results
+    deduped = [r for r in deduped if _is_offer_valid(r.get("payload", {}))]
+
+    # Fix 3: Normalize scores across all categories for meaningful ranking
+    deduped = _normalize_scores(deduped)
+
     top_score    = deduped[0]["score"]  if deduped else 0.0
     lowest_score = deduped[-1]["score"] if deduped else 0.0
     elapsed_ms   = (time.monotonic() - t0) * 1000
+
+    # Fix 8: Compute retrieval diversity score
+    diversity_score = _compute_diversity_score(deduped)
 
     _log_retrieval_summary(
         retrieval_id             = retrieval_id,
@@ -1005,4 +1151,5 @@ async def _run_hybrid_retrieval_inner(
         "analytics_searched":              bool(analytics_categories),
         "elapsed_ms":                      round(elapsed_ms, 1),
         "results":                         deduped,
+        "retrieval_diversity_score":       diversity_score,   # Fix 8
     }

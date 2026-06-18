@@ -7,6 +7,7 @@ Pipeline executed per incoming email:
   Step 3 — Processor 1 (LLM Call #1): Analysis & Retrieval Planning
 """
 from __future__ import annotations
+import datetime
 import os
 import sys
 import logging
@@ -31,6 +32,11 @@ from services.qdrant_search import run_hybrid_retrieval
 logger = logging.getLogger("automationservice.router")
 
 router = APIRouter(tags=["automation"])
+
+# ── Persistent escalation state (Fix 1) ───────────────────────────────────────
+# key = conversation_id, value = {"open": bool, "level": str, "reason": str,
+#                                  "created_at": str, "message_count": int}
+_conversation_escalation_state: dict[str, dict] = {}
 
 
 class AutomationTrigger(BaseModel):
@@ -183,6 +189,52 @@ async def process_event(event: dict) -> dict:
                 pi.get("confidence", 0.0),
                 context["fetch_count"], elapsed_ms)
 
+    # ── Persistent escalation state tracking (Fix 1) ───────────────────────────
+    current_escalation = rd.get("escalation_requested", False)
+    esc_state = _conversation_escalation_state.get(conversation_id, {})
+
+    if current_escalation:
+        # New escalation — open or refresh it
+        _conversation_escalation_state[conversation_id] = {
+            "open":          True,
+            "level":         rd.get("routing_priority", "high"),
+            "reason":        p1_output.get("intent_analysis", {}).get("primary_intent", {}).get("reason", ""),
+            "created_at":    datetime.datetime.utcnow().isoformat(),
+            "message_count": context["fetch_count"],
+        }
+        esc_state = _conversation_escalation_state[conversation_id]
+    elif esc_state.get("open"):
+        # Prior escalation is still open — check if latest message resolves it
+        RESOLUTION_SIGNALS = {
+            "thank you", "thanks", "resolved", "never mind", "cancel",
+            "forget it", "no need", "ok thanks", "got it",
+        }
+        latest_lower = (latest_message.get("content") or "").lower()
+        if any(sig in latest_lower for sig in RESOLUTION_SIGNALS):
+            _conversation_escalation_state[conversation_id]["open"] = False
+            logger.info("[ESCALATION] closed | conv=%s reason=resolution_signal", conversation_id[:8])
+        else:
+            logger.info(
+                "[ESCALATION] still open | conv=%s level=%s",
+                conversation_id[:8], esc_state.get("level"),
+            )
+
+    # Inject open_escalation into p1_output so retrieval and downstream can see it
+    p1_output["open_escalation"] = _conversation_escalation_state.get(conversation_id, {"open": False})
+
+    # Log escalation state
+    esc = p1_output.get("open_escalation", {})
+    logger.info(
+        "[ESCALATION] state=%s  level=%s",
+        "open" if esc.get("open") else "closed",
+        esc.get("level", "none"),
+    )
+    if esc.get("open"):
+        logger.info(
+            "[ESCALATION] open=True  level=%s  reason=%s",
+            esc.get("level", "?"), (esc.get("reason") or "?")[:80],
+        )
+
     # ── Step 4: Hybrid Retrieval — Metadata-filtered Qdrant search ─────────────
     retrieval_output = await run_hybrid_retrieval(
         user_id   = user_id,
@@ -203,6 +255,12 @@ async def process_event(event: dict) -> dict:
         "candidates=%d→%d analytics=%s retrieval_ms=%.0f total_ms=%.0f",
         user_id, conversation_id[:8], r_id, r_cats,
         r_total, r_final, r_analytics, r_elapsed, elapsed_ms,
+    )
+
+    # ── Fix 8: Observability logs for retrieval diversity ──────────────────
+    logger.info(
+        "[RETRIEVAL]  diversity_score=%.3f",
+        retrieval_output.get("retrieval_diversity_score", 0.0),
     )
 
     return {

@@ -373,6 +373,8 @@ def _validate_and_repair(
         queries = queries[:MAX_QUERIES_PER_CATEGORY]
         # Cap to remaining budget
         queries = queries[:total_budget]
+        # Deduplicate semantically similar queries
+        queries = _deduplicate_queries(queries)
         if not queries:
             continue
         # Minimum 2 queries — add standalone as second if only 1 returned
@@ -636,6 +638,37 @@ def _validate_specs(specifications: list[str]) -> tuple[bool, float]:
                     except (ValueError, IndexError):
                         pass
     return False, 0.0
+
+
+def _deduplicate_queries(queries: list[str]) -> list[str]:
+    """
+    Remove semantically duplicate queries using token-level Jaccard similarity.
+    Queries with Jaccard similarity > 0.60 on their token sets are considered duplicates.
+    Keeps the first occurrence (highest priority query stays).
+    Works for any language/domain — pure token comparison, no ML needed.
+    """
+    kept: list[str] = []
+    kept_token_sets: list[frozenset[str]] = []
+    # Common stop words to exclude from similarity comparison
+    STOP = {"the", "a", "an", "of", "for", "and", "or", "in", "on", "at", "to",
+            "is", "are", "be", "do", "how", "what", "any", "all", "get", "me",
+            "my", "your", "about", "with", "by", "from", "it", "its", "our"}
+    for q in queries:
+        tokens = frozenset(t for t in q.lower().split() if t not in STOP and len(t) > 2)
+        is_dup = False
+        for existing_tokens in kept_token_sets:
+            if not tokens or not existing_tokens:
+                continue
+            intersection = len(tokens & existing_tokens)
+            union = len(tokens | existing_tokens)
+            jaccard = intersection / union if union > 0 else 0.0
+            if jaccard > 0.60:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(q)
+            kept_token_sets.append(tokens)
+    return kept
 
 
 def _infer_category(text: str) -> str:

@@ -26,12 +26,30 @@ VALID_RETRIEVAL_INTENT_TYPES = {
 
 # Domain-specific analytics keywords only — no generic English words
 ANALYTICS_KEYWORDS = {
+    # Existing
     "analytics", "statistics", "metrics", "dashboard", "kpi", "kpis",
     "reporting", "trendline", "heatmap", "funnel", "cohort",
     "retention rate", "conversion rate", "click-through", "open rate",
     "bounce rate", "revenue report", "sales report", "monthly report",
     "quarterly report", "data export", "data analysis", "data visualization",
     "roi", "forecast", "forecasting",
+    # NEW — count/aggregate signals
+    "how many", "how much total", "total count", "total number",
+    "count of", "number of",
+    # NEW — ranking/comparison signals
+    "best selling", "best-selling", "top selling", "most popular",
+    "most purchased", "least popular", "highest rated", "lowest rated",
+    "highest selling", "most ordered", "least ordered",
+    "ranking", "ranked", "rank by", "top 5", "top 10",
+    # NEW — statistical signals
+    "average", "avg", "mean", "median", "percentage of",
+    "distribution", "breakdown", "split by", "grouped by",
+    # NEW — trend signals
+    "trending", "trend", "over time", "growth", "decline", "increase",
+    "decrease", "month over month", "year over year",
+    # NEW — business intelligence signals
+    "revenue", "profit", "margin", "performance", "insights",
+    "which category", "which product", "which offer",
 }
 
 # Latest-message-only escalation triggers — history MUST NOT contribute
@@ -110,7 +128,7 @@ Example (correct context decay):
   Message 8: "Tell me about your available products" → escalation_requested=false, routing=normal
 
 ════════════════════════════════════════════════════════════════
-CONTEXT RESOLUTION
+CONTEXT RESOLUTION — FOLLOW-UP REFERENCE HANDLING
 ════════════════════════════════════════════════════════════════
 When the latest message is ambiguous (e.g. "any discounts?", "what about shipping?"):
 1. Identify the most recently discussed product or topic in history
@@ -118,6 +136,38 @@ When the latest message is ambiguous (e.g. "any discounts?", "what about shippin
 3. Example: "Any discounts?" after laptop discussion → "discounts for laptop"
 
 NEVER generate bare generic queries when context provides a specific subject.
+
+REFERENCE PATTERNS AND RESOLUTIONS:
+  "How much?" or "What's the price?"
+      → "[previously discussed item] price"
+      → NEVER generate: "price information" or "how much does it cost"
+
+  "Tell me more" or "More details" or "And that one?"
+      → "[previously discussed item] detailed specifications"
+
+  "Do you have cheaper ones?" or "Any budget options?"
+      → "[previously discussed item category] budget affordable options"
+
+  "And premium?" or "What about high-end?"
+      → "[previously discussed item category] premium high-end options"
+
+  "What about shipping?" or "How long does delivery take?"
+      → "shipping delivery time for [previously discussed item]"
+
+  "Can I return it?" or "What's the return policy?"
+      → "[previously discussed item] return refund policy"
+
+  "It" / "That" / "This" / "Those"
+      → Resolve to the specific item/topic from the immediately prior message
+
+RESOLUTION RULE: When you identify a reference, the standalone_query MUST contain
+the resolved entity name. Never leave "it", "that", "those" unresolved.
+
+Example chain:
+  Message 1: "Show me laptops"       → resolved_reference: "available laptop catalog"
+  Message 2: "How much?"             → resolved_reference: "IngenAI laptop pricing"
+  Message 3: "Any cheaper options?"  → resolved_reference: "affordable budget laptop options"
+  Message 4: "What about shipping?"  → resolved_reference: "laptop delivery shipping options"
 
 ════════════════════════════════════════════════════════════════
 CONVERSATION ANALYSIS
@@ -259,6 +309,14 @@ HARD LIMITS:
 Generate 2–3 queries per category. NEVER just 1. NEVER more than 3.
 Each query MUST cover a STRUCTURALLY DIFFERENT RETRIEVAL ANGLE — not a synonym rewrite.
 
+MANDATORY: Each query must use a DIFFERENT STARTING WORD that signals a different angle:
+  catalog/list queries → start with the item name
+  attribute queries    → start with the attribute (price, material, duration, etc.)
+  process queries      → start with the action (order, book, buy, apply, contact)
+  comparison queries   → start with "compare" or end with "vs" or "options"
+
+NEVER start two queries with the same word.
+
 MANDATORY ANGLE TAXONOMY (pick different angles per category):
   ANGLE 1 — Direct name match:
     Include the exact product/service name + primary intent keyword.
@@ -316,8 +374,11 @@ ANALYTICS DECISION
 ════════════════════════════════════════════════════════════════
 requires_analytics: true ONLY for: analytics, metrics, kpi, dashboard,
   report, reporting, forecast, roi, data visualization, conversion rate,
-  retention rate, revenue report, sales report.
-NOT for: price, count, total, shipping cost, product list.
+  retention rate, revenue report, sales report,
+  how many, count, total number, average, ranking, best selling,
+  most popular, trending, highest, lowest, growth, distribution.
+NOT for: price (of a specific product), specific product details, contact info.
+The key signal is: customer wants AGGREGATE or COMPARATIVE data, not a specific item.
 If false, analytics_categories = [].
 
 ════════════════════════════════════════════════════════════════
