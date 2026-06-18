@@ -6,6 +6,7 @@ Deep health monitoring for all infrastructure components.
 from typing import Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
+from sqlalchemy import text
 from app.observability import get_logger
 
 logger = get_logger(__name__)
@@ -119,7 +120,7 @@ class HealthCheckSystem:
             manager = get_resource_manager()
             
             async with manager.get_db_session() as session:
-                result = await session.execute("SELECT 1")
+                result = await session.execute(text("SELECT 1"))
                 row = result.scalar()
             
             latency = (time.perf_counter() - start) * 1000

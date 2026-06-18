@@ -286,18 +286,21 @@ async def ensure_streams() -> None:
 
     logger.info("Event-driven streams ready (N_SHARDS=%d)", N_SHARDS)
 
-    # Log backlog sizes for visibility (read-only, always safe)
+    # Batch all startup backlog checks into a single pipeline (6 XLEN → 1 round-trip)
     all_streams_check = [
         cfg.TOPIC_GMAIL_RAW, cfg.TOPIC_OUTLOOK_RAW, cfg.TOPIC_SMTP_RAW,
         cfg.TOPIC_STORE_READY, cfg.TOPIC_AI_EVENTS, cfg.TOPIC_DLQ,
     ]
-    for stream in all_streams_check:
-        try:
-            length = await redis.xlen(stream)
-            if length:
+    try:
+        pipe = redis.pipeline(transaction=False)
+        for stream in all_streams_check:
+            pipe.xlen(stream)
+        lengths = await pipe.execute(raise_on_error=False)
+        for stream, length in zip(all_streams_check, lengths):
+            if isinstance(length, int) and length:
                 logger.info("Startup backlog: %s has %d messages", stream, length)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 async def get_stream_lag(stream: str, group_id: str = "") -> int:

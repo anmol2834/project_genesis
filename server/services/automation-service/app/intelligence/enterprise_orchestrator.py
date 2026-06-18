@@ -89,7 +89,11 @@ class IntelligenceOrchestrator:
         Returns: EnterpriseIntelligenceResult with 100+ structured fields
         """
         start_time = time.perf_counter()
-        conversation_id = trace_id  # Use trace_id as conversation_id
+        # Task 14 fix (R21): derive conversation_id from memory so all turns
+        # of the same conversation share the same ActiveTopicMemory key.
+        # Using trace_id (which changes every request) caused cache misses on
+        # every continuation turn, defeating the memory-first fast path.
+        conversation_id = memory.get("conversation_id") or trace_id
         
         try:
             # CRITICAL: Short Message Contextual Reasoning (FAST PATH)

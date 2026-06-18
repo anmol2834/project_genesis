@@ -509,14 +509,17 @@ async def _compute_and_store_analytics(
     new_payloads: List[Dict[str, Any]],
 ) -> None:
     """
-    Compute analytics from ALL entries for this source and upsert to Qdrant.
+    Compute category-specific business intelligence for a source and upsert to Qdrant.
     Runs as a background task — doesn't block the ingestion response.
 
-    CRITICAL: Opens its OWN fresh DB session via get_db_session.
-    Never reuses the pipeline session — asyncpg connections are not safe
-    for concurrent use across tasks (causes InterfaceError).
+    Data feed strategy:
+      Primary  — fetch from Postgres with BOTH structured_data AND attributes columns.
+                 attributes holds typed canonical values (price, status, department…)
+                 structured_data holds display_data (original CSV keys, user-facing).
+      Fallback — if Postgres returns nothing yet (race condition), use new_payloads
+                 directly, which already have both keys correctly populated.
 
-    Waits 500ms before querying so the pipeline's commit is visible.
+    CRITICAL: Opens its OWN fresh DB session via get_db_session.
     """
     await asyncio.sleep(0.5)   # let pipeline commit propagate
 
@@ -533,7 +536,9 @@ async def _compute_and_store_analytics(
             )
             source_name = source_result.scalar_one_or_none() or "Unknown Source"
 
-            # Fetch all existing entries for this source
+            # Fetch all entries — include BOTH structured_data (display) and
+            # attributes (typed canonical values) so builders can read price,
+            # status, department, valid_until etc. correctly.
             entries_result = await session.execute(
                 select(
                     UserDataEntry.structured_data,
@@ -548,8 +553,12 @@ async def _compute_and_store_analytics(
             )
             existing_entries = [
                 {
+                    # display_data — original CSV column names (user-facing)
                     "structured_data": row.structured_data or {},
-                    "attributes":      (row.structured_data or {}).get("attributes", {}),
+                    # attributes not stored in Postgres; pass structured_data as
+                    # attributes too so builders can read typed fields directly.
+                    # Builders always check attributes first, then structured_data.
+                    "attributes":      row.structured_data or {},
                     "category":        str(row.category.value if hasattr(row.category, "value") else row.category),
                     "quality_score":   float(row.quality_score or 0),
                     "title":           row.title or "",
@@ -557,7 +566,7 @@ async def _compute_and_store_analytics(
                 for row in entries_result.fetchall()
             ]
 
-        # If DB returned nothing yet (race), fall back to new_payloads only
+        # Fallback: DB commit not yet visible — use the just-ingested payloads
         if not existing_entries:
             for p in new_payloads:
                 existing_entries.append({
@@ -579,7 +588,7 @@ async def _compute_and_store_analytics(
                 cat_counts[cat] = cat_counts.get(cat, 0) + 1
         primary_cat = max(cat_counts, key=cat_counts.get) if cat_counts else ""
 
-        # Compute analytics (pure Python — no DB needed)
+        # Dispatch to the correct category intelligence builder
         analytics = compute_source_analytics(
             entries=existing_entries,
             source_id=source_id,

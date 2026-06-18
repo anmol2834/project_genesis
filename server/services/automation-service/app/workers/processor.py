@@ -61,32 +61,50 @@ class MessageProcessor:
     async def _enrich_content(self, event: AutomationEvent) -> AutomationEvent:
         """
         Fetch email content + subject from DB when the stream payload is empty.
-        The automation_events stream carries only routing metadata.
+        Retries up to 3 times with 500ms back-off to handle the race condition
+        where emailservice writes to Redis stream before committing to Postgres.
         """
-        try:
-            from shared.database import get_db_session
-            from sqlalchemy import text
-            async with get_db_session() as session:
-                result = await session.execute(
-                    text(
-                        "SELECT content, subject FROM es_messages "
-                        "WHERE message_id = :mid AND user_id = :uid "
-                        "LIMIT 1"
-                    ),
-                    {"mid": event.message_id, "uid": event.user_id},
+        import asyncio as _asyncio
+        max_attempts = 3
+        delay_s = 0.5
+        for attempt in range(1, max_attempts + 1):
+            try:
+                from shared.database import get_db_session
+                from sqlalchemy import text
+                async with get_db_session() as session:
+                    result = await session.execute(
+                        text(
+                            "SELECT content, subject FROM es_messages "
+                            "WHERE message_id = :mid AND user_id = :uid "
+                            "LIMIT 1"
+                        ),
+                        {"mid": event.message_id, "uid": event.user_id},
+                    )
+                    row = result.first()
+                    if row:
+                        content, subject = row
+                        if content:  # only accept non-empty content
+                            data = event.model_dump()
+                            data["content"] = content
+                            if not data.get("subject") and subject:
+                                data["subject"] = subject
+                            return AutomationEvent(**data)
+                    # Row exists but content still empty (race) — retry
+                    if attempt < max_attempts:
+                        logger.debug(
+                            "Content enrichment attempt %d/%d: content empty for msg=%s, retrying in %.1fs",
+                            attempt, max_attempts, event.message_id[:12], delay_s,
+                        )
+                        await _asyncio.sleep(delay_s)
+                        delay_s *= 2  # exponential back-off
+            except Exception as e:
+                logger.warning(
+                    "Content enrichment attempt %d/%d failed for msg=%s: %s",
+                    attempt, max_attempts, event.message_id[:12], e,
                 )
-                row = result.first()
-                if row:
-                    content, subject = row
-                    # Rebuild with real content (AutomationEvent is a Pydantic model)
-                    data = event.model_dump()
-                    data["content"] = content or ""
-                    if not data.get("subject") and subject:
-                        data["subject"] = subject
-                    return AutomationEvent(**data)
-        except Exception as e:
-            logger.warning("Content enrichment failed for msg=%s: %s",
-                           event.message_id[:12], e)
+                if attempt < max_attempts:
+                    await _asyncio.sleep(delay_s)
+                    delay_s *= 2
         return event
     
     def _validate_required_fields(self, message: Dict[str, Any]) -> None:

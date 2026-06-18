@@ -145,7 +145,8 @@ class WorkerExecutionEngine:
 
 
 # Global execution engine
-_execution_engine: WorkerExecutionEngine = None
+from typing import Optional as _Optional
+_execution_engine: _Optional[WorkerExecutionEngine] = None
 
 
 def get_execution_engine() -> WorkerExecutionEngine:

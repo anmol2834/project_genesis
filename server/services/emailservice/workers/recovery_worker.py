@@ -80,8 +80,17 @@ class RecoveryWorker:
         self._running = True
         logger.info("RecoveryWorker started (event-driven, zero idle cost)")
 
-        # Drain any leftover events from previous crash (1 Redis command on startup)
-        await self._drain_redis()
+        # Only drain Redis on startup if there are actually leftover events
+        # (1 XLEN instead of unconditional XRANGE)
+        try:
+            redis = get_redis_client()
+            backlog = await redis.xlen(RECOVERY_STREAM)
+            if backlog:
+                logger.info("RecoveryWorker: startup backlog %d events in %s",
+                            backlog, RECOVERY_STREAM)
+                await self._drain_redis()
+        except Exception:
+            pass  # non-critical — live events will re-trigger drain
 
         # Drain any in-memory events (none on fresh start)
         await self._drain_memory()

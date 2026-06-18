@@ -15,7 +15,7 @@ Risk Categories:
 
 import re
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from app.handoff.models import RiskSignals, RiskCategory
 
 logger = logging.getLogger("automation-service.handoff.risk")
@@ -208,3 +208,80 @@ class RiskEngine:
         
         # Don't escalate for medium risk unless combined with other factors
         return False, "risk_acceptable"
+
+    def detect_risks(
+        self,
+        query: str,
+        confidence_score: float,
+        retrieval_context: Dict[str, Any],
+        llm_response: Optional[str],
+        conversation_history: List[Any],
+        hallucination_check: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Adapter — bridges the signature that handoff_orchestrator.py calls to
+        the existing analyze_risk() implementation. No logic is duplicated.
+
+        handoff_orchestrator.py calls:
+            self.risk_engine.detect_risks(
+                query=query,
+                confidence_score=confidence_result.final_confidence,
+                retrieval_context=retrieval_context,
+                llm_response=llm_response,
+                conversation_history=conversation_history,
+                hallucination_check=hallucination_check,
+            )
+
+        Returns a dict _make_decision() reads:
+            risk_level       — "none" | "medium" | "high" | "critical"
+            risk_categories  — list[str]  (enum values)
+            requires_human   — bool
+            risk_reasons     — list[str]
+            customer_emotion — "neutral" | "frustrated"
+            confidence_score — echoed back for convenience
+        """
+        # Extract an intent hint from retrieval_context when available
+        intent = "general_inquiry"
+        if isinstance(retrieval_context, dict):
+            intent = (
+                retrieval_context.get("intent")
+                or retrieval_context.get("active_topic")
+                or "general_inquiry"
+            )
+
+        # Delegate to the existing regex-based analysis engine
+        signals = self.analyze_risk(
+            user_message=query,
+            ai_reply=llm_response,
+            intent=intent,
+            sentiment=None,
+            conversation_history=conversation_history,
+        )
+
+        # Boost risk level when a hallucination was independently detected
+        if hallucination_check and hallucination_check.get("hallucination_detected"):
+            signals.risk_level = max(signals.risk_level, 0.70)
+            if "hallucination_detected" not in signals.risk_reasons:
+                signals.risk_reasons.append("hallucination_detected")
+
+        # Map continuous float → named string expected by handoff_orchestrator.py
+        if signals.risk_level >= 0.90:
+            risk_level_str = "critical"
+        elif signals.risk_level >= 0.70:
+            risk_level_str = "high"
+        elif signals.risk_level >= 0.40:
+            risk_level_str = "medium"
+        else:
+            risk_level_str = "none"
+
+        return {
+            "risk_level":       risk_level_str,
+            "risk_categories":  [c.value for c in signals.risk_categories],
+            "requires_human":   signals.requires_human,
+            "risk_reasons":     signals.risk_reasons,
+            "customer_emotion": "frustrated" if signals.risk_level > 0.60 else "neutral",
+            "confidence_score": confidence_score,
+        }
+
+
+__all__ = ["RiskEngine"]

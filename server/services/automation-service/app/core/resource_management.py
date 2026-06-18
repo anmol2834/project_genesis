@@ -65,23 +65,15 @@ class ResourceManager:
         logger.info("Resource pools initialized")
     
     async def _init_redis(self) -> None:
-        """Initialize Redis connection pool"""
+        """Initialize Redis connection pool — reuses shared pool if already initialized."""
         try:
-            self._redis_pool = RedisPool.from_url(
-                self.REDIS_URL,
-                max_connections=self.REDIS_MAX_CONNECTIONS,
-                decode_responses=True,
-                socket_connect_timeout=5,
-                socket_keepalive=True,
-                health_check_interval=30
-            )
-            
-            self._redis_client = Redis(connection_pool=self._redis_pool)
-            
-            # Test connection
-            await self._redis_client.ping()
+            # Reuse the shared pool that shared.cache.init_redis() already established.
+            # This avoids creating a second pool, a second health_check background task
+            # (which fires PING every 30s), and a second connection on startup.
+            from shared.cache import get_redis_client as _get_shared
+            self._redis_client = _get_shared()
+            # No ping here — shared pool already verified connectivity at init_redis() time.
             logger.info(f"Redis pool initialized (max_connections={self.REDIS_MAX_CONNECTIONS})")
-            
         except Exception as e:
             logger.error(f"Redis pool initialization failed: {e}")
             raise
@@ -139,11 +131,10 @@ class ResourceManager:
         """Shutdown all resource pools"""
         logger.info("Shutting down resource pools")
         
-        # Close Redis
-        if self._redis_client:
-            await self._redis_client.aclose()
-        if self._redis_pool:
-            await self._redis_pool.disconnect()
+        # Do NOT close _redis_client here — it is owned by shared.cache
+        # and will be closed by close_redis() in the lifespan shutdown.
+        self._redis_client = None
+        self._redis_pool = None
         
         # Close database
         if self._db_engine:

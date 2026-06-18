@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -39,9 +40,9 @@ _MAX_PARALLEL_INTENTS = 4
 # RRF constant k (standard value)
 _RRF_K = 60
 # Maximum chunks per intent branch before merge
-_TOP_K_PER_INTENT = 6
+_TOP_K_PER_INTENT = 12
 # Final top-k after merge + rerank
-_FINAL_TOP_K = 8
+_FINAL_TOP_K = 15
 
 
 class RetrievalOrchestrator:
@@ -66,7 +67,7 @@ class RetrievalOrchestrator:
         self.hierarchical_retriever = HierarchicalRetriever(
             redis_client=redis,
             qdrant_repository=qdrant_repo,
-            min_chunks_for_exit=3,
+            min_chunks_for_exit=5,
             min_score_for_exit=0.85,
         )
         self.intent_cache = IntentCacheEngine(redis)
@@ -154,21 +155,102 @@ class RetrievalOrchestrator:
                 )
 
             # ── Dedup already-shared chunks ───────────────────────────────
-            # IMPORTANT: data_analytics chunks are NEVER deduped — they contain
-            # pricing/catalog summaries that must be re-injected every turn so
-            # the LLM has authoritative data regardless of conversation history.
+            # data_analytics chunks are ALWAYS exempt from dedup — they carry
+            # catalog overviews (price ranges, all item names, summaries) that
+            # must be available on every turn that references pricing or catalog
+            # data. Deduping them out is the primary cause of "I don't have
+            # specific information" failures on follow-up price/range queries.
+            #
+            # SPEC FIX: hardware specs (8GB RAM, 512GB SSD) are search CRITERIA,
+            # not product names — they must NEVER be used as "same entity context"
+            # to trigger dedup. Dedup only applies when real product names overlap.
+            #
+            # Algorithm:
+            #   1. Build _cur = real product names in current intelligence (spec-filtered)
+            #   2. Build _prev = real product names in memory (spec-filtered, same filter)
+            #   3. Only dedup if _cur ∩ _prev is non-empty (same product, repeat question)
+            #   4. data_analytics chunks always pass dedup regardless
             dedup_removed = 0
-            if already_shared_chunks and not allow_repeated:
-                original = len(chunks)
-                chunks = [
-                    c for c in chunks
-                    if c.get("chunk_id", c.get("id", "")) not in already_shared_chunks
-                    or str(c.get("chunk_type", "")).lower() == "data_analytics"
-                ]
-                dedup_removed = original - len(chunks)
-                if dedup_removed:
+            if already_shared_chunks:
+                _SPEC_PAT_DEDUP = re.compile(
+                    r"^\d+\s*(?:gb|tb|mb|ghz|mhz|inch|\")\b"
+                    r"|ram$|ssd$|hdd$|gpu$|cpu$|vram$",
+                    re.IGNORECASE,
+                )
+                _GENERIC_DEDUP = {
+                    "laptop", "laptops", "product", "products", "item", "items",
+                    "service", "services", "option", "options",
+                }
+
+                def _is_real_product_dedup(name: str) -> bool:
+                    """True when name is a real product/entity name, not a spec or generic term."""
+                    n = str(name).strip()
+                    return (
+                        bool(n)
+                        and len(n) >= 3
+                        and n.lower() not in _GENERIC_DEDUP
+                        and not _SPEC_PAT_DEDUP.search(n)
+                    )
+
+                # _cur: real product names from current intelligence
+                _cur: set = set()
+                try:
+                    _e = (intelligence.get("entities", {}) if isinstance(intelligence, dict)
+                          else getattr(intelligence, "entities", None))
+                    if _e:
+                        _ed = (_e if isinstance(_e, dict)
+                               else (_e.model_dump() if hasattr(_e, "model_dump")
+                                     else getattr(_e, "__dict__", {})))
+                        _cur = {
+                            str(x).lower() for x in (
+                                (_ed.get("products") or []) + (_ed.get("features") or [])
+                            )
+                            if _is_real_product_dedup(str(x))
+                        }
+                except Exception:
+                    pass
+
+                # _prev: real product names from memory (same filter applied to
+                # stale Redis data — old code paths may have stored specs there)
+                _prev = {
+                    str(e).lower() for e in memory.get("already_shared_entities", [])
+                    if _is_real_product_dedup(str(e))
+                }
+
+                # Overlap only meaningful when BOTH sets have real product names.
+                # INTENT-CHANGE ESCAPE: even when same product appears in both sets,
+                # if the intent changed (e.g., product_inquiry → pricing_inquiry),
+                # the customer is asking a NEW question about those products — they
+                # need the product chunks to answer the price question. Deduping them
+                # out would leave zero context for Brain #2.
+                _overlap = bool(_cur & _prev) if (_cur and _prev) else False
+                _cur_intent = self._extract_intent_type(intelligence)
+                _prev_intent = memory.get("last_intent", "")
+                _intent_changed = bool(_prev_intent) and _cur_intent != _prev_intent
+
+                if _overlap and not _intent_changed:
+                    _orig = len(chunks)
+                    chunks = [
+                        c for c in chunks
+                        if c.get("chunk_id", c.get("id", "")) not in already_shared_chunks
+                        or str(c.get("chunk_type", "")).lower() == "data_analytics"
+                    ]
+                    dedup_removed = _orig - len(chunks)
+                    if dedup_removed:
+                        logger.info(
+                            "Dedup: removed %d chunks (same product+intent context, analytics exempt)",
+                            dedup_removed, trace_id=trace_id,
+                        )
+                elif _overlap and _intent_changed:
                     logger.info(
-                        "🔁 Dedup: removed %d already-shared chunks", dedup_removed,
+                        "Dedup skipped: intent changed %s→%s (same products, new question dimension)",
+                        _prev_intent, _cur_intent, trace_id=trace_id,
+                    )
+                else:
+                    logger.info(
+                        "Dedup skipped: no real product name overlap "
+                        "(cur=%s prev=%s), all chunks allowed",
+                        list(_cur)[:3], list(_prev)[:3],
                         trace_id=trace_id,
                     )
 
@@ -250,6 +332,12 @@ class RetrievalOrchestrator:
     ) -> Tuple[List[Dict], Dict]:
         """Run a single HierarchicalRetriever call for one intent unit."""
         entities = unit.entities
+        # Extract technical_terms for hardware spec filtering at L4
+        ent_obj = (intelligence.get("entities", {}) if isinstance(intelligence, dict)
+                   else getattr(intelligence, "entities", {}))
+        tech_terms = (ent_obj.get("technical_terms", []) if isinstance(ent_obj, dict)
+                      else list(getattr(ent_obj, "technical_terms", []) or []))
+
         result = await self.hierarchical_retriever.retrieve(
             user_id=user_id,
             conversation_id=memory.get("conversation_id", trace_id),
@@ -257,9 +345,10 @@ class RetrievalOrchestrator:
             query_plan=intelligence,
             intent=unit.intent_type,
             entities={
-                "product_name": entities[0] if entities else None,
-                "products":     entities,
-                "features":     self._extract_features(intelligence),
+                "product_name":    entities[0] if entities else None,
+                "products":        entities,
+                "features":        self._extract_features(intelligence),
+                "technical_terms": tech_terms,
             },
             memory=memory,
             top_k=top_k,
@@ -496,6 +585,31 @@ class RetrievalOrchestrator:
             keywords    = self._extract_keywords(intelligence)
             chunk_ids   = [c.get("chunk_id", c.get("id", "")) for c in chunks]
             active_topic = self._extract_active_topic(intelligence, entities)
+
+            # DON'T cache spec-only queries (8GB RAM, 512GB SSD, etc.)
+            # These require fresh retrieval every time because the spec fingerprint
+            # would otherwise collide with generic product_inquiry keys and serve
+            # wrong products to future spec queries with different requirements.
+            _spec_pat_cache = re.compile(
+                r"^\d+\s*(?:gb|tb|mb|ghz|mhz)\b|ram$|ssd$|hdd$|gpu$|cpu$",
+                re.IGNORECASE,
+            )
+            _generic_cache = {"laptop", "laptops", "product", "products", "item", "items",
+                              "service", "services", "option", "options"}
+            real_entities = [
+                e for e in entities
+                if e and not _spec_pat_cache.search(str(e).strip())
+                and str(e).lower() not in _generic_cache
+                and len(str(e).strip()) >= 3
+            ]
+            if not real_entities:
+                logger.debug(
+                    "L1 cache skip: spec-only entities (%s) — no caching to prevent "
+                    "fingerprint collision with generic product_inquiry",
+                    entities[:3],
+                )
+                return
+
             await self.intent_cache.store_intent_with_retrieval(
                 user_id=user_id,
                 intent_type=intent_type,
@@ -544,16 +658,35 @@ class RetrievalOrchestrator:
                    else getattr(intelligence, "primary_intents", []))
         if primary:
             first = primary[0]
-            return (first.get("type", "general_inquiry") if isinstance(first, dict)
-                    else str(getattr(first, "type", "general_inquiry")))
+            if isinstance(first, dict):
+                raw = first.get("type", "general_inquiry")
+            else:
+                raw = getattr(first, "type", "general_inquiry")
+            if hasattr(raw, "value"):
+                return str(raw.value)
+            s = str(raw)
+            return s.split(".")[-1].lower() if "." in s else s.lower()
         return "general_inquiry"
 
     def _extract_entities(self, intelligence: Any) -> List[str]:
         e = (intelligence.get("entities", {}) if isinstance(intelligence, dict)
              else getattr(intelligence, "entities", {}))
         if isinstance(e, dict):
-            return (e.get("products") or []) + (e.get("features") or [])
-        return list(getattr(e, "products", []) or []) + list(getattr(e, "features", []) or [])
+            # Include technical_terms (hardware specs like "8GB RAM", "512GB SSD")
+            # in the entity set so cache fingerprints differ between spec queries
+            # and generic catalog queries. Without this, "8GB RAM + 512GB SSD"
+            # hashes to the same fingerprint as an empty product_inquiry and hits
+            # a stale cache containing wrong (high-RAM) products.
+            return (
+                (e.get("products") or [])
+                + (e.get("features") or [])
+                + (e.get("technical_terms") or [])
+            )
+        return (
+            list(getattr(e, "products", []) or [])
+            + list(getattr(e, "features", []) or [])
+            + list(getattr(e, "technical_terms", []) or [])
+        )
 
     def _extract_features(self, intelligence: Any) -> List[str]:
         e = (intelligence.get("entities", {}) if isinstance(intelligence, dict)

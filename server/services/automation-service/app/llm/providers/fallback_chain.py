@@ -70,44 +70,78 @@ class FallbackResult:
 
 _EMERGENCY_TEMPLATES: Dict[str, str] = {
     "pricing_inquiry": (
-        "Thank you for reaching out about pricing. "
-        "Our team will provide you with accurate pricing details shortly. "
-        "We appreciate your patience."
+        "Thank you for reaching out about pricing.\n\n"
+        "We want to make sure you receive accurate and up-to-date pricing information. "
+        "Here is what we can confirm:\n\n"
+        "- Our team is reviewing the latest pricing details for your inquiry.\n"
+        "- A specialist will follow up with a complete pricing breakdown shortly.\n"
+        "- For urgent pricing queries, please reply to this email and we will prioritise your request.\n\n"
+        "We appreciate your patience and look forward to assisting you."
     ),
     "product_inquiry": (
-        "Thank you for your interest in our products. "
-        "A specialist will follow up with detailed product information shortly."
+        "Thank you for your interest in our products.\n\n"
+        "We are glad you reached out! Here is what happens next:\n\n"
+        "- A product specialist will review your inquiry and prepare detailed information.\n"
+        "- You will receive a comprehensive overview of relevant products and their features.\n"
+        "- If you have specific requirements, feel free to mention them in your reply.\n\n"
+        "We will get back to you as quickly as possible."
     ),
     "complaint": (
-        "We sincerely apologize for any inconvenience caused. "
-        "Your concern has been flagged as high priority and a team member "
-        "will personally reach out to resolve this promptly."
+        "Thank you for contacting us, and we sincerely apologise for the inconvenience caused.\n\n"
+        "Your concern is important to us. Here is what we are doing:\n\n"
+        "- Your complaint has been flagged as high priority.\n"
+        "- A senior team member will personally review your case.\n"
+        "- We will reach out to you promptly with a resolution.\n\n"
+        "We appreciate your patience and are committed to making this right for you."
     ),
     "refund_request": (
-        "Thank you for contacting us regarding your refund request. "
-        "Our billing team will review your case and respond within 1–2 business days."
+        "Thank you for contacting us regarding your refund request.\n\n"
+        "We understand this is important to you. Here is what to expect:\n\n"
+        "- Your refund request has been received and logged.\n"
+        "- Our billing team will review your case within 1–2 business days.\n"
+        "- You will receive a confirmation email with the outcome.\n\n"
+        "If you have any supporting documents or order details, feel free to reply with them."
     ),
     "technical_support": (
-        "Thank you for reaching out about a technical issue. "
-        "Our technical support team has been notified and will assist you shortly."
+        "Thank you for reaching out about a technical issue.\n\n"
+        "We are on it! Here is what happens next:\n\n"
+        "- Your technical issue has been logged with our support team.\n"
+        "- A technical specialist will review your case and reach out shortly.\n"
+        "- If the issue is urgent, please reply to this email and we will expedite your request.\n\n"
+        "We apologise for any disruption and will resolve this as quickly as possible."
     ),
     "general_inquiry": (
-        "Thank you for contacting us. "
-        "We have received your message and a team member will respond shortly."
+        "Thank you for contacting us.\n\n"
+        "We have received your message and want to make sure you get the right help:\n\n"
+        "- Your inquiry has been received and assigned to the appropriate team.\n"
+        "- A team member will review and respond to you shortly.\n"
+        "- For faster assistance, feel free to include any relevant details in your reply.\n\n"
+        "We appreciate you reaching out and look forward to helping you."
     ),
     "order_status": (
-        "Thank you for your inquiry about your order. "
-        "Our team will check your order status and update you promptly."
+        "Thank you for your inquiry about your order.\n\n"
+        "Here is what we are doing to assist you:\n\n"
+        "- Our team is looking up the latest status of your order.\n"
+        "- We will send you a detailed update including tracking information if available.\n"
+        "- If you have your order reference number, please include it in your reply for faster service.\n\n"
+        "We will get back to you as quickly as possible."
     ),
     "cancellation": (
-        "We have received your cancellation request. "
-        "A team member will process this and confirm the details with you shortly."
+        "We have received your cancellation request.\n\n"
+        "Here is what happens next:\n\n"
+        "- Your request has been logged and assigned to our team.\n"
+        "- A team member will process your cancellation and confirm the details with you.\n"
+        "- You will receive a confirmation email once the process is complete.\n\n"
+        "If you have any questions or would like to discuss alternatives, please reply to this email."
     ),
     # Catch-all fallback
     "_default": (
-        "Thank you for contacting us. "
-        "We have received your message and will respond as soon as possible. "
-        "We apologize for any inconvenience."
+        "Thank you for contacting us.\n\n"
+        "We have received your message and are here to help:\n\n"
+        "- Your message has been received and is being reviewed.\n"
+        "- A team member will respond to you as soon as possible.\n"
+        "- For urgent matters, please indicate so in your reply.\n\n"
+        "We apologise for any inconvenience and appreciate your patience."
     ),
 }
 
@@ -349,16 +383,19 @@ class FallbackChain:
         if not facts:
             return None
 
+        topic = subject or intent.replace("_", " ") or "your request"
         intro = (
-            f"Regarding your inquiry about {subject or intent or 'your request'}, "
-            "here is the relevant information we have on file:"
+            f"Thank you for reaching out about {topic}.\n\n"
+            "Here is the relevant information we have available:"
         )
-        body = "\n\n".join(f"• {f}" for f in facts)
+        # Format as clean bullet points
+        bullet_lines = "\n".join(f"- {f}" for f in facts)
         closing = (
-            "\n\nIf you need further clarification or this does not fully address "
-            "your question, a team member will follow up with you shortly."
+            "\n\nIf this does not fully address your question or you need further "
+            "clarification, please feel free to reply and a team member will follow "
+            "up with you shortly."
         )
-        response_text = f"{intro}\n\n{body}{closing}"
+        response_text = f"{intro}\n\n{bullet_lines}{closing}"
 
         avg_score = sum(_score(c) for c in top) / len(top)
 
@@ -413,10 +450,13 @@ class FallbackChain:
         """
         user_id = memory.get("user_id", "unknown")
         ack_text = (
-            "Thank you for reaching out. We want to ensure you receive the best "
-            "possible assistance. A member of our team will personally review "
-            "your message and respond to you shortly.\n\n"
-            "We apologize for any inconvenience and appreciate your patience."
+            "Thank you for reaching out to us.\n\n"
+            "We want to make sure you receive the best possible assistance. "
+            "Here is what happens next:\n\n"
+            "- A member of our team will personally review your message.\n"
+            "- We will respond to you as quickly as possible.\n"
+            "- For urgent matters, please indicate so in your reply.\n\n"
+            "We apologise for any inconvenience and truly appreciate your patience."
         )
         return FallbackResult(
             response_text=ack_text,

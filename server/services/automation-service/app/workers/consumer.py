@@ -1,8 +1,44 @@
 """
 Workers - Queue Consumer
 =========================
-Redis Streams consumer for automation_events from emailservice.
-Matches emailservice stream_client architecture exactly.
+Notification-driven Redis consumer for automation_events from emailservice.
+
+Architecture: BLPOP on automation_notify (zero idle cost, exact wake count)
+─────────────────────────────────────────────────────────────────────────────
+emailservice does:
+  1. XADD  automation_events  <N messages>
+  2. LPUSH automation_notify  <N>   ← one token per batch, value = count
+
+This consumer does:
+  1. BLPOP automation_notify  (blocks until emailservice pushes a token)
+  2. Parse count from the token  → know exactly how many messages to pull
+  3. XRANGE automation_events COUNT <count>  → pull exactly that many
+  4. Process them, XDEL each one
+  5. Loop back to BLPOP — no polling, no unnecessary wakes
+
+Why BLPOP instead of XREAD BLOCK:
+  - XREAD BLOCK wakes the moment *any* XADD hits the stream.
+    If the consumer is slower than the producer, XREAD keeps waking
+    on partially-empty batches, causing tight re-poll cycles.
+  - BLPOP on the notify list wakes *once per batch* — emailservice controls
+    the cadence. After processing N messages the consumer sleeps again until
+    the next batch token arrives.
+  - The notify token carries the exact count so we do one XRANGE call
+    per batch instead of looping until empty.
+
+Upstash socket timeout compatibility:
+  Upstash enforces ~10s socket read timeout on standard connections.
+  BLPOP uses a dedicated connection with socket_read_timeout=15s and
+  a block timeout of 8s so the call always completes before Upstash
+  closes the socket.
+
+Startup backlog:
+  On first start, before any BLPOP, the consumer checks XLEN and drains
+  any messages already on the stream (left from a previous run or service
+  restart) so no emails are lost.
+
+Idle cost:   0 commands while waiting (server-side block)
+Active cost: 1 BLPOP + 1 XRANGE + N XDEL per batch
 """
 import asyncio
 import json
@@ -15,148 +51,190 @@ from app.observability import get_logger, get_metrics_collector
 
 logger = get_logger(__name__)
 
+# Stream / notify key names (must match emailservice ai_handoff_worker.py)
+STREAM_AUTOMATION_EVENTS  = "automation_events"
+NOTIFY_LIST               = "automation_notify"
 
-# Stream configuration (matches emailservice)
-STREAM_AUTOMATION_EVENTS = "automation_events"
-WAKE_CHANNEL = "automation:wake"
-BATCH_SIZE = 100
+BATCH_SIZE     = 100
 MAX_RETRY_COUNT = 3
-# Poll interval: wake worker every N seconds to drain the stream.
-# This is the primary wake mechanism since Upstash Redis does not support
-# Pub/Sub on most plans. Pub/Sub is attempted as a best-effort fast-path
-# but the poll interval guarantees real-time processing regardless.
-POLL_INTERVAL_S = 5.0
+
+# Block window for BLPOP — must be < Upstash socket read timeout (~10s)
+_BLPOP_TIMEOUT_S      = 8      # seconds
+_SOCKET_READ_TIMEOUT_S = 15    # must exceed _BLPOP_TIMEOUT_S
+
+# Legacy export kept for backward compat
+POLL_INTERVAL_S = 0.0
 
 
 class StreamConsumer:
     """
-    Zero-idle-cost Redis Streams consumer for automation_events.
+    Notification-driven Redis consumer.
 
-    Architecture:
-      - Sleeps on Redis Pub/Sub (automation:wake channel) — zero commands when idle
-      - Wakes ONLY when emailservice publishes a new event
-      - Drains via XRANGE + XDEL (no consumer groups, no XREADGROUP polling)
-      - In-process retry queue with exponential backoff (no Redis until DLQ)
+    Wakes only when emailservice pushes a token to automation_notify.
+    Each token carries the batch size so the consumer pulls exactly the
+    right number of messages — no over-polling, no tight loops.
 
-    Redis command budget:
-      Idle:   0 commands/sec  (blocked on Pub/Sub subscribe, no polling)
-      Active: 1 XRANGE + N XDEL per batch
-      vs old: 1 XREADGROUP/sec = 86,400/day
+    Idle cost:   0 commands (blocked at Redis server level via BLPOP)
+    Active cost: 1 BLPOP + 1 XRANGE + N XDEL per email batch
     """
+
+    _DEDUP_TTL_S = 600  # 10 minutes
 
     def __init__(self):
         self.metrics = get_metrics_collector()
         self._running = False
-        self._redis: Optional[Redis] = None
-        self._wake_event: asyncio.Event = asyncio.Event()
-        self._retry_queue: List[tuple[Dict, int, float]] = []  # (payload, retry_count, next_attempt)
-        self._listener_task: Optional[asyncio.Task] = None
-        self._pubsub_redis: Optional[aioredis.Redis] = None
+        self._redis: Optional[Redis] = None           # shared pool — short commands
+        self._block_redis: Optional[aioredis.Redis] = None  # dedicated — BLPOP
+        self._retry_queue: List[tuple[Dict, int, float]] = []
+        self._work_ready: asyncio.Event = asyncio.Event()
+        self._pending_count: int = 0   # messages signalled by last notify token
 
     async def start(self) -> None:
         self._redis = get_resource_manager().get_redis()
         self._running = True
-
-        # Background task: dedicated connection for Pub/Sub wake signals with auto-reconnect
-        self._listener_task = asyncio.create_task(self._pubsub_listener())
-
-        # Check backlog size — if messages exist, set the wake event immediately
-        # so _worker_loop processes them without waiting for a new Pub/Sub signal.
-        try:
-            backlog_size = await self._redis.xlen(STREAM_AUTOMATION_EVENTS)
-            if backlog_size:
-                logger.info("StreamConsumer: %d backlog messages found — signalling worker",
-                            backlog_size)
-                self._wake_event.set()
-        except Exception as e:
-            logger.warning("StreamConsumer: backlog check failed: %s", e)
-
-        logger.info("StreamConsumer started (event-driven, zero idle cost)")
+        logger.info(
+            "StreamConsumer started (BLPOP notification-driven) | "
+            "stream=%s notify=%s blpop_timeout=%ds socket_timeout=%ds",
+            STREAM_AUTOMATION_EVENTS, NOTIFY_LIST,
+            _BLPOP_TIMEOUT_S, _SOCKET_READ_TIMEOUT_S,
+        )
+        # Drain any startup backlog before entering the notification loop
+        asyncio.create_task(self._startup_drain())
+        # Background task: BLPOP on notify list, sets _work_ready when token arrives
+        asyncio.create_task(self._notify_listener())
 
     async def stop(self) -> None:
         self._running = False
-        self._wake_event.set()  # unblock any waiting consumer
-        if self._listener_task:
-            self._listener_task.cancel()
-            await asyncio.gather(self._listener_task, return_exceptions=True)
-        if self._pubsub_redis:
+        self._work_ready.set()  # unblock any sleeping wait_for_work()
+        if self._block_redis:
             try:
-                await self._pubsub_redis.aclose()
+                await self._block_redis.aclose()
             except Exception:
                 pass
+            self._block_redis = None
         logger.info("StreamConsumer stopped")
 
-    async def _pubsub_listener(self) -> None:
-        """
-        Best-effort Pub/Sub listener for fast-path wake signals.
-        Upstash Redis does not support Pub/Sub on most plans — if subscribe
-        fails after 3 attempts, this task exits gracefully and the poll
-        interval (POLL_INTERVAL_S) takes over as the sole wake mechanism.
-        """
+    # ── Dedicated blocking connection ────────────────────────────────────────
+
+    async def _make_block_redis(self) -> aioredis.Redis:
+        """Create a dedicated Redis connection for BLPOP."""
         from shared.config import get_config
         url = get_config().REDIS_URL
-        consecutive_failures = 0
-        max_failures = 3
-        while self._running and consecutive_failures < max_failures:
-            try:
-                self._pubsub_redis = aioredis.from_url(
-                    url,
-                    encoding="utf-8",
-                    decode_responses=True,
-                    socket_connect_timeout=5,
-                    socket_keepalive=True,
+        return aioredis.from_url(
+            url,
+            encoding="utf-8",
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_keepalive=True,
+            socket_timeout=_SOCKET_READ_TIMEOUT_S,  # must exceed BLPOP timeout
+        )
+
+    # ── Startup backlog drain ────────────────────────────────────────────────
+
+    async def _startup_drain(self) -> None:
+        """
+        On startup, drain any messages already sitting on automation_events
+        (left from a previous run or service restart).
+        Signals _work_ready once for the whole backlog so the worker loop
+        processes it immediately without waiting for a notify token.
+        """
+        try:
+            backlog = await self._redis.xlen(STREAM_AUTOMATION_EVENTS)
+            if backlog:
+                logger.info(
+                    "StreamConsumer: startup backlog detected — %d messages on %s",
+                    backlog, STREAM_AUTOMATION_EVENTS,
                 )
-                pubsub = self._pubsub_redis.pubsub()
-                await pubsub.subscribe(WAKE_CHANNEL)
-                consecutive_failures = 0  # reset on successful subscribe
-                logger.debug("StreamConsumer: Pub/Sub subscribed to %s (fast-path active)", WAKE_CHANNEL)
-                async for message in pubsub.listen():
-                    if not self._running:
-                        break
-                    if message and message.get("type") == "message":
-                        self._wake_event.set()
+                self._pending_count = backlog
+                self._work_ready.set()
+        except Exception as e:
+            logger.warning("StreamConsumer: startup backlog check failed: %s", e)
+
+    # ── Notification listener ────────────────────────────────────────────────
+
+    async def _notify_listener(self) -> None:
+        """
+        Background task: BLPOP automation_notify on a dedicated connection.
+
+        Each token pushed by emailservice carries the count of messages just
+        added to automation_events. We accumulate the count and set _work_ready
+        so the worker loop wakes and processes exactly that many messages.
+
+        Reconnects automatically on any socket error.
+        """
+        while self._running:
+            if self._block_redis is None:
+                try:
+                    self._block_redis = await self._make_block_redis()
+                except Exception as e:
+                    logger.warning("StreamConsumer: cannot connect for BLPOP: %s", e)
+                    await asyncio.sleep(2)
+                    continue
+            try:
+                # BLPOP returns (list_name, value) or None on timeout
+                result = await self._block_redis.blpop(
+                    [NOTIFY_LIST],
+                    timeout=_BLPOP_TIMEOUT_S,
+                )
+                if result:
+                    _list_name, raw_count = result
+                    try:
+                        count = int(raw_count)
+                    except (ValueError, TypeError):
+                        count = 1
+                    self._pending_count += count
+                    logger.debug(
+                        "StreamConsumer: notify token received | count=%d pending=%d",
+                        count, self._pending_count,
+                    )
+                    self._work_ready.set()
+                # If result is None: BLPOP timed out (8s idle) — loop immediately
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                consecutive_failures += 1
-                if self._running and consecutive_failures < max_failures:
-                    logger.debug("StreamConsumer: Pub/Sub unavailable (%d/%d): %s",
-                                 consecutive_failures, max_failures, e)
-                    await asyncio.sleep(2)
-            finally:
-                if self._pubsub_redis:
-                    try:
-                        await self._pubsub_redis.aclose()
-                    except Exception:
-                        pass
-                    self._pubsub_redis = None
-        if self._running:
-            logger.info("StreamConsumer: Pub/Sub disabled (not supported by Redis provider) "
-                        "— poll interval %.0fs is the active wake mechanism", POLL_INTERVAL_S)
+                logger.warning(
+                    "StreamConsumer: BLPOP error (reconnecting): %s",
+                    type(e).__name__,
+                )
+                try:
+                    await self._block_redis.aclose()
+                except Exception:
+                    pass
+                self._block_redis = None
+                if self._running:
+                    await asyncio.sleep(1)
+
+    # ── Public API ───────────────────────────────────────────────────────────
 
     async def wait_for_work(self, timeout: Optional[float] = None) -> None:
         """
-        Block until a Pub/Sub wake signal arrives OR the poll interval elapses.
-        The poll interval (POLL_INTERVAL_S) is the safety fallback: even if the
-        Pub/Sub listener dies or a wake signal is missed, the worker wakes up
-        and drains the stream every POLL_INTERVAL_S seconds.
+        Block until _notify_listener signals that messages are on the stream.
+
+        For the retry path, timeout caps the wait so due retries are processed
+        without overshooting their scheduled time.
         """
-        effective_timeout = timeout if timeout is not None else POLL_INTERVAL_S
-        try:
-            await asyncio.wait_for(self._wake_event.wait(), timeout=effective_timeout)
-        except asyncio.TimeoutError:
-            pass
-        self._wake_event.clear()
+        if timeout is not None and timeout > 0:
+            try:
+                await asyncio.wait_for(self._work_ready.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await self._work_ready.wait()
+        self._work_ready.clear()
 
     async def consume_batch(self) -> List[Dict[str, Any]]:
         """
-        Drain messages from stream via XRANGE + XDEL.
-        Returns parsed events + any due retry items.
-        Called ONLY after wait_for_work() signals activity.
+        Pull exactly _pending_count messages from the stream (or BATCH_SIZE max),
+        then clear the pending counter.
+        Also merges any due retry items.
+        Called immediately after wait_for_work() signals activity.
         """
-        records = await self._drain_once()
+        # Clamp to BATCH_SIZE to avoid oversized pulls
+        pull_count = min(self._pending_count, BATCH_SIZE) if self._pending_count > 0 else BATCH_SIZE
+        self._pending_count = max(0, self._pending_count - pull_count)
 
-        # Add due retry items (no Redis involved)
+        records = await self._drain_once(count=pull_count)
+
         now = time.monotonic()
         due   = [(p, rc) for p, rc, ts in self._retry_queue if ts <= now]
         later = [(p, rc, ts) for p, rc, ts in self._retry_queue if ts > now]
@@ -169,11 +247,13 @@ class StreamConsumer:
             self.metrics.record_counter("worker.messages_consumed", len(records), "system")
         return records
 
-    async def _drain_once(self) -> List[Dict[str, Any]]:
+    async def _drain_once(self, count: int = BATCH_SIZE) -> List[Dict[str, Any]]:
         """XRANGE + XDEL — reads and immediately deletes processed messages."""
         records = []
         try:
-            messages = await self._redis.xrange(STREAM_AUTOMATION_EVENTS, "-", "+", count=BATCH_SIZE)
+            messages = await self._redis.xrange(
+                STREAM_AUTOMATION_EVENTS, "-", "+", count=count
+            )
             if not messages:
                 return records
 
@@ -182,12 +262,30 @@ class StreamConsumer:
                 try:
                     data = json.loads(fields.get("data", "{}"))
                     data["_stream_id"] = msg_id
-                    data["_stream"] = STREAM_AUTOMATION_EVENTS
+                    data["_stream"]    = STREAM_AUTOMATION_EVENTS
+
+                    message_id = data.get("message_id", "")
+                    if message_id:
+                        dedup_key = f"automation:processed:{message_id}"
+                        is_new = await self._redis.set(
+                            dedup_key, "1", nx=True, ex=self._DEDUP_TTL_S
+                        )
+                        if is_new is None:
+                            logger.warning(
+                                "Dedup: skipping already-processed message_id=%s stream_id=%s",
+                                message_id[:20], msg_id,
+                            )
+                            ids_to_del.append(msg_id)
+                            self.metrics.record_counter(
+                                "worker.messages_dedup_skipped", 1, "system"
+                            )
+                            continue
+
                     records.append(data)
                     ids_to_del.append(msg_id)
                 except Exception as e:
                     logger.error("Failed to parse message %s: %s", msg_id, e)
-                    ids_to_del.append(msg_id)  # delete unparseable
+                    ids_to_del.append(msg_id)
 
             if ids_to_del:
                 pipe = self._redis.pipeline(transaction=False)
@@ -198,26 +296,23 @@ class StreamConsumer:
         except Exception as e:
             logger.error("Stream drain error: %s", e)
         return records
-    
+
     def has_pending_retries(self) -> bool:
-        """Check if retry queue has pending items"""
         return bool(self._retry_queue)
-    
+
     def next_retry_delay(self) -> float:
-        """Get delay until next retry is due (seconds)"""
         if not self._retry_queue:
             return 0.0
         now = time.monotonic()
         return max(0.0, min(ts - now for _, _, ts in self._retry_queue))
 
     async def _send_to_dlq(self, message: Dict[str, Any], reason: str) -> None:
-        """Send failed message to dead letter queue after max retries exhausted."""
         try:
             dlq_payload = {
                 "original_message": {k: v for k, v in message.items() if not k.startswith("_")},
-                "failure_reason": reason,
-                "retry_count": message.get("_retry_count", 0),
-                "timestamp": time.time(),
+                "failure_reason":   reason,
+                "retry_count":      message.get("_retry_count", 0),
+                "timestamp":        time.time(),
             }
             await self._redis.xadd(
                 "automation_dlq",
@@ -226,8 +321,10 @@ class StreamConsumer:
                 approximate=True,
             )
             self.metrics.record_counter("worker.messages_dlq", 1, "system")
-            logger.warning("Message sent to DLQ: %s — %s",
-                           message.get("message_id", "?")[:12], reason)
+            logger.warning(
+                "Message sent to DLQ: %s — %s",
+                message.get("message_id", "?")[:12], reason,
+            )
         except Exception as e:
             logger.error("Failed to send to DLQ: %s", e)
 

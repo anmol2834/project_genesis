@@ -47,9 +47,17 @@ class Urgency(str, Enum):
 
 
 class IntentType(str, Enum):
-    """Primary intent categories"""
+    """Primary intent categories — covers all business inquiry types"""
     PRICING_INQUIRY = "pricing_inquiry"
     PRODUCT_INQUIRY = "product_inquiry"
+    # Offers, promotions, discounts, deals
+    OFFERS_INQUIRY = "offers_inquiry"
+    # Shipping, delivery, logistics
+    SHIPPING_INQUIRY = "shipping_inquiry"
+    # Company info, about us, mission
+    COMPANY_INQUIRY = "company_inquiry"
+    # Educational content, tutorials, guides
+    EDUCATIONAL_INQUIRY = "educational_inquiry"
     SUPPORT_REQUEST = "support_request"
     TECHNICAL_SUPPORT_REQUEST = "technical_support_request"
     TECHNICAL_ASSISTANCE = "technical_assistance"
@@ -138,6 +146,9 @@ class SearchPlan(BaseModel):
     support_queries: List[str] = Field(default_factory=list)
     pricing_queries: List[str] = Field(default_factory=list)
     followup_queries: List[str] = Field(default_factory=list)
+    # Category routing — set by Brain #1, enforced by retrieval pipeline
+    target_categories: List[str] = Field(default_factory=list)   # e.g. ["product_service"]
+    excluded_categories: List[str] = Field(default_factory=list) # e.g. ["data_analytics", "policy"]
 
 
 class RetrievalStrategy(BaseModel):
@@ -148,6 +159,8 @@ class RetrievalStrategy(BaseModel):
     reranking_required: bool = True
     metadata_filtering: bool = True
     fusion_required: bool = True
+    # Source priority: analytics NEVER primary unless explicitly requested
+    analytics_allowed: bool = False  # True only when user asks for stats/reports/analytics
 
 
 class BusinessReasoning(BaseModel):

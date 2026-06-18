@@ -166,15 +166,18 @@ class IntelligenceOrchestrator:
         Both conditions must be met. A new conversation with a short opener
         ("hello", "hi") fails condition 2 and goes to Brain #1 instead.
         """
-        # Condition 1: short signal
+        # Condition 1: short signal (includes "show more" pagination)
         message_lower = message.lower().strip()
         short_signals = {
             "yes", "no", "okay", "ok", "sure", "thanks", "thank you",
             "continue", "go ahead", "tell me more", "what else",
             "please continue", "and then", "what about", "sounds good",
             "perfect", "great", "got it", "understood", "i see",
+            # Catalog pagination signals
+            "show more", "more products", "more options", "next",
+            "see more", "any more", "more", "other products", "more items",
         }
-        is_short = message_lower in short_signals or len(message.strip()) < 15
+        is_short = message_lower in short_signals or len(message.strip()) < 20
 
         if not is_short:
             return False
@@ -233,40 +236,240 @@ class IntelligenceOrchestrator:
 
         # Uplift: if customer explicitly asks about products/services/catalog,
         # treat as product_inquiry so catalog role and catalog retrieval fire.
+        # ALSO uplift offers/promotions/deals → offers_inquiry with correct category routing.
+        _OFFERS_SIGNALS = {
+            "offer", "offers", "deal", "deals", "discount", "discounts",
+            "promotion", "promotions", "promo", "coupon", "coupons", "sale",
+            "any offers", "have offers", "got offers", "special", "savings",
+        }
         _PRODUCT_SERVICE_SIGNALS = {
             "product", "products", "service", "services", "catalog", "catalogue",
-            "offer", "offers", "offering", "offerings", "solution", "solutions",
+            "offering", "offerings", "solution", "solutions",
             "what do you", "what you", "wanna about", "want to know about",
             "tell me about", "know about", "available", "range",
         }
+        _SHIPPING_SIGNALS = {
+            "shipping", "delivery", "ship", "deliver", "logistics", "courier",
+        }
+        _COMPANY_SIGNALS = {
+            "about you", "about your company", "who are you", "your company",
+            "about the company", "company info", "tell me about your",
+        }
+        _ISSUE_SIGNALS = {
+            # Universal technical / product issue signals — domain-agnostic
+            # Works for: software bugs, hardware failures, service outages,
+            # medical device faults, vehicle malfunctions, app errors, etc.
+            "issue", "bug", "error", "broken", "not working", "failed", "problem",
+            "troubleshoot", "fix", "resolve", "crash", "freeze", "stuck",
+            "malfunction", "defective", "faulty", "repair", "technical issue",
+            "not functioning", "stopped working", "keeps failing", "won't start",
+            "won't open", "won't load", "unresponsive", "glitch", "fault",
+            "defect", "damage", "damaged", "broken down", "out of order",
+        }
+        # Contact/support signals — for queries asking for contact details, phone,
+        # email, reach out, how to contact, get in touch, speak to someone, etc.
+        _CONTACT_SIGNALS = {
+            "contact", "contact details", "contact info", "contact information",
+            "phone number", "email address", "reach out", "reach them",
+            "get in touch", "how to contact", "speak to", "talk to",
+            "call them", "call us", "email them", "email us",
+            "support team", "customer service", "help desk",
+            "reach by myself", "by myself", "directly",
+        }
         msg_lower = message_content.lower()
+        has_offers_signal = any(s in msg_lower for s in _OFFERS_SIGNALS)
         has_product_signal = any(s in msg_lower for s in _PRODUCT_SERVICE_SIGNALS)
+        has_shipping_signal = any(s in msg_lower for s in _SHIPPING_SIGNALS)
+        has_company_signal = any(s in msg_lower for s in _COMPANY_SIGNALS)
+        has_issue_signal = any(s in msg_lower for s in _ISSUE_SIGNALS)
+        has_contact_signal = any(s in msg_lower for s in _CONTACT_SIGNALS)
 
-        if (
-            primary
-            and primary.type == IntentType.GENERAL_INQUIRY
-            and has_product_signal
-        ):
+        # HARDWARE SPEC DETECTION: queries containing hardware/product specs
+        # (RAM, SSD, GPU, processor, storage etc.) are ALWAYS product/pricing queries
+        # regardless of intent label. "I want 8GB RAM and 512GB SSD" is a product
+        # inquiry even though it doesn't use the word "product".
+        # This regex works for any business that sells spec-based items
+        # (electronics, vehicles, machinery, medical equipment, etc.)
+        import re as _re_spec
+        _SPEC_SIGNAL_PAT = _re_spec.compile(
+            r"\b\d+\s*(?:gb|tb|mb|ghz|mhz|nm|inch|inches|\"|watt|hp|cc|km)\b"
+            r"|\b(?:ram|ssd|hdd|nvme|gpu|cpu|vram|processor|memory|storage|battery"
+            r"|display|screen|camera|megapixel|resolution|rpm|horsepower|torque)\b",
+            _re_spec.IGNORECASE,
+        )
+        has_spec_signal = bool(_SPEC_SIGNAL_PAT.search(msg_lower))
+        # Also treat "options" + "cost"/"price" as a product+pricing query
+        has_options_cost = ("options" in msg_lower or "option" in msg_lower) and \
+                           any(w in msg_lower for w in ("cost", "price", "much", "budget", "affordable"))
+        # Combine: specs → product_inquiry (or pricing_inquiry if price asked)
+        if has_spec_signal or has_options_cost:
+            has_product_signal = True
+            # If they also ask about cost/price, treat as pricing_inquiry
+            if any(w in msg_lower for w in ("cost", "price", "much", "budget", "how much", "fee", "rate")):
+                has_pricing_in_spec = True
+            else:
+                has_pricing_in_spec = False
+        else:
+            has_pricing_in_spec = False
+
+        # Issue resolution uplift (before other uplifts — most specific)
+        if primary and primary.type == IntentType.GENERAL_INQUIRY and has_issue_signal:
             logger.info(
-                "Uplifting general_inquiry → product_inquiry (product signal detected). "
-                "message='%s'",
-                message_content[:80],
+                "Uplifting general_inquiry → support_request/issue (issue signal detected). "
+                "message='%s'", message_content[:80],
             )
             intelligence.primary_intents[0] = IntentDefinition(
-                type=IntentType.PRODUCT_INQUIRY,
-                confidence=primary.confidence,
+                type=IntentType.TECHNICAL_SUPPORT_REQUEST, confidence=primary.confidence
             )
+            primary = intelligence.primary_intents[0]
 
-        # Ensure the search plan has useful queries for analytics retrieval
+        # Contact uplift: general_inquiry + contact signals → support_request
+        # "give me the contact details", "how do I reach you", etc.
+        elif primary and primary.type == IntentType.GENERAL_INQUIRY and has_contact_signal:
+            logger.info(
+                "Uplifting general_inquiry → support_request (contact signal detected). "
+                "message='%s'", message_content[:80],
+            )
+            intelligence.primary_intents[0] = IntentDefinition(
+                type=IntentType.SUPPORT_REQUEST, confidence=primary.confidence
+            )
+            primary = intelligence.primary_intents[0]
+
+        # Offers uplift: general_inquiry + offer signals → offers_inquiry
+        elif primary and primary.type == IntentType.GENERAL_INQUIRY and has_offers_signal:
+            logger.info(
+                "Uplifting general_inquiry → offers_inquiry (offers signal detected). "
+                "message='%s'", message_content[:80],
+            )
+            intelligence.primary_intents[0] = IntentDefinition(
+                type=IntentType.OFFERS_INQUIRY, confidence=primary.confidence
+            )
+            primary = intelligence.primary_intents[0]
+
+        # Product uplift: general_inquiry + product signals → product_inquiry or pricing_inquiry
+        # Spec queries (8GB RAM, 512GB SSD) with cost questions → pricing_inquiry
+        # Spec queries without cost questions → product_inquiry
+        elif primary and primary.type == IntentType.GENERAL_INQUIRY and has_product_signal:
+            if has_pricing_in_spec:
+                logger.info(
+                    "Uplifting general_inquiry → pricing_inquiry (spec+cost signal detected). "
+                    "message='%s'", message_content[:80],
+                )
+                intelligence.primary_intents[0] = IntentDefinition(
+                    type=IntentType.PRICING_INQUIRY, confidence=primary.confidence
+                )
+            else:
+                logger.info(
+                    "Uplifting general_inquiry → product_inquiry (product/spec signal detected). "
+                    "message='%s'", message_content[:80],
+                )
+                intelligence.primary_intents[0] = IntentDefinition(
+                    type=IntentType.PRODUCT_INQUIRY, confidence=primary.confidence
+                )
+            primary = intelligence.primary_intents[0]
+
+        # Shipping uplift
+        elif primary and primary.type == IntentType.GENERAL_INQUIRY and has_shipping_signal:
+            intelligence.primary_intents[0] = IntentDefinition(
+                type=IntentType.SHIPPING_INQUIRY, confidence=primary.confidence
+            )
+            primary = intelligence.primary_intents[0]
+
+        # Company uplift
+        elif primary and primary.type == IntentType.GENERAL_INQUIRY and has_company_signal:
+            intelligence.primary_intents[0] = IntentDefinition(
+                type=IntentType.COMPANY_INQUIRY, confidence=primary.confidence
+            )
+            primary = intelligence.primary_intents[0]
+
+        # Determine correct target category for search plan
+        # This ALWAYS overrides what Brain #1 returned — the JSON example in the
+        # system prompt defaults to product_service which contaminates company/shipping/offers queries.
+        #
+        # PRICING NOTE: pricing data is spread across product_service, offers_promotions,
+        # and delivery_shipping. Setting target_categories=[] for pricing_inquiry means
+        # no Qdrant category filter is applied — ALL categories are searched and the
+        # hallucination_guard whitelist restricts what reaches the LLM.
+        _INTENT_CATEGORY_MAP = {
+            IntentType.PRODUCT_INQUIRY:    ("product_service", ["what products", "product catalog", "available products"]),
+            # pricing_inquiry searches product_service first (prices live there), then
+            # also needs offers_promotions for discount/promo prices — use None so
+            # the retriever runs without a category filter and hits all price buckets.
+            IntentType.PRICING_INQUIRY:    (None, ["product pricing", "price list", "how much", "product prices", "product costs"]),
+            IntentType.OFFERS_INQUIRY:     ("offers_promotions", ["offers promotions discounts", "available offers", "current deals"]),
+            IntentType.SHIPPING_INQUIRY:   ("delivery_shipping", ["shipping delivery options", "delivery timeline"]),
+            IntentType.COMPANY_INQUIRY:    ("company_info", ["company information", "about the business", "business overview"]),
+            IntentType.EDUCATIONAL_INQUIRY:("educational_content", ["tutorials guides how-to", "learning resources"]),
+            IntentType.SUPPORT_REQUEST:    ("contact_support", ["support contact", "help desk", "customer support"]),
+            IntentType.TECHNICAL_SUPPORT_REQUEST: ("issue_resolution", ["known issues fix", "troubleshooting steps", "error resolution"]),
+            IntentType.COMPLAINT:          ("contact_support", ["complaint resolution", "customer service"]),
+            IntentType.REFUND_REQUEST:     ("policies_legal", ["refund policy", "return policy"]),
+            IntentType.BILLING_INQUIRY:    ("product_service", ["billing invoice", "payment"]),
+        }
+        if primary and primary.type in _INTENT_CATEGORY_MAP:
+            target_cat, fallback_queries = _INTENT_CATEGORY_MAP[primary.type]
+        else:
+            target_cat, fallback_queries = "product_service", ["products list", "available products", "product catalog"]
+
+        # ALWAYS set target_categories based on intent — Brain #1's JSON example
+        # defaults to product_service which contaminates all non-product queries.
         sp = intelligence.search_plan
+        # Detect if analytics_allowed was set by Brain #1 — preserve it
+        analytics_allowed_by_brain1 = False
+        if hasattr(intelligence, "retrieval_strategy") and intelligence.retrieval_strategy:
+            analytics_allowed_by_brain1 = getattr(
+                intelligence.retrieval_strategy, "analytics_allowed", False
+            )
+        # Detect catalog-overview signals in the message itself
+        _OVERVIEW_SIGNALS = {
+            "range", "overview", "all products", "all services", "what do you have",
+            "what do you offer", "what you have", "full catalog", "complete catalog",
+            "price range", "how many", "cheapest", "most expensive", "starting from",
+            "entire range", "product line", "list everything",
+        }
+        msg_lower_for_analytics = message_content.lower()
+        is_catalog_overview = any(s in msg_lower_for_analytics for s in _OVERVIEW_SIGNALS)
+        # For catalog-overview queries: include analytics in target categories
+        # For specific product queries: exclude analytics
+        excluded_cats = [] if (analytics_allowed_by_brain1 or is_catalog_overview) else ["data_analytics"]
+
         if not sp.semantic_queries and not sp.exact_search_queries:
             msg_words = message_content.strip()
             intelligence.search_plan = SearchPlan(
-                semantic_queries=[msg_words, "products services overview", "business information"],
+                semantic_queries=[msg_words] + fallback_queries,
                 exact_search_queries=[],
+                # target_categories=[] when target_cat is None → no Qdrant category filter
+                target_categories=[target_cat] if target_cat else [],
+                excluded_categories=excluded_cats,
             )
             logger.debug(
-                "Added discovery queries to empty search plan for new conversation"
+                "Built search plan from scratch: category=%s queries=%s analytics_overview=%s",
+                target_cat, fallback_queries, is_catalog_overview,
+            )
+        else:
+            # Always enforce correct category regardless of what Brain #1 returned
+            object.__setattr__(intelligence.search_plan, "target_categories",
+                               [target_cat] if target_cat else [])
+            object.__setattr__(intelligence.search_plan, "excluded_categories", excluded_cats)
+            if target_cat in ("company_info", "offers_promotions", "delivery_shipping",
+                              "educational_content", "contact_support", "policies_legal",
+                              "issue_resolution"):
+                # For non-product categories: ensure semantic queries target the right domain
+                existing = list(sp.semantic_queries or [])
+                for fq in fallback_queries:
+                    if fq not in existing:
+                        existing.append(fq)
+                object.__setattr__(intelligence.search_plan, "semantic_queries", existing[:6])
+            elif target_cat is None:
+                # pricing_inquiry: no category filter — add pricing-focused queries
+                existing = list(sp.semantic_queries or [])
+                for fq in fallback_queries:
+                    if fq not in existing:
+                        existing.append(fq)
+                object.__setattr__(intelligence.search_plan, "semantic_queries", existing[:8])
+            logger.debug(
+                "Enforced target_category=%s excluded=%s on existing search plan",
+                target_cat, excluded_cats,
             )
 
         return intelligence
@@ -288,6 +491,19 @@ class IntelligenceOrchestrator:
         message_lower = message.lower().strip()
         is_negative   = message_lower in {"no", "nope", "not interested", "nahi", "na"}
 
+        # ── "Show more" / pagination detection ───────────────────────
+        _SHOW_MORE_SIGNALS = {
+            "show more", "more products", "more options", "next", "next page",
+            "see more", "what else", "any more", "more", "continue listing",
+            "show all", "list more", "other products", "more items",
+        }
+        is_show_more = message_lower in _SHOW_MORE_SIGNALS or "show more" in message_lower
+
+        # Get catalog state from memory for pagination
+        shown_products  = memory.get("shown_products", [])
+        catalog_pos     = memory.get("catalog_position", 0)
+        catalog_exhausted = memory.get("catalog_exhausted", False)
+
         # ── Inherit from intelligence memory ────────────────────────────
         last_intent      = memory.get("last_intent", "general_inquiry")
         active_topic     = memory.get("active_topic", "")
@@ -308,7 +524,16 @@ class IntelligenceOrchestrator:
         # ── Build inherited search plan ──────────────────────────────────
         inherited_queries: List[str] = []
 
-        if best_entity and not is_negative:
+        if is_show_more and not is_negative:
+            # Catalog pagination: ask for next page of products, excluding already shown
+            inherited_queries = ["products list", "available products", "product catalog"]
+            if best_entity:
+                inherited_queries.insert(0, f"{best_entity} products")
+            logger.info(
+                "Catalog pagination requested | shown=%d position=%d exhausted=%s",
+                len(shown_products), catalog_pos, catalog_exhausted,
+            )
+        elif best_entity and not is_negative:
             from app.intelligence.query_decomposition import _intent_to_query_fragment
             fragment = _intent_to_query_fragment(last_intent)
             inherited_queries.append(f"{best_entity} {fragment}")
@@ -320,20 +545,15 @@ class IntelligenceOrchestrator:
         if not inherited_queries and not is_negative:
             inherited_queries = [last_intent.replace("_", " ")]
 
-        # Safety: if we still have no real queries, the continuation is effectively
-        # a new-conversation opener — build discovery queries instead of "unknown"
+        # Safety: if we still have no real queries, use product discovery queries
         if not is_negative and (
             not inherited_queries
             or inherited_queries == ["unknown"]
             or inherited_queries == ["follow_up"]
         ):
-            inherited_queries = [
-                "products and services overview",
-                "business information",
-                "product catalog summary",
-            ]
+            inherited_queries = ["products list", "available products", "product catalog"]
             logger.debug(
-                "Continuation had no real context — using discovery queries instead"
+                "Continuation had no real context — using product discovery queries instead"
             )
 
         # ── Map last intent string → IntentType enum ────────────────────
@@ -341,12 +561,18 @@ class IntelligenceOrchestrator:
         _INTENT_MAP: Dict[str, str] = {
             "pricing_inquiry":           "pricing_inquiry",
             "product_inquiry":           "product_inquiry",
+            "offers_inquiry":            "offers_inquiry",
+            "shipping_inquiry":          "shipping_inquiry",
+            "company_inquiry":           "company_inquiry",
+            "educational_inquiry":       "educational_inquiry",
             "support_request":           "support_request",
             "technical_support_request": "technical_support_request",
             "complaint":                 "complaint",
             "refund_request":            "refund_request",
             "billing_inquiry":           "billing_inquiry",
             "general_inquiry":           "general_inquiry",
+            "issue_inquiry":             "technical_support_request",
+            "issue_resolution":          "technical_support_request",
         }
         mapped_intent = _INTENT_MAP.get(last_intent, "general_inquiry")
         if is_negative:
@@ -380,6 +606,26 @@ class IntelligenceOrchestrator:
 
         elapsed_ms = 0.0
 
+        # Map last intent to its correct retrieval category.
+        # pricing_inquiry uses None → no Qdrant category filter so it searches
+        # product_service, offers_promotions, and delivery_shipping in one pass.
+        _INTENT_TO_CATEGORY: Dict[str, Optional[str]] = {
+            "product_inquiry":           "product_service",
+            "pricing_inquiry":           None,              # search all price-bearing categories
+            "offers_inquiry":            "offers_promotions",
+            "shipping_inquiry":          "delivery_shipping",
+            "company_inquiry":           "company_info",
+            "educational_inquiry":       "educational_content",
+            "support_request":           "contact_support",
+            "technical_support_request": "issue_resolution",
+            "complaint":                 "contact_support",
+            "refund_request":            "policies_legal",
+            "billing_inquiry":           "product_service",
+            "issue_inquiry":             "issue_resolution",
+            "issue_resolution":          "issue_resolution",
+        }
+        inherited_category = _INTENT_TO_CATEGORY.get(mapped_intent, "product_service")
+
         result = EnterpriseIntelligenceResult(
             conversation_analysis=ConversationAnalysis(
                 stage=conv_stage,
@@ -397,13 +643,17 @@ class IntelligenceOrchestrator:
             ),
             search_plan=SearchPlan(
                 semantic_queries=inherited_queries,
-                exact_search_queries=[best_entity] if best_entity else [],
+                exact_search_queries=[best_entity] if best_entity and not is_show_more else [],
+                # target_categories=[] when None → no Qdrant category filter (all categories searched)
+                target_categories=[inherited_category] if inherited_category and not is_negative else [],
+                excluded_categories=["data_analytics"],
             ),
             retrieval_strategy=RetrievalStrategy(
-                cache_lookup_first=True,
-                exact_match_priority=bool(best_entity),
+                cache_lookup_first=not is_show_more,  # skip cache on "show more" to get fresh results
+                exact_match_priority=bool(best_entity) and not is_show_more,
                 semantic_search=not is_negative,
                 reranking_required=False,
+                analytics_allowed=False,
             ),
             business_reasoning=BusinessReasoning(
                 likely_goal=active_topic or last_intent,
@@ -421,8 +671,8 @@ class IntelligenceOrchestrator:
         )
 
         logger.info(
-            "Continuation resolved | intent=%s entity=%s queries=%d negative=%s",
-            mapped_intent, best_entity, len(inherited_queries), is_negative,
+            "Continuation resolved | intent=%s entity=%s queries=%d negative=%s show_more=%s",
+            mapped_intent, best_entity, len(inherited_queries), is_negative, is_show_more,
         )
         return result
     
@@ -477,17 +727,14 @@ class IntelligenceOrchestrator:
             context_parts.append(f"Active Topics: {', '.join(active_topics)}")
 
         # Intelligence memory — already-shared context (repetition prevention)
-        already_shared_entities = memory.get("already_shared_entities", [])
-        if already_shared_entities:
-            context_parts.append(f"Already Shared Entities: {', '.join(already_shared_entities[:10])}")
-
-        pricing_shared = memory.get("pricing_already_shared", [])
-        if pricing_shared:
-            context_parts.append(f"Pricing Already Shared: {json.dumps(pricing_shared[:5])}")
-
+        # CRITICAL: Only inject PRODUCT NAMES that were already shared.
+        # NEVER inject hardware specs (8GB RAM, 512GB SSD, etc.) or features
+        # as "already shared entities" — specs are search CRITERIA, not products.
+        # Injecting specs here poisons Brain #1 and causes Brain #2 to say
+        # "I don't have products with those specs" when it should search for them.
         already_shared_products = memory.get("already_shared_products", [])
         if already_shared_products:
-            context_parts.append(f"Products Already Shared: {', '.join(already_shared_products[:10])}")
+            context_parts.append(f"Products Already Shown: {', '.join(already_shared_products[:10])}")
 
         unresolved = memory.get("unresolved_questions", [])
         if unresolved:
@@ -529,10 +776,13 @@ CRITICAL — NEW CONVERSATION RULES:
   an established conversation.
 - For greetings (hello, hi, hey) or short openers with no specific product/service request:
   use "general_inquiry" as primary intent.
-- Generate semantic_queries that retrieve business overview, product catalog,
-  and service descriptions so the AI can give an informed introduction.
-- Example discovery queries: "products and services overview", "business information",
-  "product catalog summary", "available services", "pricing overview"
+- For product/service discovery requests: use "product_inquiry" as primary intent.
+- Generate semantic_queries that retrieve ACTUAL PRODUCT RECORDS, not summaries.
+- Example product queries: "product catalog", "available products", "product list",
+  "services offered", "product names prices"
+- ALWAYS set target_categories to ["product_service"] for product/service requests.
+- ALWAYS set excluded_categories to ["data_analytics"] for product/service requests.
+- Analytics data must NEVER be the primary knowledge source for product questions.
 """
 
         system_prompt = f"""You are an ENTERPRISE AI CONVERSATION ANALYST for a business automation system.
@@ -546,9 +796,24 @@ You MUST analyze and extract:
 3. SENTIMENT (positive/neutral/negative/frustrated/angry/urgent)
 4. URGENCY (low/medium/high/critical)
 5. PRIMARY INTENT with confidence score 0-1
-   Valid values: pricing_inquiry, product_inquiry, support_request, technical_support_request,
+   Valid values: pricing_inquiry, product_inquiry, offers_inquiry, shipping_inquiry,
+   company_inquiry, educational_inquiry, support_request, technical_support_request,
    feature_request, complaint, refund_request, customization_request, bulk_purchase,
    partnership_inquiry, billing_inquiry, account_issue, general_inquiry, onboarding, unknown
+   
+   INTENT CLASSIFICATION GUIDE (use the most specific intent):
+   - product_inquiry: asking about products, catalog, what you sell, specifications
+   - pricing_inquiry: asking about price of a SPECIFIC product ("how much is X?")
+   - offers_inquiry: asking about offers, discounts, promotions, deals, coupons, sales ("any offers?", "do you have discounts?")
+   - shipping_inquiry: asking about delivery, shipping, logistics
+   - company_inquiry: asking about the company, about us, mission, team
+   - educational_inquiry: asking about tutorials, guides, how-to, learning resources
+   - support_request: needing help, support, assistance with a problem (general contact)
+   - technical_support_request: reporting a SPECIFIC device/software bug, error, crash, broken feature,
+     malfunction, screen issue, battery problem, driver failure, overheating, BSOD — any known issue
+     that requires a documented fix or resolution. Use target_categories: ["issue_resolution"]
+   - complaint: expressing dissatisfaction, reporting an issue
+   - refund_request: asking for refund, return, cancellation
    NOTE: "follow_up" is only valid when Turn Count > 0 and prior context exists.
 6. SECONDARY INTENTS if customer has multiple goals
 7. SALES INTENTS if commercial opportunity exists
@@ -559,18 +824,30 @@ You MUST analyze and extract:
    - industries: customer's business sector
    - quantities: bulk orders, team sizes, numbers
    - pricing_terms: budget mentions, payment plans
-   - technical_terms: APIs, integrations, tech specs
+   - technical_terms: APIs, integrations, tech specs (CPU, RAM, Storage, GPU, brand)
    - competitors: alternative solutions mentioned
    - locations: geographic requirements
    - timelines: delivery dates, urgency indicators
    - budget_indicators: price sensitivity signals
 10. SEARCH PLAN (generate 6-12 search queries):
     - exact_search_queries: specific product/feature lookups
-    - semantic_queries: conceptual/topic searches (MUST be non-empty with meaningful queries)
+    - semantic_queries: actual product record searches (NEVER use "analytics" or "summary" words)
     - metadata_queries: filter-based searches
     - support_queries: troubleshooting, how-to
     - pricing_queries: cost, plans, discounts
     - followup_queries: related topics
+    - target_categories: list of chunk_types to search. Valid values:
+      "product_service", "offers_promotions", "delivery_shipping", "company_info",
+      "contact_support", "policies_legal", "educational_content", "issue_resolution"
+      (e.g. ["product_service"] for product requests, ["issue_resolution"] for bug/error reports)
+    - excluded_categories: list of chunk_types to NEVER search (MUST include "data_analytics" for product/service requests)
+11. RETRIEVAL STRATEGY:
+    - analytics_allowed: true when:
+      a) User explicitly asks for statistics/reports/analytics/trends/insights, OR
+      b) User asks for catalog overview: "range", "what do you have", "all products",
+         "price range", "how many products", "list everything", "full catalog",
+         "cheapest", "most expensive", "starting from", "overview of products"
+      Set to false for ALL specific single-product inquiries, support, and policy requests.
 11. BUSINESS REASONING:
     - likely_goal: what customer wants to achieve
     - possible_objections: concerns they might have
@@ -610,11 +887,13 @@ RESPOND WITH VALID JSON ONLY (no markdown, no extra text):
   }},
   "search_plan": {{
     "exact_search_queries": [],
-    "semantic_queries": ["products and services overview", "business information", "product catalog"],
+    "semantic_queries": ["products list", "available products", "product catalog"],
     "metadata_queries": [],
     "support_queries": [],
     "pricing_queries": [],
-    "followup_queries": []
+    "followup_queries": [],
+    "target_categories": ["product_service"],
+    "excluded_categories": ["data_analytics"]
   }},
   "retrieval_strategy": {{
     "cache_lookup_first": false,
@@ -622,7 +901,8 @@ RESPOND WITH VALID JSON ONLY (no markdown, no extra text):
     "semantic_search": true,
     "reranking_required": false,
     "metadata_filtering": false,
-    "fusion_required": false
+    "fusion_required": false,
+    "analytics_allowed": false
   }},
   "business_reasoning": {{
     "likely_goal": "Exploring what the business offers",

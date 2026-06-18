@@ -21,6 +21,7 @@ from models.messages import EmailMessage, MessageDirection, MessageStatus, Messa
 from models.conversations import EmailConversation
 from models.email_account import EmailAccount
 from encryption import decrypt_token
+from html_formatter import format_email_html
 
 logger = logging.getLogger("emailservice.send_reply")
 router = APIRouter(prefix="/email", tags=["send-reply"])
@@ -146,6 +147,18 @@ async def send_reply(req: SendReplyRequest):
     if not clean_body_text:
         clean_body_text = req.body_text
 
+    # ── Generate HTML body if not already provided ────────────────────────────
+    # Always produce a properly formatted HTML email for the customer.
+    # If body_html is already set (e.g., manually drafted HTML), use it as-is.
+    # Otherwise convert the plain text to a beautiful branded HTML email.
+    if req.body_html and req.body_html.strip():
+        html_body = req.body_html
+    else:
+        html_body = format_email_html(
+            plain_text=clean_body_text,
+            subject=req.subject or "",
+        )
+
     # Pre-refresh token ONCE before retry loop — avoids 15s refresh inside each attempt
     try:
         fresh_token = await get_fresh_token(snap)
@@ -160,11 +173,11 @@ async def send_reply(req: SendReplyRequest):
     for attempt in range(3):
         try:
             if provider_key == "gmail":
-                provider_msg_id = await _send_gmail(snap, req, from_email, clean_body_text, fresh_token)
+                provider_msg_id = await _send_gmail(snap, req, from_email, clean_body_text, fresh_token, html_body)
             elif provider_key in ("smtp", "yahoo", "zoho"):
-                provider_msg_id = await _send_smtp(snap, req, from_email, clean_body_text)
+                provider_msg_id = await _send_smtp(snap, req, from_email, clean_body_text, html_body)
             elif provider_key == "outlook":
-                provider_msg_id = await _send_outlook(snap, req, from_email, clean_body_text, fresh_token)
+                provider_msg_id = await _send_outlook(snap, req, from_email, clean_body_text, fresh_token, html_body)
             else:
                 raise ValueError(f"Unsupported provider: {req.provider}")
             break
@@ -285,7 +298,9 @@ async def _store_outgoing(req: SendReplyRequest, provider_msg_id: str, from_emai
         logger.error("Failed to store outgoing message: %s", e)
 
 
-async def _send_gmail(snap: dict, req: SendReplyRequest, from_email: str, body_text: str = "", token: str = None) -> str:
+async def _send_gmail(snap: dict, req: SendReplyRequest, from_email: str,
+                      body_text: str = "", token: str = None,
+                      html_body: str = "") -> str:
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
     # Use pre-fetched token if available, otherwise refresh
@@ -298,9 +313,10 @@ async def _send_gmail(snap: dict, req: SendReplyRequest, from_email: str, body_t
     msg["Message-ID"] = f"<reply-{uuid.uuid4()}@emailservice>"
     # Always attach plain text first (fallback for clients that don't render HTML)
     msg.attach(MIMEText(body_text, "plain", "utf-8"))
-    # Attach HTML version — email clients prefer the last part in multipart/alternative
-    html_body = req.body_html or body_text
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    # Attach fully structured HTML — preferred by all modern email clients.
+    # html_body is the branded HTML from html_formatter; fall back to generating it here.
+    final_html = html_body or req.body_html or format_email_html(body_text, subject=req.subject)
+    msg.attach(MIMEText(final_html, "html", "utf-8"))
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     async with httpx.AsyncClient(timeout=45.0) as client:
         resp = await client.post(
@@ -313,7 +329,8 @@ async def _send_gmail(snap: dict, req: SendReplyRequest, from_email: str, body_t
     return resp.json().get("id", "")
 
 
-async def _send_smtp(snap: dict, req: SendReplyRequest, from_email: str, body_text: str = "") -> str:
+async def _send_smtp(snap: dict, req: SendReplyRequest, from_email: str,
+                     body_text: str = "", html_body: str = "") -> str:
     import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
@@ -323,8 +340,9 @@ async def _send_smtp(snap: dict, req: SendReplyRequest, from_email: str, body_te
     msg["To"] = req.to; msg["From"] = from_email; msg["Subject"] = req.subject
     msg["In-Reply-To"] = f"<{req.in_reply_to}>"; msg["References"] = f"<{req.references}>"
     msg.attach(MIMEText(body_text, "plain", "utf-8"))
-    if req.body_html:
-        msg.attach(MIMEText(req.body_html, "html", "utf-8"))
+    # Always send structured HTML for readability
+    final_html = html_body or req.body_html or format_email_html(body_text, subject=req.subject)
+    msg.attach(MIMEText(final_html, "html", "utf-8"))
     raw = msg.as_bytes()
     def _do():
         host = snap.get("smtp_host") or "smtp.gmail.com"
@@ -340,15 +358,18 @@ async def _send_smtp(snap: dict, req: SendReplyRequest, from_email: str, body_te
     return f"smtp-{uuid.uuid4()}"
 
 
-async def _send_outlook(snap: dict, req: SendReplyRequest, from_email: str, body_text: str = "", token: str = None) -> str:
+async def _send_outlook(snap: dict, req: SendReplyRequest, from_email: str,
+                         body_text: str = "", token: str = None,
+                         html_body: str = "") -> str:
     if not token:
         token = await get_fresh_token(snap)
     body_text = body_text or req.body_text
-    html_body = req.body_html or body_text
+    # Always use fully structured HTML for Outlook
+    final_html = html_body or req.body_html or format_email_html(body_text, subject=req.subject)
     body = {
         "message": {
             "subject": req.subject,
-            "body": {"contentType": "HTML", "content": html_body},
+            "body": {"contentType": "HTML", "content": final_html},
             "toRecipients": [{"emailAddress": {"address": req.to}}],
             "internetMessageHeaders": [
                 {"name": "In-Reply-To", "value": f"<{req.in_reply_to}>"},
@@ -492,6 +513,12 @@ async def send_draft(req: SendDraftRequest):
     from pipeline import strip_reply_chain as _strip
     clean_draft = _strip(msg.draft_message or "").strip() or msg.draft_message
 
+    # Generate structured HTML from the draft text
+    draft_html = format_email_html(
+        plain_text=clean_draft,
+        subject=send_req.subject or "",
+    )
+
     # Pre-refresh token once
     try:
         fresh_token = await get_fresh_token(snap)
@@ -505,11 +532,11 @@ async def send_draft(req: SendDraftRequest):
     for attempt in range(3):
         try:
             if provider_key == "gmail":
-                provider_msg_id = await _send_gmail(snap, send_req, from_email, clean_draft, fresh_token)
+                provider_msg_id = await _send_gmail(snap, send_req, from_email, clean_draft, fresh_token, draft_html)
             elif provider_key == "outlook":
-                provider_msg_id = await _send_outlook(snap, send_req, from_email, clean_draft, fresh_token)
+                provider_msg_id = await _send_outlook(snap, send_req, from_email, clean_draft, fresh_token, draft_html)
             else:
-                provider_msg_id = await _send_smtp(snap, send_req, from_email, clean_draft)
+                provider_msg_id = await _send_smtp(snap, send_req, from_email, clean_draft, draft_html)
             break
         except Exception as e:
             last_error = str(e)

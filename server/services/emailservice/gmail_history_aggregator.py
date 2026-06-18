@@ -133,20 +133,30 @@ class GmailHistoryAggregator:
         else:
             # Subsequent event — update state
             self._total_coalesced += 1
-            
+
             # Always keep the LATEST historyId (monotonic cursor)
             if int(history_id) > int(state.latest_history_id):
                 state.latest_history_id = history_id
-            
+
             state.last_seen_at = now
             state.event_count += 1
-            
-            # Extend debounce deadline if events keep arriving
-            # (prevents processing during active burst)
-            state.debounce_deadline = now + DEBOUNCE_WINDOW_S
-            
-            logger.debug("Aggregator: coalesced | email=%s historyId=%s→%s events=%d",
-                        email_address, history_id, state.latest_history_id, state.event_count)
+
+            # FIX: Use a CAPPED debounce window, not a rolling one.
+            # Rolling window (deadline = now + window on every event) causes
+            # indefinite delay during a Pub/Sub backlog burst because the deadline
+            # never expires while events keep arriving.
+            # Capped window: extend deadline only if we haven't waited too long
+            # already. Maximum total wait = 3x the base debounce window.
+            _MAX_DEBOUNCE_S = DEBOUNCE_WINDOW_S * 3  # 9s absolute ceiling
+            elapsed_since_first = now - state.first_seen_at
+            if elapsed_since_first < _MAX_DEBOUNCE_S:
+                state.debounce_deadline = now + DEBOUNCE_WINDOW_S
+            # else: deadline already passed the ceiling — do NOT extend further.
+            # The scheduler will pick this account up on the next 0.5s tick.
+
+            logger.debug("Aggregator: coalesced | email=%s historyId=%s->%s events=%d elapsed=%.1fs",
+                        email_address, history_id, state.latest_history_id,
+                        state.event_count, elapsed_since_first)
 
     async def _scheduler_loop(self) -> None:
         """

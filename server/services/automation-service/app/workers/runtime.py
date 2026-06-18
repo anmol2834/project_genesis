@@ -1,24 +1,25 @@
 """
 Workers - Runtime
 =================
-Priority-aware worker runtime orchestrating consumer → processor → executor pipeline.
+Notification-driven worker runtime orchestrating consumer → processor → executor pipeline.
+
+Wake model:
+  emailservice sends one LPUSH to automation_notify per batch of emails.
+  The worker sleeps (BLPOP) until a token arrives, processes exactly that
+  many messages, then goes back to sleep — zero Redis activity while idle.
 
 Priority processing order within each batch:
   P0 (critical) processed first — legal, compliance, security
   P1 (high)     processed second — refunds, angry customers, VIP
   P2 (medium)   processed third — normal pipeline
   P3 (low)      processed last  — cache-first, minimal cost
-
-P0 messages are identified by pre-processing keyword scan of message content
-before the full pipeline runs, so critical messages are never stuck behind
-general inquiries in the same batch.
 """
 import asyncio
 import re
 import time
 from typing import Optional, List, Tuple
 from datetime import datetime
-from app.workers.consumer import StreamConsumer, MAX_RETRY_COUNT, POLL_INTERVAL_S
+from app.workers.consumer import StreamConsumer, MAX_RETRY_COUNT
 from app.workers.processor import MessageProcessor
 from app.workers.execution import get_execution_engine
 from app.observability import get_logger, get_metrics_collector
@@ -120,41 +121,77 @@ class WorkerRuntime:
         except Exception as e:
             logger.error("Worker runtime error: %s", e, exc_info=True)
             raise
-        finally:
-            await self.stop()
+        # Task 15 fix (R22): do NOT call self.stop() here.
+        # app/main.py lifespan already calls worker_runtime.stop() explicitly
+        # during shutdown. A second stop() call double-closes the Redis pubsub
+        # connection and can raise redis.asyncio exceptions during graceful exit.
 
     async def _worker_loop(self, worker_id: int) -> None:
-        logger.info("Worker %d started", worker_id)
+        """
+        Notification-driven processing loop.
+
+        Design:
+          1. Wait for emailservice to push a notify token (BLPOP wake via
+             StreamConsumer._notify_listener).
+          2. consume_batch() pulls exactly the notified count from the stream.
+          3. Process the batch.
+          4. If _pending_count > 0 (multiple tokens arrived while processing)
+             immediately loop without sleeping so nothing is left behind.
+          5. Otherwise go back to wait — zero Redis activity until next notify.
+
+        This gives the user's desired behaviour:
+          "automation-service polls only when emailservice sends a notification
+           indicating how many incoming messages to process, then loops back
+           only as many times as notifications — no unnecessary polling."
+        """
+        logger.info("Worker %d started (notification-driven)", worker_id)
         consecutive_errors = 0
         max_consecutive_errors = 10
 
         while self._running:
             try:
-                # ── Wait for wake signal (Pub/Sub) or poll interval ────────
-                # wait_for_work() defaults to POLL_INTERVAL_S as safety fallback:
-                # even if Pub/Sub is silent/dead, we wake every 30s and drain
-                # the stream, guaranteeing real-time processing.
+                # ── Step 1: Wait for work notification ───────────────────
+                # If retries are pending, use a capped timeout so due retries
+                # are never delayed beyond their scheduled window.
+                # Otherwise block indefinitely — zero Redis commands while idle.
                 if self.consumer.has_pending_retries():
                     retry_delay = self.consumer.next_retry_delay()
-                    await self.consumer.wait_for_work(timeout=retry_delay if retry_delay > 0 else None)
+                    await self.consumer.wait_for_work(
+                        timeout=retry_delay if retry_delay > 0 else None
+                    )
                 else:
                     await self.consumer.wait_for_work()
 
                 if not self._running:
                     break
 
-                # ── Drain ALL messages until stream is empty ──────────────
-                # Process every queued message before sleeping again.
-                # This is the core of the user's requirement:
-                #   "keep processing until queue is empty, then stop"
+                # ── Step 2 & 3: Pull and process notified batch ──────────
+                # consume_batch() returns exactly the messages signalled by
+                # the notify token (plus any due retries).  If the producer
+                # sent multiple tokens while we were processing, _pending_count
+                # will be > 0 after the first batch and we loop immediately
+                # (inner while) to drain them without re-entering the outer
+                # wait — this is the "loop only as many times as notifications"
+                # behaviour the user requires.
                 while self._running:
                     messages = await self.consumer.consume_batch()
+                    if not messages and self.consumer._pending_count == 0:
+                        break  # all notified messages processed — go back to sleep
+
                     if not messages:
-                        break  # stream empty — go back to sleep
+                        # _pending_count > 0 but stream is empty (race: dedup
+                        # consumed the message already).  Clear and sleep.
+                        self.consumer._pending_count = 0
+                        break
 
                     consecutive_errors = 0
                     messages = sorted(messages, key=_quick_priority)
                     await self._process_batch(messages, worker_id)
+
+                    # If more tokens accumulated during processing, loop again
+                    # immediately; otherwise break and wait for next notification.
+                    if self.consumer._pending_count == 0:
+                        break
 
             except asyncio.CancelledError:
                 logger.info("Worker %d cancelled", worker_id)
@@ -168,7 +205,9 @@ class WorkerRuntime:
                     exc_info=True,
                 )
                 if consecutive_errors >= max_consecutive_errors:
-                    logger.critical("Worker %d exceeded max consecutive errors - stopping", worker_id)
+                    logger.critical(
+                        "Worker %d exceeded max consecutive errors - stopping", worker_id
+                    )
                     break
                 await asyncio.sleep(min(2 ** consecutive_errors * 0.1, 5.0))
 
@@ -280,9 +319,7 @@ class WorkerRuntime:
                 maxlen=10_000,
                 approximate=True,
             )
-            # Wake the AutomationResponseWorker in emailservice.
-            # It sleeps on asyncio.Event driven by this Pub/Sub channel.
-            pipe.publish("automation:response:wake", "1")
+            pipe.lpush("automation_responses_notify", "1")
             await pipe.execute()
             logger.info(
                 "✅ Response sent | conv=%s action=%s confidence=%.2f",

@@ -4,14 +4,27 @@ emailservice — Automation Response Worker
 Consumes automation_responses stream from automation-service.
 Dispatches email replies via Gmail/SMTP.
 
-Wake mechanism:
-  automation-service publishes XADD automation_responses + PUBLISH automation:response:wake
-  This worker subscribes to automation:response:wake via Redis Pub/Sub.
-  Fallback: polls every 5s to guarantee no message is permanently missed.
+Architecture: BLPOP on automation_responses_notify (zero idle cost)
+─────────────────────────────────────────────────────────────────────
+automation-service does (atomically in one pipeline):
+  1. XADD automation_responses  <response payload>
+  2. LPUSH automation_responses_notify  "1"
 
-Redis client:
-  Uses get_redis_managed() directly (awaitable) — bypasses the patched
-  shared.cache.get_redis_client which returns a coroutine, not a client.
+This worker does:
+  1. BLPOP automation_responses_notify  (blocks until a token arrives)
+  2. XRANGE automation_responses "-" "+" COUNT 100  (drain available responses)
+  3. Process each, XDEL each one
+  4. Loop back to BLPOP — zero idle commands
+
+Why BLPOP instead of XREAD BLOCK:
+  XREAD BLOCK wakes every 8s even when the stream is empty (Upstash socket
+  timeout forces a re-issue of the command). BLPOP on a dedicated notify list
+  only wakes when automation-service explicitly pushes a token — true zero-idle
+  behaviour. The 8s timeout on the BLPOP call is purely a keepalive to satisfy
+  Upstash's socket read timeout; it produces no data transfer and is free.
+
+Idle cost:   0 commands (server-side BLPOP block)
+Active cost: 1 BLPOP + 1 XRANGE + N XDEL per response batch
 """
 from __future__ import annotations
 import asyncio
@@ -28,108 +41,116 @@ from metrics import M
 logger = logging.getLogger("emailservice.automation_response")
 
 TOPIC_AUTOMATION_RESPONSES = "automation_responses"
-_WAKE_CHANNEL = "automation:response:wake"
-_POLL_INTERVAL_S = 30.0  # Pub/Sub handles immediate wakeup; this is safety fallback only
+NOTIFY_LIST = "automation_responses_notify"
+
+# BLPOP timeout — must be < Upstash socket read timeout (~10s)
+_BLPOP_TIMEOUT_S = 8
+# Dedicated connection socket timeout must exceed the BLPOP timeout
+_SOCKET_READ_TIMEOUT_S = 15
 
 
 async def _get_redis() -> aioredis.Redis:
-    """Get a managed Redis client (always awaitable, never a raw coroutine)."""
     from redis_pool_manager import get_redis_managed
     return await get_redis_managed()
 
 
+async def _make_blocking_redis() -> aioredis.Redis:
+    """Dedicated Redis connection for BLPOP — never from the shared pool."""
+    from shared.config import get_config
+    url = get_config().REDIS_URL
+    return aioredis.from_url(
+        url,
+        encoding="utf-8",
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_keepalive=True,
+        socket_timeout=_SOCKET_READ_TIMEOUT_S,
+    )
+
+
 class AutomationResponseWorker:
     """
-    Standalone worker — uses Redis Pub/Sub wake + polling fallback.
-    Not a BaseWorker subclass because the wake signal comes from a separate
-    process (automation-service) that cannot set in-process asyncio.Events.
+    Notification-driven worker.
+    Sleeps via BLPOP until automation-service pushes a response token.
+    Zero idle Redis commands.
     """
 
     def __init__(self):
         self._running = False
-        self._wake_event = asyncio.Event()
-        # Dedicated Redis connection for Pub/Sub (cannot share with command connection)
-        self._pubsub_redis: aioredis.Redis | None = None
+        self._block_redis: aioredis.Redis | None = None
 
     async def start(self) -> None:
         self._running = True
-        logger.info("[AutomationResponseWorker] started | streams=[%s]",
-                    TOPIC_AUTOMATION_RESPONSES)
-        try:
-            redis = await _get_redis()
-            length = await redis.xlen(TOPIC_AUTOMATION_RESPONSES)
-            if length:
-                logger.info("[AutomationResponseWorker] startup backlog: %d messages", length)
-            else:
-                logger.info("[AutomationResponseWorker] no backlog — real-time mode")
-        except Exception:
-            pass
+        logger.info(
+            "[AutomationResponseWorker] started (BLPOP notification-driven) | "
+            "stream=%s notify=%s",
+            TOPIC_AUTOMATION_RESPONSES, NOTIFY_LIST,
+        )
+        # Drain any startup backlog first, then enter the notification loop
         asyncio.create_task(self._run())
 
     async def stop(self) -> None:
         self._running = False
-        self._wake_event.set()
-        if self._pubsub_redis:
+        if self._block_redis:
             try:
-                await self._pubsub_redis.aclose()
+                await self._block_redis.aclose()
             except Exception:
                 pass
+            self._block_redis = None
         logger.info("[AutomationResponseWorker] stopped")
 
-    # ── Main loop ─────────────────────────────────────────────────────────────
-
     async def _run(self) -> None:
-        asyncio.create_task(self._pubsub_listener())
-        while self._running:
-            try:
-                try:
-                    await asyncio.wait_for(self._wake_event.wait(),
-                                           timeout=_POLL_INTERVAL_S)
-                except asyncio.TimeoutError:
-                    pass
-                self._wake_event.clear()
-                if not self._running:
-                    break
-                await self._drain_once()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("[AutomationResponseWorker] loop error: %s", e, exc_info=True)
-                await asyncio.sleep(1)
-
-    async def _pubsub_listener(self) -> None:
-        """Subscribe to wake channel on a dedicated connection."""
-        from shared.config import get_config
-        url = get_config().REDIS_URL
-        while self._running:
-            try:
-                self._pubsub_redis = aioredis.from_url(
-                    url,
-                    encoding="utf-8",
-                    decode_responses=True,
-                    socket_connect_timeout=5,
-                    socket_keepalive=True,
-                )
-                pubsub = self._pubsub_redis.pubsub()
-                await pubsub.subscribe(_WAKE_CHANNEL)
-                logger.debug("[AutomationResponseWorker] subscribed to %s", _WAKE_CHANNEL)
-                async for message in pubsub.listen():
-                    if not self._running:
-                        break
-                    if message and message.get("type") == "message":
-                        self._wake_event.set()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning("[AutomationResponseWorker] pubsub reconnecting: %s", e)
-                await asyncio.sleep(2)
-
-    # ── Stream drain ──────────────────────────────────────────────────────────
-
-    async def _drain_once(self) -> None:
+        # Check for startup backlog with a single XLEN (1 command vs unconditional XRANGE)
+        # Only drain if messages actually exist from a previous run.
         try:
             redis = await _get_redis()
-            messages = await redis.xrange(TOPIC_AUTOMATION_RESPONSES, "-", "+", count=500)
+            backlog = await redis.xlen(TOPIC_AUTOMATION_RESPONSES)
+            if backlog:
+                logger.info("[AutomationResponseWorker] startup backlog: %d responses", backlog)
+                await self._drain_and_process()
+        except Exception as e:
+            logger.warning("[AutomationResponseWorker] startup backlog check failed: %s", e)
+
+        while self._running:
+            if self._block_redis is None:
+                try:
+                    self._block_redis = await _make_blocking_redis()
+                except Exception as e:
+                    logger.error("[AutomationResponseWorker] cannot connect: %s", e)
+                    await asyncio.sleep(2)
+                    continue
+
+            try:
+                # BLPOP blocks until automation-service pushes a notify token.
+                # Returns None after _BLPOP_TIMEOUT_S (Upstash keepalive) — not an error.
+                result = await self._block_redis.blpop(
+                    [NOTIFY_LIST],
+                    timeout=_BLPOP_TIMEOUT_S,
+                )
+                if not self._running:
+                    break
+                if result:
+                    await self._drain_and_process()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(
+                    "[AutomationResponseWorker] connection error (will reconnect): %s",
+                    type(e).__name__,
+                )
+                try:
+                    await self._block_redis.aclose()
+                except Exception:
+                    pass
+                self._block_redis = None
+                if self._running:
+                    await asyncio.sleep(1)
+
+    async def _drain_and_process(self) -> None:
+        """XRANGE drain + process + XDEL in one pass."""
+        try:
+            redis = await _get_redis()
+            messages = await redis.xrange(TOPIC_AUTOMATION_RESPONSES, "-", "+", count=100)
             if not messages:
                 return
 
@@ -148,11 +169,8 @@ class AutomationResponseWorker:
                 for mid in ids_to_del:
                     pipe.xdel(TOPIC_AUTOMATION_RESPONSES, mid)
                 await pipe.execute(raise_on_error=False)
-
         except Exception as e:
-            logger.error("[AutomationResponseWorker] drain error: %s", e, exc_info=True)
-
-    # ── Response processing ───────────────────────────────────────────────────
+            logger.error("[AutomationResponseWorker] drain error: %s", e)
 
     async def _process_response(self, response: Dict[str, Any]) -> None:
         action          = response.get("action", "escalate")
@@ -169,7 +187,6 @@ class AutomationResponseWorker:
             logger.warning("[AutomationResponseWorker] missing message_id/user_id — skipping")
             return
 
-        # Idempotency dedup
         try:
             redis = await _get_redis()
             dedup_key = f"es:resp:dedup:{message_id}"
@@ -213,6 +230,7 @@ class AutomationResponseWorker:
                 return
 
             from api.send_reply import _send_gmail, _send_smtp, _store_outgoing, SendReplyRequest
+            from html_formatter import format_email_html
             from token_cache import get_account_snapshot, get_fresh_token
 
             snap = await get_account_snapshot(ctx["email_address"])
@@ -226,6 +244,12 @@ class AutomationResponseWorker:
                           if subject and not subject.lower().startswith("re:")
                           else subject)
 
+            # Build the structured HTML version of the response
+            response_html = format_email_html(
+                plain_text=response_text,
+                subject=re_subject or "",
+            )
+
             req = SendReplyRequest(
                 provider=ctx["provider"],
                 email_account_id=ctx["email_account_id"],
@@ -238,6 +262,7 @@ class AutomationResponseWorker:
                 from_email=ctx["email_address"],
                 subject=re_subject,
                 body_text=response_text,
+                body_html=response_html,
             )
 
             try:
@@ -253,10 +278,10 @@ class AutomationResponseWorker:
                 try:
                     if provider_key == "gmail":
                         provider_msg_id = await _send_gmail(
-                            snap, req, ctx["email_address"], response_text, fresh_token)
+                            snap, req, ctx["email_address"], response_text, fresh_token, response_html)
                     else:
                         provider_msg_id = await _send_smtp(
-                            snap, req, ctx["email_address"], response_text)
+                            snap, req, ctx["email_address"], response_text, response_html)
                     break
                 except Exception as e:
                     last_error = str(e)

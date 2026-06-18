@@ -73,10 +73,6 @@ class DeferredScheduler:
             try:
                 sleep_s = await self._compute_sleep()
                 if sleep_s > 0:
-                    # Sleep the EXACT computed duration.
-                    # Do NOT cap with MIN_SLEEP_S — that turns IDLE_SLEEP_S=600
-                    # into 60s polling and hammers Upstash every minute.
-                    # MIN_SLEEP_S is only used as an error-fallback in _compute_sleep().
                     logger.debug("DeferredScheduler: sleeping %.1fs until next due item", sleep_s)
                     await asyncio.sleep(sleep_s)
                     continue
@@ -97,18 +93,19 @@ class DeferredScheduler:
         """
         Returns seconds until the earliest due item across both ZSETs.
         Returns 0 if something is already due.
+        Uses a single ZRANGEBYSCORE pass per ZSET — O(log N).
+        When both ZSETs are empty, returns IDLE_SLEEP_S (saves 4 Redis commands/cycle).
         """
         now = time.time()
         try:
             redis = await get_redis()
-            # ZRANGEBYSCORE with limit 1 — O(log N), cheapest possible check
             outbox_due = await redis.zrangebyscore(OUTBOX_ZSET, "-inf", now, start=0, num=1)
             reset_due  = await redis.zrangebyscore(RESET_ZSET,  "-inf", now, start=0, num=1)
 
             if outbox_due or reset_due:
-                return 0.0  # something is due right now
+                return 0.0
 
-            # Find the next scheduled time across both ZSETs
+            # Nothing due — find next scheduled time
             next_times = []
             for zset in (OUTBOX_ZSET, RESET_ZSET):
                 items = await redis.zrange(zset, 0, 0, withscores=True)
@@ -116,12 +113,12 @@ class DeferredScheduler:
                     next_times.append(items[0][1])
 
             if not next_times:
-                return IDLE_SLEEP_S  # nothing scheduled — sleep long (saves Redis quota)
+                return IDLE_SLEEP_S  # both ZSETs empty — sleep 10min
 
             return max(0.0, min(next_times) - now)
         except Exception as e:
             logger.warning("DeferredScheduler: sleep compute failed: %s", e)
-            return MIN_SLEEP_S  # on error, retry in 60s (not IDLE_SLEEP_S)
+            return MIN_SLEEP_S
 
     # ── Outbox processing ─────────────────────────────────────────────────────
 
