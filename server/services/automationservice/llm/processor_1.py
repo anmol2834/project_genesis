@@ -110,15 +110,16 @@ async def run_processor_1(
     latest_lower      = latest_body.lower()
     preflight_escalation = any(t in latest_lower for t in ESCALATION_TRIGGER_WORDS)
 
-    # Calibrate max confidence for very short messages before sending to LLM.
+    # Calibrate max conversation_confidence for very short messages before sending to LLM.
+    # conversation_confidence measures message CLARITY — not category match strength.
     # The LLM has a tendency to return 0.95 for everything including "hello".
     body_word_count = len(latest_body.split()) if latest_body else 0
     if body_word_count <= 2:
-        max_confidence = 0.45   # "hi", "ok", "yes" — genuinely ambiguous
+        max_conv_confidence = 0.45   # "hi", "ok", "yes" — genuinely ambiguous
     elif body_word_count <= 5:
-        max_confidence = 0.75   # "any offers?" — partial context
+        max_conv_confidence = 0.80   # "any offers?" — short but possibly clear
     else:
-        max_confidence = 1.0    # full sentence — no cap
+        max_conv_confidence = 1.0    # full sentence — no cap
 
     # ── OpenAI call with retry ─────────────────────────────────────────────────
     raw_output  = None
@@ -186,7 +187,7 @@ async def run_processor_1(
         latest_body,
         preflight_analytics,
         preflight_escalation,
-        max_confidence,
+        max_conv_confidence,
     )
     validated["_meta"] = {
         "elapsed_ms": round(elapsed_ms, 1),
@@ -200,9 +201,10 @@ async def run_processor_1(
         for c in validated.get("retrieval_strategy", {}).get("categories", [])
     )
     logger.info(
-        "[P1] complete | intent=%s conf=%.2f queries=%d analytics=%s escalation=%s elapsed=%.0fms",
+        "[P1] complete | intent=%s conv_conf=%.2f intent_conf=%.2f queries=%d analytics=%s escalation=%s elapsed=%.0fms",
         validated.get("intent_analysis", {}).get("primary_intent", {}).get("category", "?"),
-        validated.get("conversation_analysis", {}).get("confidence", 0.0),
+        validated.get("conversation_analysis", {}).get("conversation_confidence", 0.0),
+        validated.get("intent_analysis", {}).get("primary_intent", {}).get("confidence", 0.0),
         total_queries,
         validated.get("analytics_decision", {}).get("requires_analytics", False),
         validated.get("routing_decision", {}).get("escalation_requested", False),
@@ -265,7 +267,7 @@ def _validate_and_repair(
     latest_body: str,
     preflight_analytics: bool,
     preflight_escalation: bool,
-    max_confidence: float,
+    max_conv_confidence: float,
 ) -> dict:
 
     data["pipeline_version"] = "1.0"
@@ -282,9 +284,17 @@ def _validate_and_repair(
     ca["conversation_stage"] = ca.get("conversation_stage") if ca.get("conversation_stage") in VALID_STAGES else "unknown"
     ca["customer_sentiment"] = ca.get("customer_sentiment") if ca.get("customer_sentiment") in VALID_SENTIMENTS else "unknown"
     ca["urgency"]            = ca.get("urgency") if ca.get("urgency") in VALID_URGENCY else "normal"
-    # Apply max_confidence cap — prevents LLM returning 0.95 for "hello"
-    raw_conf             = _clamp(ca.get("confidence"), 0.0, 1.0, 0.5)
-    ca["confidence"]     = min(raw_conf, max_confidence)
+    # Apply max_conv_confidence cap — prevents LLM returning 0.95 for "hello"
+    # conversation_confidence: how clearly was the message understood (message clarity)
+    # Support legacy field name "confidence" in addition to new "conversation_confidence"
+    raw_conv_conf                  = _clamp(
+        ca.get("conversation_confidence") if ca.get("conversation_confidence") is not None
+        else ca.get("confidence"),
+        0.0, 1.0, 0.5
+    )
+    ca["conversation_confidence"]  = min(raw_conv_conf, max_conv_confidence)
+    # Remove legacy field to keep schema clean
+    ca.pop("confidence", None)
     data["conversation_analysis"] = ca
 
     # ── intent_analysis ───────────────────────────────────────────────────────
@@ -474,7 +484,7 @@ def _validate_and_repair(
     # ── entity_extraction — specification validation (Critical Issue #2) ─────
     spec_uncertain, confidence_penalty = _validate_specs(ee.get("specifications", []))
     if spec_uncertain:
-        ca["confidence"] = max(0.1, ca["confidence"] - confidence_penalty)
+        ca["conversation_confidence"] = max(0.1, ca["conversation_confidence"] - confidence_penalty)
         data["conversation_analysis"] = ca
     ee["specification_uncertain"] = spec_uncertain
     data["entity_extraction"] = ee
@@ -518,7 +528,7 @@ def _build_fallback(latest_body: str, subject: str, reason: str) -> dict:
             "latest_message":     latest_body or "unknown",
             "resolved_reference": latest_body or "unknown",
             "standalone_query":   query[:300],
-            "confidence":         0.3,
+            "conversation_confidence": 0.3,
         },
         "intent_analysis": {
             "primary_intent":    {"category": cat, "confidence": 0.3, "reason": "fallback — processor failed"},

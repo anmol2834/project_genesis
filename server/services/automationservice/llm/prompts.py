@@ -123,12 +123,26 @@ NEVER generate bare generic queries when context provides a specific subject.
 CONVERSATION ANALYSIS
 ════════════════════════════════════════════════════════════════
 conversation_topic:
-  2–5 word noun phrase covering the thread's MAIN subject.
-  GOOD: "laptop purchase inquiry"
-  GOOD: "support escalation request"
-  BAD:  "Customer is inquiring about products, services, delivery shipping, and offers."
-  BAD:  "multiple topics"
+  2–5 word noun phrase anchored to the SPECIFIC subject discussed — not a generic category name.
+  RULE: Always include the actual product, service, or subject name from the conversation.
+  The topic must be specific enough that two different conversations with different subjects
+  produce DIFFERENT topics — not the same generic label.
+
+  GOOD: "food packet range inquiry"       ← specific subject: food packets
+  GOOD: "physiotherapy session pricing"   ← specific subject: physiotherapy session
+  GOOD: "home loan interest rate"         ← specific subject: home loan
+  GOOD: "ProScan X1 troubleshooting"      ← specific subject: ProScan X1
+  GOOD: "cotton shirt bulk discount"      ← specific subject: cotton shirt
+  GOOD: "support escalation request"      ← specific intent: escalation
+
+  BAD:  "product and service inquiry"     ← no subject, useless for analytics
+  BAD:  "multiple topics"                 ← not a topic
+  BAD:  "customer inquiry"                ← too generic, applies to every conversation
+  BAD:  "product inquiry"                 ← no specific product name
+
   Maximum 8 words. Never use "Customer is inquiring about".
+  If no specific name exists in the conversation, use the closest specific descriptor
+  (e.g., "food products inquiry" not "product inquiry").
 
 current_focus:
   The specific request in the LATEST message only.
@@ -158,13 +172,20 @@ standalone_query:
   BAD:  "product list"
   BAD:  "service info"
 
-confidence:
-  0.95–1.00: Explicit complete request with named entities
-  0.80–0.94: Clear intent, minor ambiguity
-  0.60–0.79: Partial inference needed
-  0.40–0.59: Significant ambiguity
-  0.20–0.39: Very short or vague ("hello", "ok", "yes")
-  Below 0.20: Single word, no actionable content
+conversation_confidence: HOW CLEARLY you understood what the customer wants to talk about.
+  Measures clarity of the customer's EXPRESSED NEED — independent of what category it falls into.
+  0.95–1.00: Explicit, complete, unambiguous request — e.g. "What food packets do you have?"
+  0.80–0.94: Clear request, minor missing context — e.g. "Tell me about your services"
+  0.60–0.79: Partial clarity — multiple topics or loose phrasing
+  0.40–0.59: Significant ambiguity — could mean multiple things
+  0.20–0.39: Very short or vague — "hello", "ok", "yes"
+  Below 0.20: Single word or noise — no actionable content
+
+  RULE: A single clear sentence with a direct question ALWAYS scores ≥ 0.90,
+  even if it is a simple question. Clarity is about message readability, NOT complexity.
+  Example: "What food packets do you have?" → conversation_confidence = 0.95
+  Example: "Tell me about shipping" → conversation_confidence = 0.90
+  Example: "ok" → conversation_confidence = 0.25
 
 ════════════════════════════════════════════════════════════════
 INTENT DETECTION — ACTION-FIRST
@@ -236,31 +257,50 @@ HARD LIMITS:
   max_total_queries        = 8
 
 Generate 2–3 queries per category. NEVER just 1. NEVER more than 3.
-Each query must cover a DIFFERENT ANGLE of the same topic.
+Each query MUST cover a STRUCTURALLY DIFFERENT RETRIEVAL ANGLE — not a synonym rewrite.
+
+MANDATORY ANGLE TAXONOMY (pick different angles per category):
+  ANGLE 1 — Direct name match:
+    Include the exact product/service name + primary intent keyword.
+    Example: "food packets available range"
+
+  ANGLE 2 — Attribute or specification angle:
+    Focus on a specific property, feature, characteristic, or condition.
+    Example: "food packet types ingredients nutritional content"
+
+  ANGLE 3 — Action or use-case angle:
+    Frame around what the customer wants to DO with it, or policy/process around it.
+    Example: "food packet bulk order minimum quantity process"
+
+  ANGLE 4 — Comparison or alternative angle (optional):
+    Compare options, alternatives, tiers, or variants.
+    Example: "food packet options comparison pricing"
+
+FORBIDDEN — semantic rephrasing (these waste retrieval budget):
+  BAD: "food packets available range"
+       "types of food packets currently offered"      ← synonym of query 1
+       "food packet options available now"            ← synonym of query 1
+
+CORRECT — three structurally different angles:
+  "food packets product catalog"                     ← ANGLE 1: direct name
+  "food packet ingredients nutritional information"  ← ANGLE 2: attribute
+  "food packet bulk pricing minimum order"           ← ANGLE 3: use-case/action
+
+More examples across industries:
+  Retail: "cotton shirt size XL availability"         ← direct
+          "cotton shirt fabric quality care guide"     ← attribute
+          "cotton shirt bulk order discount policy"    ← use-case
+
+  Finance: "home loan interest rates current"         ← direct
+           "home loan eligibility criteria documents" ← attribute
+           "home loan application process timeline"   ← use-case
+
+  SaaS: "Enterprise plan feature list"                ← direct
+        "Enterprise plan user limits storage quota"   ← attribute
+        "Enterprise plan vs Pro plan comparison"      ← comparison
+
 Queries MUST include the specific product, service, or topic name from the conversation.
 Never generate a bare generic query without a subject.
-
-FORBIDDEN (too generic — work for no business):
-  "technical issue"
-  "product information"
-  "shipping"
-  "discounts"
-  "service details"
-  "contact"
-
-REQUIRED STYLE (specific — works for any business type):
-  Tech:         "ProScan X1 drone camera not powering on troubleshooting"
-  Healthcare:   "physiotherapy session pricing and availability near me"
-  Real estate:  "2-bedroom apartment rental pricing in downtown area"
-  Retail:       "cotton shirt size XL bulk order discount"
-  Finance:      "home loan 10-year tenure interest rate comparison"
-  SaaS:         "Enterprise plan 50 users monthly vs annual pricing"
-  Manufacturing:"stainless steel grade 304 industrial valve delivery time"
-
-CONTEXT-AWARE REWRITING: If the latest message is ambiguous ("any discounts?"),
-rewrite queries using the product/service discussed earlier in the conversation:
-  Customer discussed "physiotherapy packages" → "discounts" becomes "physiotherapy package discounts"
-  Customer discussed "home loan" → "rates" becomes "home loan interest rate details"
 
 retrieval_intent_type — choose exactly one per category:
   catalog_lookup       → browsing products, listing options
@@ -320,7 +360,7 @@ REQUIRED SCHEMA:
 {
   "pipeline_version": "1.0",
   "conversation_analysis": {
-    "conversation_topic": "string (max 8 words)",
+    "conversation_topic": "string (max 8 words, subject-anchored noun phrase)",
     "current_focus": "string",
     "customer_goal": "string",
     "conversation_stage": "string",
@@ -329,7 +369,7 @@ REQUIRED SCHEMA:
     "latest_message": "string",
     "resolved_reference": "string",
     "standalone_query": "string",
-    "confidence": 0.0
+    "conversation_confidence": 0.0
   },
   "intent_analysis": {
     "primary_intent": {"category": "string", "confidence": 0.0, "reason": "string"},
@@ -399,11 +439,15 @@ RULES:
 1. Determine REQUESTED ACTION from latest message first — not emotion.
 2. LATEST message is sole source for escalation_requested and routing_decision.
 3. Do NOT carry forward escalation or routing state from prior messages.
-4. Generate 2–3 queries per category. Never just 1. Hard max: 8 total queries.
-5. Include product name/spec in every query — no bare generic terms.
-6. Confidence must reflect actual certainty — short messages score below 0.50.
-7. conversation_topic must be 2–5 words, a noun phrase, not a summary sentence.
-8. Set focus_changed=true if the latest message topic differs from previous message.
+4. Generate 2–3 queries per category using DIFFERENT RETRIEVAL ANGLES (not synonym rewrites).
+   Hard max: 8 total queries.
+5. Include the specific product/service/subject name in every query — no bare generic terms.
+6. conversation_confidence measures message CLARITY — a clear single-sentence question always
+   scores ≥ 0.90 regardless of simplicity. Short/vague messages score below 0.50.
+7. intent.confidence measures how certain the category classification is — scored independently.
+8. conversation_topic MUST include the actual subject name from the conversation (product, service,
+   or specific topic). Never use generic labels like "product inquiry" or "multiple topics".
+9. Set focus_changed=true if the latest message topic differs from the previous message.
 
 Produce the JSON now."""
 

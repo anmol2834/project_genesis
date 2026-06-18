@@ -126,7 +126,7 @@ async def process_event(event: dict) -> dict:
     logger.info("[CONVERSATION]  goal      : %s", ca.get("customer_goal", "?"))
     logger.info("[CONVERSATION]  resolved  : %s", ca.get("resolved_reference", "?"))
     logger.info("[CONVERSATION]  query     : %s", ca.get("standalone_query", "?"))
-    logger.info("[CONVERSATION]  confidence: %.2f", ca.get("confidence", 0.0))
+    logger.info("[CONVERSATION]  conv_conf : %.2f", ca.get("conversation_confidence", 0.0))
     logger.info("[INTENT]  primary : %-22s  conf=%.2f  reason: %s",
                 pi.get("category", "?"), pi.get("confidence", 0.0), pi.get("reason", "?"))
     for s in si:
@@ -176,8 +176,10 @@ async def process_event(event: dict) -> dict:
     else:
         logger.info("[P1 STATUS] ok  |  attempts=%d", p1_meta.get("attempts", 1))
     logger.info("─" * 68)
-    logger.info("Pipeline 1-3 complete | user=%s conv=%s intent=%s msgs=%d elapsed=%.0fms",
+    logger.info("Pipeline 1-3 complete | user=%s conv=%s intent=%s conv_conf=%.2f intent_conf=%.2f msgs=%d elapsed=%.0fms",
                 user_id, conversation_id[:8], pi.get("category", "?"),
+                ca.get("conversation_confidence", 0.0),
+                pi.get("confidence", 0.0),
                 context["fetch_count"], elapsed_ms)
 
     return {
