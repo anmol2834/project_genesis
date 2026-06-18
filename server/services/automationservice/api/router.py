@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from services.email_context import fetch_thread_messages
 from llm.processor_1 import run_processor_1
+from services.qdrant_search import run_hybrid_retrieval
 
 logger = logging.getLogger("automationservice.router")
 
@@ -182,8 +183,30 @@ async def process_event(event: dict) -> dict:
                 pi.get("confidence", 0.0),
                 context["fetch_count"], elapsed_ms)
 
+    # ── Step 4: Hybrid Retrieval — Metadata-filtered Qdrant search ─────────────
+    retrieval_output = await run_hybrid_retrieval(
+        user_id   = user_id,
+        p1_output = p1_output,
+    )
+
+    elapsed_ms = (time.monotonic() - t_start) * 1000
+
+    r_id      = retrieval_output.get("retrieval_id", "?")
+    r_cats    = retrieval_output.get("categories_searched", [])
+    r_total   = retrieval_output.get("total_candidates_found", 0)
+    r_final   = retrieval_output.get("total_candidates_after_filtering", 0)
+    r_elapsed = retrieval_output.get("elapsed_ms", 0.0)
+    r_analytics = retrieval_output.get("analytics_searched", False)
+
+    logger.info(
+        "Pipeline 1-4 complete | user=%s conv=%s retrieval_id=%s cats=%s "
+        "candidates=%d→%d analytics=%s retrieval_ms=%.0f total_ms=%.0f",
+        user_id, conversation_id[:8], r_id, r_cats,
+        r_total, r_final, r_analytics, r_elapsed, elapsed_ms,
+    )
+
     return {
-        "status":            "pipeline_steps_1_3_complete",
+        "status":            "pipeline_steps_1_4_complete",
         "user_id":           user_id,
         "message_id":        message_id,
         "conversation_id":   conversation_id,
@@ -193,6 +216,7 @@ async def process_event(event: dict) -> dict:
         "conversation":      conv_meta,
         "latest_message":    latest_message,
         "processor_1_output": p1_output,
+        "retrieval_output":  retrieval_output,
         "elapsed_ms":        elapsed_ms,
     }
 
