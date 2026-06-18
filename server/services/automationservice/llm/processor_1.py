@@ -38,6 +38,9 @@ from llm.prompts import (
     PROCESSOR_1_USER_TEMPLATE,
     ALLOWED_CATEGORIES,
     ANALYTICS_KEYWORDS,
+    VALID_RETRIEVAL_INTENT_TYPES,
+    ESCALATION_TRIGGER_WORDS,
+    SPEC_IMPOSSIBILITY_RULES,
 )
 
 logger = logging.getLogger("automationservice.processor_1")
@@ -66,14 +69,7 @@ VALID_URGENCY    = {"low", "normal", "high", "critical"}
 VALID_PRIORITY   = {"critical", "high", "normal", "low"}
 ALLOWED_CAT_SET  = set(ALLOWED_CATEGORIES)
 
-# Words that FORCE contact_support into the intent regardless of sentiment
-ESCALATION_TRIGGER_WORDS = {
-    "manager", "senior", "supervisor", "escalate", "escalation",
-    "connect me", "transfer me", "speak to", "talk to", "another person",
-    "someone else", "your team", "support team", "contact details",
-    "phone number", "email address", "customer success", "head of",
-    "in charge", "department", "representative",
-}
+# ESCALATION_TRIGGER_WORDS imported from prompts.py — single source of truth
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
@@ -340,50 +336,65 @@ def _validate_and_repair(
     ee["industries"]     = _str_list(ee.get("industries"))
     data["entity_extraction"] = ee
 
-    # ── retrieval_strategy (minimum 2 queries enforced — Problem 2 fix) ───────
+    # ── retrieval_strategy — budget enforced + retrieval_intent_type ─────────
+    # Hard limits (Critical Issue #3): max 3 cats, max 3 queries/cat, max 8 total
+    MAX_CATEGORIES           = 3
+    MAX_QUERIES_PER_CATEGORY = 3
+    MAX_TOTAL_QUERIES        = 8
+
     rs       = data.get("retrieval_strategy") if isinstance(data.get("retrieval_strategy"), dict) else {}
     raw_cats = rs.get("categories") if isinstance(rs.get("categories"), list) else []
 
-    valid_cats = []
-    seen_cats  = set()
-    standalone = ca.get("standalone_query", "")
+    valid_cats   = []
+    seen_cats    = set()
+    standalone   = ca.get("standalone_query", "")
+    total_budget = MAX_TOTAL_QUERIES
 
     for entry in raw_cats:
         if not isinstance(entry, dict):
             continue
+        if len(valid_cats) >= MAX_CATEGORIES or total_budget <= 0:
+            break
         cat = entry.get("category", "")
         if cat not in ALLOWED_CAT_SET or cat in seen_cats:
             continue
         queries = [q.strip() for q in _str_list(entry.get("search_queries")) if len(q.strip()) > 8]
+        # Cap per-category
+        queries = queries[:MAX_QUERIES_PER_CATEGORY]
+        # Cap to remaining budget
+        queries = queries[:total_budget]
         if not queries:
             continue
-
-        # Enforce minimum 2 queries per category (Problem 2 fix)
+        # Minimum 2 queries — add standalone as second if only 1 returned
         if len(queries) < 2 and standalone and standalone not in queries:
             queries.append(standalone)
-
+            queries = queries[:MAX_QUERIES_PER_CATEGORY]
+        # retrieval_intent_type validation (Critical Issue #4)
+        rit = entry.get("retrieval_intent_type", "")
+        if rit not in VALID_RETRIEVAL_INTENT_TYPES:
+            rit = _infer_retrieval_intent_type(cat)
         valid_cats.append({
-            "category":      cat,
-            "priority":      max(1, min(5, int(entry.get("priority", 99)))),
-            "search_queries": queries[:5],
+            "category":              cat,
+            "priority":             max(1, min(5, int(entry.get("priority", 99)))),
+            "retrieval_intent_type": rit,
+            "search_queries":        queries,
         })
         seen_cats.add(cat)
-        if len(valid_cats) >= 3:
-            break
+        total_budget -= len(queries)
 
-    # Guarantee primary intent is always present in retrieval_strategy
-    if pi["category"] and pi["category"] not in seen_cats:
+    # Guarantee primary intent category is always present
+    if pi["category"] and pi["category"] not in seen_cats and total_budget > 0:
         q1 = standalone or ca.get("current_focus") or "general inquiry"
-        # Build a second query from resolved_reference for minimum-2 enforcement
         q2 = ca.get("resolved_reference", "")
-        queries = [q for q in [q1, q2] if q and len(q) > 8 and q != q1 or q == q1]
-        queries = list(dict.fromkeys(queries))  # deduplicate preserving order
-        if len(queries) < 2:
-            queries.append(f"{pi['category'].replace('_', ' ')} inquiry")
+        fb_queries = list(dict.fromkeys(q for q in [q1, q2] if q and len(q) > 8))
+        if len(fb_queries) < 2:
+            fb_queries.append(f"{pi['category'].replace('_', ' ')} inquiry")
+        fb_queries = fb_queries[:min(MAX_QUERIES_PER_CATEGORY, total_budget)]
         valid_cats.insert(0, {
-            "category":      pi["category"],
-            "priority":      1,
-            "search_queries": queries[:5],
+            "category":              pi["category"],
+            "priority":              1,
+            "retrieval_intent_type": _infer_retrieval_intent_type(pi["category"]),
+            "search_queries":        fb_queries,
         })
         valid_cats = sorted(valid_cats, key=lambda x: x["priority"])
 
@@ -424,24 +435,27 @@ def _validate_and_repair(
     rc["minimum_confidence"]      = min_conf
     data["retrieval_constraints"] = rc
 
-    # ── routing_decision (Problem 8 fix — new block) ──────────────────────────
+    # ── routing_decision — Context State Decay (Critical Issue #1) ──────────
+    # CRITICAL: escalation_requested is derived SOLELY from preflight_escalation
+    # (latest message keyword scan). We NEVER read rd.get("escalation_requested")
+    # from the LLM output because the LLM sees full history and will incorrectly
+    # carry forward escalation flags from previous messages.
     rd = data.get("routing_decision") if isinstance(data.get("routing_decision"), dict) else {}
 
-    escalation_requested = bool(rd.get("escalation_requested", False)) or preflight_escalation
+    # Sole authority: latest message keyword scan only
+    escalation_requested = preflight_escalation
 
-    sentiment  = ca.get("customer_sentiment", "unknown")
-    urgency    = ca.get("urgency", "normal")
-    is_issue   = pi["category"] == "issue_resolution"
-    is_contact = pi["category"] == "contact_support"
+    sentiment = ca.get("customer_sentiment", "unknown")
+    urgency   = ca.get("urgency", "normal")
+    is_issue  = pi["category"] == "issue_resolution"
 
     requires_human = (
         escalation_requested
-        or sentiment in ("frustrated",)
+        or sentiment == "frustrated"
         or urgency in ("high", "critical")
         or (is_issue and sentiment in ("negative", "frustrated"))
     )
 
-    # Routing priority
     if escalation_requested and sentiment == "frustrated":
         r_priority = "critical"
     elif escalation_requested or urgency == "high":
@@ -449,15 +463,39 @@ def _validate_and_repair(
     elif urgency == "critical":
         r_priority = "critical"
     else:
-        r_priority = _str(rd.get("routing_priority"), "normal")
-        if r_priority not in VALID_PRIORITY:
-            r_priority = "normal"
+        r_priority = "normal"
 
     rd["requires_human_attention"] = requires_human
     rd["escalation_requested"]     = escalation_requested
-    rd["routing_department"]       = _str(rd.get("routing_department"), pi["category"] or "product_service")
+    rd["routing_department"]       = pi["category"] or "product_service"
     rd["routing_priority"]         = r_priority
     data["routing_decision"] = rd
+
+    # ── entity_extraction — specification validation (Critical Issue #2) ─────
+    spec_uncertain, confidence_penalty = _validate_specs(ee.get("specifications", []))
+    if spec_uncertain:
+        ca["confidence"] = max(0.1, ca["confidence"] - confidence_penalty)
+        data["conversation_analysis"] = ca
+    ee["specification_uncertain"] = spec_uncertain
+    data["entity_extraction"] = ee
+
+    # ── business_signals (Medium Issue #3) ────────────────────────────────────
+    bs = data.get("business_signals") if isinstance(data.get("business_signals"), dict) else {}
+    data["business_signals"] = {
+        "sales_opportunity": bool(bs.get("sales_opportunity", False)),
+        "support_case":      bool(bs.get("support_case",      False)),
+        "refund_risk":       bool(bs.get("refund_risk",       False)),
+        "churn_risk":        bool(bs.get("churn_risk",        False)),
+        "escalation_risk":   bool(bs.get("escalation_risk",   False)) or escalation_requested or sentiment == "frustrated",
+    }
+
+    # ── state_transition ──────────────────────────────────────────────────────
+    st = data.get("state_transition") if isinstance(data.get("state_transition"), dict) else {}
+    data["state_transition"] = {
+        "previous_focus": _str(st.get("previous_focus"), "unknown"),
+        "current_focus":  _str(st.get("current_focus"),  ca.get("current_focus", "unknown")),
+        "focus_changed":  bool(st.get("focus_changed",   False)),
+    }
 
     return data
 
@@ -503,6 +541,18 @@ def _build_fallback(latest_body: str, subject: str, reason: str) -> dict:
             "routing_department":       cat,
             "routing_priority":         "normal",
         },
+        "business_signals": {
+            "sales_opportunity": False,
+            "support_case":      False,
+            "refund_risk":       False,
+            "churn_risk":        False,
+            "escalation_risk":   False,
+        },
+        "state_transition": {
+            "previous_focus": "unknown",
+            "current_focus":  query[:100],
+            "focus_changed":  False,
+        },
         "_meta": {"status": "fallback", "reason": reason, "elapsed_ms": 0.0},
     }
 
@@ -524,6 +574,58 @@ def _str_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
     return []
+
+
+def _infer_retrieval_intent_type(category: str) -> str:
+    """Map a category to its most likely retrieval intent type."""
+    mapping = {
+        "product_service":     "catalog_lookup",
+        "offers_promotions":   "catalog_lookup",
+        "delivery_shipping":   "fact_lookup",
+        "company_info":        "fact_lookup",
+        "educational_content": "fact_lookup",
+        "contact_support":     "contact_lookup",
+        "policies_legal":      "policy_lookup",
+        "issue_resolution":    "troubleshooting_lookup",
+        "data_analytics":      "analytics_lookup",
+    }
+    return mapping.get(category, "fact_lookup")
+
+
+def _validate_specs(specifications: list[str]) -> tuple[bool, float]:
+    """
+    Universal domain-agnostic specification impossibility detector.
+
+    Strategy: ONLY flag specifications that are physically/mathematically
+    impossible regardless of industry. Never assumes a specific domain.
+
+    Rules:
+      - Negative numeric quantities are always impossible
+      - Astronomically large values for known units (e.g. 5000 TB RAM) are impossible
+      - Everything else is preserved as-is — the LLM extracted it verbatim
+
+    Works correctly for: tech, healthcare, real estate, retail, finance,
+    manufacturing, SaaS, education, hospitality — any business type.
+
+    Returns (specification_uncertain, confidence_penalty).
+    Preserves original customer wording. Never rewrites or corrects.
+    """
+    for spec in specifications:
+        s = spec.lower().strip()
+        for pattern, label, max_val in SPEC_IMPOSSIBILITY_RULES:
+            m = re.search(pattern, s)
+            if m:
+                if label == "negative":
+                    # Any explicitly negative quantity is impossible
+                    return True, 0.15
+                if max_val is not None:
+                    try:
+                        val = float(m.group(1))
+                        if val > max_val:
+                            return True, 0.15
+                    except (ValueError, IndexError):
+                        pass
+    return False, 0.0
 
 
 def _infer_category(text: str) -> str:

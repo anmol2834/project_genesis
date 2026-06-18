@@ -468,4 +468,4 @@ Enable `data_analytics` retrieval ONLY if intent includes: *analytics, statistic
 
 
 
-strict warning : this complete new implementation is should be apply under automationservice not in existing automation-service. 
+strict warning : this complete new implementation is should be apply under automationservice not in existing automation-service. also i want the complete system would work globally for any businesses. for any types of data of any businesses like, any type of product based company and any type of services company too, this complete automationservice would work for any type for accurately data retreive. so in the whole automationservice where you will hardcoded and targeting only one type business then replace it with best and smart approach that never fails and the whole system will accurately work for any type of business businesses not only laptop company.

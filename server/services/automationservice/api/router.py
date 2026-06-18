@@ -160,6 +160,17 @@ async def process_event(event: dict) -> dict:
                 rd.get("escalation_requested", False),
                 rd.get("routing_department", "?"),
                 rd.get("routing_priority", "?"))
+    bs = p1_output.get("business_signals", {})
+    active_signals = [k for k, v in bs.items() if v]
+    if active_signals:
+        logger.info("[SIGNALS]  %s", ", ".join(active_signals))
+    st = p1_output.get("state_transition", {})
+    if st.get("focus_changed"):
+        logger.info("[STATE]    focus_changed=True  %s → %s",
+                    st.get("previous_focus", "?"), st.get("current_focus", "?"))
+    spec_uncertain = ee.get("specification_uncertain", False)
+    if spec_uncertain:
+        logger.warning("[ENTITIES] specification_uncertain=True — confidence penalised")
     if p1_status == "fallback":
         logger.warning("[P1 STATUS] FALLBACK — reason: %s", p1_meta.get("reason", "unknown"))
     else:
