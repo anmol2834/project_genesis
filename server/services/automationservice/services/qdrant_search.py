@@ -79,8 +79,9 @@ ALLOWED_CATEGORIES = frozenset({
 
 # ── Lazy singletons ────────────────────────────────────────────────────────────
 
-_embed_model   = None
-_qdrant_client = None
+_embed_model        = None
+_qdrant_client      = None
+_embed_model_lock   = None   # created once at first access (avoids import-time threading import)
 
 
 # ── Model & client access ──────────────────────────────────────────────────────
@@ -88,15 +89,27 @@ _qdrant_client = None
 def _get_embed_model():
     """
     Lazy-load intfloat/e5-base-v2 singleton.
+
+    Thread-safety: module-level lock created on first call (not inside the
+    guarded block) so double-checked locking actually works correctly.
+    Without a stable lock reference, concurrent threads each create a new lock
+    object and race past the outer `if _embed_model is None` check — causing
+    multiple model loads. The lock must be created BEFORE the first guard check.
+
     Identical to user-service model_singleton — same model, same dimension,
     guarantees query/passage vector space alignment.
     """
-    global _embed_model
+    global _embed_model, _embed_model_lock
+    import threading
+
+    # Create the lock once (first call from any thread — still safe, Python GIL
+    # protects the simple object assignment)
+    if _embed_model_lock is None:
+        _embed_model_lock = threading.Lock()
+
     if _embed_model is None:
-        import threading
-        _lock = threading.Lock()
-        with _lock:
-            if _embed_model is None:
+        with _embed_model_lock:
+            if _embed_model is None:          # second check inside the lock
                 from sentence_transformers import SentenceTransformer
                 import logging as _log
                 _log.getLogger("sentence_transformers").setLevel(_log.ERROR)
@@ -127,10 +140,38 @@ def _embed_query(query: str) -> list[float]:
         Retrieval → "query: {text}"    (we use this)
     This asymmetry is required by the e5 architecture for max recall.
     """
-    model   = _get_embed_model()
+    model    = _get_embed_model()
     prefixed = f"query: {query.strip()[:512]}"
     vector   = model.encode(prefixed, normalize_embeddings=True)
     return vector.tolist()
+
+
+async def warmup() -> None:
+    """
+    Pre-warm the e5-base-v2 model and Qdrant client at service startup.
+
+    Without pre-warming, the first real request incurs ~30s cold-start latency
+    (model load + JIT compilation). After warmup, each embed call takes ~50ms.
+
+    Called from main.py lifespan() before the notify loop starts.
+    Runs in a thread pool to avoid blocking the event loop.
+    Non-fatal: startup continues even if warmup fails.
+    """
+    def _run() -> None:
+        try:
+            model = _get_embed_model()
+            # Single encode to trigger JIT compilation
+            model.encode("query: warmup", normalize_embeddings=True)
+            logger.info("automationservice: e5-base-v2 warmup complete")
+        except Exception as exc:
+            logger.warning("automationservice: e5-base-v2 warmup failed (non-fatal): %s", exc)
+        try:
+            _get_qdrant_client()
+            logger.info("automationservice: Qdrant client warmup complete")
+        except Exception as exc:
+            logger.warning("automationservice: Qdrant client warmup failed (non-fatal): %s", exc)
+
+    await asyncio.to_thread(_run)
 
 
 # ── Filter builders ────────────────────────────────────────────────────────────
@@ -913,6 +954,48 @@ async def _run_hybrid_retrieval_inner(
         top_score                = top_score,
         lowest_score             = lowest_score,
     )
+
+    # ── Per-result visibility log (for review) ────────────────────────────
+    for rank, result in enumerate(deduped, start=1):
+        p        = result.get("payload", {})
+        sd       = p.get("structured_data") or {}
+        attrs    = p.get("attributes") or {}
+        tags     = p.get("ai_tags") or []
+        kws      = p.get("keywords") or []
+        cat      = result.get("category", "?")
+        subtype  = result.get("subtype", "") or ""
+        cat_label = f"{cat}/{subtype}" if subtype else cat
+
+        logger.info(
+            "[RESULT #%d]  score=%.4f  v=%.4f  m=%.4f  q=%.1f  cat=%-28s  title=%s",
+            rank,
+            result.get("score", 0.0),
+            result.get("vector_score", 0.0),
+            result.get("metadata_score", 0.0),
+            float(p.get("quality_score", 0.0)),
+            cat_label,
+            result.get("title", "?"),
+        )
+        if sd:
+            # Show structured_data key:value pairs (truncated for readability)
+            sd_preview = "  |  ".join(
+                f"{k}: {str(v)[:80]}" for k, v in list(sd.items())[:8]
+            )
+            logger.info("           structured_data  → %s", sd_preview)
+        if attrs:
+            attr_preview = "  |  ".join(
+                f"{k}: {str(v)[:60]}" for k, v in list(attrs.items())[:6]
+                if k not in ("source_id", "priority_score")
+            )
+            if attr_preview:
+                logger.info("           attributes      → %s", attr_preview)
+        if tags:
+            logger.info("           ai_tags         → %s", ", ".join(str(t) for t in tags[:8]))
+        if kws:
+            logger.info("           keywords        → %s", ", ".join(str(k) for k in kws[:10]))
+        search_text = result.get("search_text", "") or p.get("search_text", "")
+        if search_text:
+            logger.info("           search_text     → %s", search_text[:160])
 
     return {
         "retrieval_id":                    retrieval_id,
