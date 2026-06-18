@@ -71,7 +71,7 @@ Final Email
 1.  **`services/email_context.py`**:
     *   **Dynamic Fetch**: If `latest_msg < 20` chars, fetch 20 msgs; else fetch 10.
 2.  **`llm/processor_1.py` (LLM Call #1)**:
-    *   **Input**: Thread History + Latest Message.
+    *   **Input**: conversation History + Latest Message.
     *   **Tasks**: Context Resolution, Intent Detection, Entity Extraction, and Retrieval Planning.
     *   **Output JSON Schema**:
         ```json

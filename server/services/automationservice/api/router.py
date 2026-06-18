@@ -1,6 +1,10 @@
 """
 automationservice — API Router
-Endpoints: POST /trigger  POST /process  GET /health
+
+Pipeline executed per incoming email:
+  Step 1 — Trigger Automation       : validate event fields
+  Step 2 — Fetch Thread Context     : es_conversations → es_messages (DB)
+  Step 3 — Processor 1 (LLM Call #1): Analysis & Retrieval Planning
 """
 from __future__ import annotations
 import os
@@ -21,6 +25,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from services.email_context import fetch_thread_messages
+from llm.processor_1 import run_processor_1
 
 logger = logging.getLogger("automationservice.router")
 
@@ -50,11 +55,10 @@ async def process_event(event: dict) -> dict:
     conversation_id = event.get("conversation_id", "")
     thread_id       = event.get("thread_id", "")
     subject         = event.get("subject", "")
-    from_email      = event.get("from_email", "")
     provider        = event.get("provider", "")
-    priority        = event.get("_priority", event.get("priority", 2))
     automation_enabled = event.get("automation_enabled", True)
 
+    # ── Step 1: Validate ───────────────────────────────────────────────────────
     if not automation_enabled:
         logger.info("Automation disabled | user=%s message=%s", user_id, message_id)
         return {"status": "skipped", "reason": "automation_disabled"}
@@ -65,17 +69,15 @@ async def process_event(event: dict) -> dict:
         return {"status": "error", "reason": f"missing_required_fields: {missing}"}
 
     if not conversation_id:
-        logger.warning("Missing conversation_id | user=%s message=%s thread=%s",
-                       user_id, message_id, thread_id)
+        logger.warning("Missing conversation_id | user=%s message=%s", user_id, message_id)
         return {"status": "error", "reason": "missing_conversation_id", "message_id": message_id}
 
+    # ── Step 2: Fetch thread context from DB ───────────────────────────────────
     context = await fetch_thread_messages(
         conversation_id   = conversation_id,
         user_id           = user_id,
         latest_message_id = message_id,
     )
-
-    elapsed_ms = (time.monotonic() - t_start) * 1000
 
     if not context["messages"]:
         logger.warning("No messages fetched | conv=%s user=%s reason=%s",
@@ -85,34 +87,92 @@ async def process_event(event: dict) -> dict:
             "reason":          context["fetch_reason"],
             "message_id":      message_id,
             "conversation_id": conversation_id,
-            "elapsed_ms":      elapsed_ms,
+            "elapsed_ms":      (time.monotonic() - t_start) * 1000,
         }
 
-    conv_meta = context.get("conversation") or {}
+    conv_meta      = context.get("conversation") or {}
+    latest_message = context.get("latest_message") or {}
+    messages       = context["messages"]
 
-    logger.info(
-        "Pipeline 1-2 complete | user=%s conv=%s subject=%r msgs=%d fetch=%s provider=%s elapsed=%.0fms",
-        user_id,
-        conversation_id[:8],
-        subject,
-        context["fetch_count"],
-        context["fetch_reason"],
-        provider,
-        elapsed_ms,
+    # ── Step 3: Processor 1 — LLM Call #1 ─────────────────────────────────────
+    p1_output = await run_processor_1(
+        messages          = messages,
+        latest_message    = latest_message,
+        conversation_meta = conv_meta,
     )
 
+    elapsed_ms = (time.monotonic() - t_start) * 1000
+    p1_status  = p1_output.get("_meta", {}).get("status", "ok")
+    p1_meta    = p1_output.get("_meta", {})
+    ca         = p1_output.get("conversation_analysis", {})
+    ia         = p1_output.get("intent_analysis", {})
+    pi         = ia.get("primary_intent", {})
+    ee         = p1_output.get("entity_extraction", {})
+    rs         = p1_output.get("retrieval_strategy", {})
+    ad         = p1_output.get("analytics_decision", {})
+    rc         = p1_output.get("retrieval_constraints", {})
+    si         = ia.get("secondary_intents", [])
+
+    # ── Processor 1 output summary log ────────────────────────────────────────
+    logger.info("─" * 68)
+    logger.info("PROCESSOR #1 OUTPUT  |  conv=%s  |  p1_elapsed=%.0fms  model=%s",
+                conversation_id[:8], p1_meta.get("elapsed_ms", 0), p1_meta.get("model", "?"))
+    logger.info("─" * 68)
+    logger.info("[CONVERSATION]  topic     : %s", ca.get("conversation_topic", "?"))
+    logger.info("[CONVERSATION]  stage     : %s  |  sentiment: %s  |  urgency: %s",
+                ca.get("conversation_stage", "?"),
+                ca.get("customer_sentiment", "?"),
+                ca.get("urgency", "?"))
+    logger.info("[CONVERSATION]  goal      : %s", ca.get("customer_goal", "?"))
+    logger.info("[CONVERSATION]  resolved  : %s", ca.get("resolved_reference", "?"))
+    logger.info("[CONVERSATION]  query     : %s", ca.get("standalone_query", "?"))
+    logger.info("[CONVERSATION]  confidence: %.2f", ca.get("confidence", 0.0))
+    logger.info("[INTENT]  primary : %-22s  conf=%.2f  reason: %s",
+                pi.get("category", "?"), pi.get("confidence", 0.0), pi.get("reason", "?"))
+    for s in si:
+        logger.info("[INTENT]  secondary: %-22s  conf=%.2f", s.get("category", "?"), s.get("confidence", 0.0))
+    products = ee.get("products", [])
+    techs    = ee.get("technologies", [])
+    industs  = ee.get("industries", [])
+    if products:  logger.info("[ENTITIES] products     : %s", ", ".join(products))
+    if techs:     logger.info("[ENTITIES] technologies : %s", ", ".join(techs))
+    if industs:   logger.info("[ENTITIES] industries   : %s", ", ".join(industs))
+    if not products and not techs and not industs:
+        logger.info("[ENTITIES] none extracted")
+    for cat_entry in rs.get("categories", []):
+        logger.info("[RETRIEVAL] cat=%-22s  priority=%d  queries=%d",
+                    cat_entry.get("category", "?"),
+                    cat_entry.get("priority", 0),
+                    len(cat_entry.get("search_queries", [])))
+        for q in cat_entry.get("search_queries", []):
+            logger.info("[RETRIEVAL]   → %s", q)
+    logger.info("[ANALYTICS] requires=%s  categories=%d",
+                ad.get("requires_analytics", False),
+                len(ad.get("analytics_categories", [])))
+    logger.info("[CONSTRAINTS] must_include=%s  min_confidence=%.2f",
+                rc.get("must_include_categories", []),
+                rc.get("minimum_confidence", 0.75))
+    if p1_status == "fallback":
+        logger.warning("[P1 STATUS] FALLBACK — reason: %s", p1_meta.get("reason", "unknown"))
+    else:
+        logger.info("[P1 STATUS] ok  |  attempts=%d", p1_meta.get("attempts", 1))
+    logger.info("─" * 68)
+    logger.info("Pipeline 1-3 complete | user=%s conv=%s intent=%s msgs=%d elapsed=%.0fms",
+                user_id, conversation_id[:8], pi.get("category", "?"),
+                context["fetch_count"], elapsed_ms)
+
     return {
-        "status":          "pipeline_steps_1_2_complete",
-        "user_id":         user_id,
-        "message_id":      message_id,
-        "conversation_id": conversation_id,
-        "thread_id":       conv_meta.get("thread_id", thread_id),
-        "fetch_count":     context["fetch_count"],
-        "fetch_reason":    context["fetch_reason"],
-        "conversation":    conv_meta,
-        "messages":        context["messages"],
-        "latest_message":  context["latest_message"],
-        "elapsed_ms":      elapsed_ms,
+        "status":            "pipeline_steps_1_3_complete",
+        "user_id":           user_id,
+        "message_id":        message_id,
+        "conversation_id":   conversation_id,
+        "thread_id":         conv_meta.get("thread_id", thread_id),
+        "fetch_count":       context["fetch_count"],
+        "fetch_reason":      context["fetch_reason"],
+        "conversation":      conv_meta,
+        "latest_message":    latest_message,
+        "processor_1_output": p1_output,
+        "elapsed_ms":        elapsed_ms,
     }
 
 
