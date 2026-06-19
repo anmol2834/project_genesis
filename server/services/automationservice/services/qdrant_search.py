@@ -14,12 +14,22 @@ Pipeline position:
 
 Phases:
     1. Category filter build  — strict per-category Qdrant filters
-    2. Analytics routing      — data_analytics category + primary_category attr
+    2. Analytics routing      — category=<real> + subtype=data_analytics filter
+                                (NOT a separate "data_analytics" category)
     3. Dense retrieval        — BAAI/bge-m3 (no prefix), top-K=20 per query
     4. Metadata retrieval     — scroll with keyword/attribute/value matching
     5. Parallel execution     — asyncio.gather() across all category × query pairs
     6. Score fusion           — vector + metadata + quality + priority weighted sum
     7. Result limiting        — top-20 per category → top-10 after fusion
+
+Analytics storage pattern (user-service analytics_engine.py):
+    category  = <real category>   e.g. "product_service"
+    subtype   = "data_analytics"
+    attributes.primary_category = <same real category>
+
+    "data_analytics" is a SUBTYPE, NOT a category.
+    Analytics records live inside their real category bucket.
+    _build_analytics_subtype_filter correctly targets them.
 
 Prefix contract (must match user-service embedding_service.py):
     BAAI/bge-m3 does NOT use instruction prefixes.
@@ -74,6 +84,9 @@ W_QUALITY  = 0.10
 W_PRIORITY = 0.10
 
 # Allowed category values (mirrors user-service DataCategory enum)
+# NOTE: "data_analytics" is NOT a category — it is a SUBTYPE.
+# Analytics records are stored as: category=<real> + subtype=data_analytics
+# The retrieval layer uses _build_analytics_subtype_filter for analytics queries.
 ALLOWED_CATEGORIES = frozenset({
     "product_service",
     "offers_promotions",
@@ -83,7 +96,6 @@ ALLOWED_CATEGORIES = frozenset({
     "contact_support",
     "policies_legal",
     "issue_resolution",
-    "data_analytics",
 })
 
 # ── Lazy singletons ────────────────────────────────────────────────────────────
@@ -186,44 +198,81 @@ def _build_category_filter(user_id: str, category: str):
     """
     Build a strict Qdrant Filter for tenant-scoped category search.
 
+    This filter is used for NORMAL (operational) record retrieval only.
+    Analytics subtype records (subtype=data_analytics) are NOT included —
+    they are handled separately by _build_analytics_subtype_filter.
+
     Mandatory conditions:
         user_id  == user_id    (multi-tenancy isolation — NON-NEGOTIABLE)
         category == category   (category isolation — reduces noise)
-        is_deleted != true     (exclude soft-deleted entries if indexed)
 
     For offers_promotions: additionally filters status == "active" at vector
     search time to exclude inactive/scheduled offers before scoring.
     """
+    # Delegate to the new explicit normal-category filter
+    return _build_normal_category_filter(user_id, category)
+
+
+def _build_analytics_subtype_filter(user_id: str, category: str):
+    """
+    Build a Qdrant filter for analytics subtype records within a real category.
+
+    CORRECT analytics storage pattern (from user-service analytics_engine.py):
+        category  = <real category>   e.g. "product_service"
+        subtype   = "data_analytics"
+        attributes.primary_category = <same real category>
+
+    This is the FIXED filter that replaces the old broken _build_analytics_filter
+    which incorrectly searched for category="data_analytics" (a non-existent category).
+
+    Mandatory conditions:
+        user_id  == user_id           (multi-tenancy isolation)
+        category == <real category>   (e.g. "product_service")
+        subtype  == "data_analytics"  (analytics subtype marker)
+    """
     from qdrant_client.models import Filter, FieldCondition, MatchValue
+    return Filter(must=[
+        FieldCondition(key="user_id",  match=MatchValue(value=user_id)),
+        FieldCondition(key="category", match=MatchValue(value=category)),
+        FieldCondition(key="subtype",  match=MatchValue(value="data_analytics")),
+    ])
+
+
+def _build_normal_category_filter(user_id: str, category: str):
+    """
+    Build a Qdrant filter for NORMAL (non-analytics) records within a category.
+
+    Excludes analytics subtype records — only returns operational data entries
+    (actual products, actual offers, actual policies, etc.).
+
+    Used for the operational retrieval pass that runs alongside analytics retrieval.
+    The retrieval layer runs BOTH analytics + normal passes when analytics is needed,
+    sending both result sets to the reranker which picks the most relevant chunks.
+
+    Mandatory conditions:
+        user_id  == user_id           (multi-tenancy isolation)
+        category == <real category>   (category isolation)
+        subtype  != "data_analytics"  (exclude analytics summaries)
+
+    Note for offers: additionally filters status == "active" to exclude
+    inactive/scheduled/expired offers at the Qdrant filter level.
+    """
+    from qdrant_client.models import Filter, FieldCondition, MatchValue, IsNullCondition, IsEmptyCondition
     conditions = [
         FieldCondition(key="user_id",  match=MatchValue(value=user_id)),
         FieldCondition(key="category", match=MatchValue(value=category)),
     ]
-    # Fix 6: For offers, only search active offers at the Qdrant filter level
+    # Exclude analytics subtype entries — use must_not to filter out data_analytics subtype
+    # We do this by NOT matching subtype=data_analytics via a must_not condition
+    must_not_conditions = [
+        FieldCondition(key="subtype", match=MatchValue(value="data_analytics")),
+    ]
+    # For offers, also filter to active only
     if category == "offers_promotions":
         conditions.append(
             FieldCondition(key="status", match=MatchValue(value="active"))
         )
-    return Filter(must=conditions)
-
-
-def _build_analytics_filter(user_id: str, primary_category: str):
-    """
-    Build analytics-specific filter.
-
-    Analytics records have:
-        category             = "data_analytics"
-        attributes.primary_category = <source category>
-
-    Both conditions are required to avoid mixing analytics summaries
-    from unrelated categories.
-    """
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
-    return Filter(must=[
-        FieldCondition(key="user_id",                     match=MatchValue(value=user_id)),
-        FieldCondition(key="category",                    match=MatchValue(value="data_analytics")),
-        FieldCondition(key="attributes.primary_category", match=MatchValue(value=primary_category)),
-    ])
+    return Filter(must=conditions, must_not=must_not_conditions)
 
 
 def _build_tenant_only_filter(user_id: str):
@@ -278,11 +327,17 @@ async def _analytics_dense_search(
     primary_category: str,
     top_k: int = DENSE_TOP_K,
 ) -> list[dict[str, Any]]:
-    """Vector search scoped to data_analytics + primary_category."""
+    """
+    Vector search scoped to analytics subtype within a real category.
+
+    Uses _build_analytics_subtype_filter: category=<primary_category> + subtype=data_analytics.
+    This correctly targets the analytics intelligence layer stored alongside
+    operational records — NOT a separate "data_analytics" category.
+    """
     def _run() -> list[dict]:
         client  = _get_qdrant_client()
         vector  = _embed_query(query)
-        f       = _build_analytics_filter(user_id, primary_category)
+        f       = _build_analytics_subtype_filter(user_id, primary_category)
         results = client.search(
             collection_name = COLLECTION_NAME,
             query_vector    = vector,
@@ -465,10 +520,16 @@ async def _analytics_metadata_search(
     primary_category: str,
     top_k: int = METADATA_TOP_K,
 ) -> list[dict[str, Any]]:
-    """Metadata scroll for data_analytics category scoped to primary_category."""
+    """
+    Metadata scroll for analytics subtype records within a real category.
+
+    Uses _build_analytics_subtype_filter: category=<primary_category> + subtype=data_analytics.
+    This is the correct approach — analytics records are co-located with their
+    real category, not stored under a separate "data_analytics" category.
+    """
     def _run() -> list[dict]:
         client  = _get_qdrant_client()
-        f       = _build_analytics_filter(user_id, primary_category)
+        f       = _build_analytics_subtype_filter(user_id, primary_category)
         points, _ = client.scroll(
             collection_name = COLLECTION_NAME,
             scroll_filter   = f,
@@ -679,15 +740,20 @@ async def _search_category(
     user_id:   str,
     analytics: bool = False,
     analytics_primary_category: str = "",
-    escalation_boost: bool = False,   # Fix 5
+    escalation_boost: bool = False,
 ) -> dict[str, Any]:
     """
     Execute all queries for a single category in parallel (dense + metadata).
 
-    For analytics routing:
-        category  = "data_analytics"
-        analytics_primary_category = original intent category (e.g. "product_service")
-        Both filters use the analytics-specific filter builder.
+    Dual-mode operation:
+      Normal mode  (analytics=False):
+        Searches category=<category> with subtype != data_analytics.
+        Returns operational records (actual products, offers, policies, etc.)
+
+      Analytics mode (analytics=True):
+        Searches category=<analytics_primary_category> with subtype=data_analytics.
+        Returns business intelligence summaries (counts, distributions, price ranges).
+        analytics_primary_category is the REAL category (e.g. "product_service").
 
     Returns:
         {
@@ -696,7 +762,8 @@ async def _search_category(
         }
     """
     if analytics:
-        # Analytics routing: both dense and metadata use analytics filter
+        # Analytics routing: use analytics subtype filter
+        # category=<analytics_primary_category> + subtype=data_analytics
         tasks = []
         for q in queries:
             tasks.append(_analytics_dense_search(q, user_id, analytics_primary_category))
@@ -951,33 +1018,37 @@ async def _run_hybrid_retrieval_inner(
     primary_intent_cat  = pi.get("category") or "product_service"
 
     # ── Build category → queries map ─────────────────────────────────────────
-    # Use only ALLOWED categories; guard against P1 producing invalid values.
+    # Use only ALLOWED categories. "data_analytics" is now a subtype, not a
+    # category — it will never appear in cat_queries from P1 output since it
+    # was removed from ALLOWED_CATEGORIES.
     cat_queries: dict[str, list[str]] = {}
     for cat_entry in raw_categories:
         if not isinstance(cat_entry, dict):
             continue
         cat = str(cat_entry.get("category", "")).strip()
-        if cat not in ALLOWED_CATEGORIES or cat == "data_analytics":
-            continue  # data_analytics handled separately via analytics routing
+        if cat not in ALLOWED_CATEGORIES:
+            continue
         raw_qs = cat_entry.get("search_queries") or []
         qs = [str(q).strip() for q in raw_qs if str(q).strip()]
         if qs:
             cat_queries[cat] = qs
 
     # Guarantee primary intent category is always searched
-    if primary_intent_cat in ALLOWED_CATEGORIES and primary_intent_cat != "data_analytics":
+    if primary_intent_cat in ALLOWED_CATEGORIES:
         if primary_intent_cat not in cat_queries:
             fallback_q = standalone_query or primary_intent_cat.replace("_", " ") + " information"
             cat_queries[primary_intent_cat] = [fallback_q]
 
     # ── Build analytics category tasks (if required) ──────────────────────
+    # analytics_categories contains REAL category names (e.g. "product_service").
+    # The retrieval layer will search category=<real> + subtype=data_analytics.
     analytics_categories: list[str] = []
     if requires_analytics:
         raw_ac = ad.get("analytics_categories") or []
         for ac in raw_ac:
             if isinstance(ac, dict):
                 pc = str(ac.get("primary_category", "")).strip()
-                if pc in ALLOWED_CATEGORIES and pc != "data_analytics":
+                if pc in ALLOWED_CATEGORIES:
                     analytics_categories.append(pc)
         if not analytics_categories and primary_intent_cat in ALLOWED_CATEGORIES:
             analytics_categories = [primary_intent_cat]
@@ -999,9 +1070,13 @@ async def _run_hybrid_retrieval_inner(
         tasks.append((cat, False, "", qs, boost))
 
     for ac_primary in analytics_categories:
-        # Use standalone_query as the analytics search query
-        qs = [standalone_query] if standalone_query else [ac_primary.replace("_", " ") + " analytics"]
-        tasks.append(("data_analytics", True, ac_primary, qs, False))
+        # Analytics search: category=<ac_primary> + subtype=data_analytics
+        # Use standalone_query enriched with "analytics summary" context for
+        # better vector alignment with analytics subtype documents.
+        qs = [standalone_query] if standalone_query else [ac_primary.replace("_", " ") + " analytics summary"]
+        # Task tuple: (category_label, is_analytics, analytics_primary_cat, query_list, escalation_boost)
+        # category_label is the real category for display/logging purposes.
+        tasks.append((ac_primary, True, ac_primary, qs, False))
 
     if not tasks:
         logger.warning("[hybrid_retrieval] no tasks built | user=%s ... falling back", user_id[:8])
@@ -1050,7 +1125,9 @@ async def _run_hybrid_retrieval_inner(
             logger.warning("[hybrid_retrieval] category task failed cat=%s: %s", cat, raw)
             continue
 
-        label = f"data_analytics[{ac_primary}]" if is_analytics and ac_primary else cat
+        # Label format: "product_service[analytics]" for analytics tasks, "product_service" for normal.
+        # This makes the log clear about what kind of retrieval ran per category.
+        label = f"{ac_primary}[analytics]" if is_analytics and ac_primary else cat
         categories_searched.append(label)
         total_vector_hits   += raw.get("vector_hits", 0)
         total_metadata_hits += raw.get("metadata_hits", 0)

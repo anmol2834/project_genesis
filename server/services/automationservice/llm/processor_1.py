@@ -1,7 +1,7 @@
 """
 automationservice — LLM Processor #1: Analysis & Retrieval Planning
 
-Fixes applied (all 8 problems from log analysis):
+Fixes applied:
   1. Action-first intent: ESCALATION_TRIGGER_WORDS override sentiment-based classification
   2. Query specificity: minimum 2 queries per category enforced in validator
   3. Entity expansion: specifications[] field added alongside products/technologies/industries
@@ -10,6 +10,15 @@ Fixes applied (all 8 problems from log analysis):
   6. Current focus enforcement: handled in prompt (latest message priority)
   7. Context-aware query rewriting: handled in prompt + user template
   8. Escalation detection: routing_decision{} block validated and repaired
+  9. Enterprise keyword sets: _infer_category uses real customer language across 8 categories
+ 10. Analytics-Aware Retrieval Planning:
+     - _detect_analytics_intent(): pre-flight analytics confidence scorer using
+       ANALYTICS_INTENT_KEYWORDS — determines requires_analytics + analytics_confidence
+       before the LLM call so the LLM output can be validated/corrected.
+     - analytics_decision validator: extended to handle analytics_confidence field,
+       validate per-category analytics list, and map categories correctly.
+     - "data_analytics" removed from ALLOWED_CATEGORIES — it is a SUBTYPE not a category.
+     - _infer_retrieval_intent_type: removed "data_analytics" mapping.
 """
 from __future__ import annotations
 import asyncio
@@ -38,6 +47,7 @@ from llm.prompts import (
     PROCESSOR_1_USER_TEMPLATE,
     ALLOWED_CATEGORIES,
     ANALYTICS_KEYWORDS,
+    ANALYTICS_INTENT_KEYWORDS,
     VALID_RETRIEVAL_INTENT_TYPES,
     ESCALATION_TRIGGER_WORDS,
     SPEC_IMPOSSIBILITY_RULES,
@@ -130,13 +140,22 @@ async def run_processor_1(
 
     # ── Pre-flight checks ──────────────────────────────────────────────────────
     all_text_lower      = " ".join((m.get("content") or "") for m in messages).lower()
-    preflight_analytics = bool(ANALYTICS_KEYWORDS & set(re.findall(r'\b\w+\b', all_text_lower)))
+    # Include latest message body in the analytics detection text
+    all_text_for_analytics = (all_text_lower + " " + latest_body.lower()).strip()
+
+    # Pre-flight analytics intent detection using ANALYTICS_INTENT_KEYWORDS.
+    # Returns (requires_analytics, analytics_confidence, matched_phrases).
+    # Used to validate/correct the LLM's analytics_decision output.
+    preflight_analytics_flag, preflight_analytics_confidence, preflight_analytics_phrases = \
+        _detect_analytics_intent(all_text_for_analytics)
+
+    # Soft pre-flight: also check the broader ANALYTICS_KEYWORDS set for
+    # the existing single-word pre-flight check (backward compat).
+    preflight_analytics = preflight_analytics_flag or bool(
+        ANALYTICS_KEYWORDS & set(re.findall(r'\b\w+\b', all_text_for_analytics))
+    )
 
     # Detect escalation triggers in latest message for post-validation override.
-    # Uses phrase-aware matching: checks for each trigger phrase as a substring
-    # of the latest message (case-insensitive). Single-word triggers are matched
-    # as whole words using word-boundary anchoring to prevent false positives
-    # (e.g. "manage" should NOT trigger "manager", "senior" in "seniority" should not match).
     latest_lower      = latest_body.lower()
     preflight_escalation = _check_escalation_triggers(latest_lower)
 
@@ -230,6 +249,8 @@ async def run_processor_1(
         parsed,
         latest_body,
         preflight_analytics,
+        preflight_analytics_confidence,
+        preflight_analytics_phrases,
         preflight_escalation,
         max_conv_confidence,
         business_context,
@@ -329,6 +350,8 @@ def _validate_and_repair(
     data: dict,
     latest_body: str,
     preflight_analytics: bool,
+    preflight_analytics_confidence: float,
+    preflight_analytics_phrases: list[str],
     preflight_escalation: bool,
     max_conv_confidence: float,
     business_context: dict | None = None,
@@ -477,26 +500,88 @@ def _validate_and_repair(
     rs["categories"] = valid_cats
     data["retrieval_strategy"] = rs
 
-    # ── analytics_decision ────────────────────────────────────────────────────
+    # ── analytics_decision — subtype-aware analytics routing ─────────────────
+    # Architecture: analytics records are stored as:
+    #   category = <real category>  (e.g. "product_service")
+    #   subtype  = "data_analytics"
+    # The retrieval layer uses analytics_categories to search
+    # category=X + subtype=data_analytics for each X in the list.
+    #
+    # Validation logic (priority order):
+    #   1. If pre-flight detected high-confidence analytics intent → override LLM
+    #   2. If LLM returned requires_analytics=true → validate and repair categories
+    #   3. If neither → analytics off
+    #
+    # analytics_confidence is the HIGHER of pre-flight score and LLM-returned score.
+    # This prevents the LLM from under-reporting analytics intent.
+
     ad = data.get("analytics_decision") if isinstance(data.get("analytics_decision"), dict) else {}
-    requires_analytics = bool(ad.get("requires_analytics", False))
-    if preflight_analytics and not requires_analytics:
-        requires_analytics = True
-        logger.debug("[P1] pre-flight analytics override applied")
+
+    llm_requires_analytics    = bool(ad.get("requires_analytics", False))
+    llm_analytics_confidence  = _clamp(ad.get("analytics_confidence"), 0.0, 1.0, 0.0)
+
+    # Final requires_analytics = either pre-flight OR LLM detected it
+    requires_analytics = llm_requires_analytics or preflight_analytics
+
+    # Final analytics_confidence = max of pre-flight and LLM scores
+    analytics_confidence = max(preflight_analytics_confidence, llm_analytics_confidence)
+    if requires_analytics and analytics_confidence < 0.70:
+        analytics_confidence = max(analytics_confidence, 0.75)  # floor when triggered
+
+    # Determine the analytics categories (which real categories need analytics subtype)
     if not requires_analytics:
-        ad["requires_analytics"]   = False
-        ad["analytics_categories"] = []
+        ad["requires_analytics"]     = False
+        ad["analytics_confidence"]   = 0.0
+        ad["analytics_categories"]   = []
     else:
-        ad["requires_analytics"] = True
+        ad["requires_analytics"]   = True
+        ad["analytics_confidence"] = round(analytics_confidence, 3)
+
+        # Collect categories from LLM output — normalize to list of category strings
         raw_ac = ad.get("analytics_categories") if isinstance(ad.get("analytics_categories"), list) else []
+        validated_ac_cats: list[str] = []
+
+        for item in raw_ac:
+            if isinstance(item, dict):
+                # LLM returned {"primary_category": "...", "reason": "..."}
+                pc = str(item.get("primary_category", "")).strip()
+                if pc in ALLOWED_CAT_SET and pc not in validated_ac_cats:
+                    validated_ac_cats.append(pc)
+            elif isinstance(item, str) and item.strip() in ALLOWED_CAT_SET:
+                # LLM returned plain string category names
+                pc = item.strip()
+                if pc not in validated_ac_cats:
+                    validated_ac_cats.append(pc)
+
+        # If LLM returned no valid categories, default to the primary intent category
+        if not validated_ac_cats:
+            default_cat = pi.get("category", "")
+            if default_cat and default_cat in ALLOWED_CAT_SET:
+                validated_ac_cats = [default_cat]
+            else:
+                validated_ac_cats = ["product_service"]
+
+        # If pre-flight detected analytics phrases, ensure their implied category is included.
+        # We infer from the phrase context which category is most relevant.
+        if preflight_analytics_phrases:
+            implied_cat = _infer_analytics_category_from_phrases(
+                preflight_analytics_phrases, pi.get("category", ""), business_context
+            )
+            if implied_cat and implied_cat not in validated_ac_cats:
+                validated_ac_cats.append(implied_cat)
+
+        # Normalize to structured list format for downstream consumers
         ad["analytics_categories"] = [
-            {
-                "primary_category": _str(a.get("primary_category"), "unknown"),
-                "reason":           _str(a.get("reason"), "analytics keyword detected"),
-            }
-            for a in raw_ac if isinstance(a, dict)
-        ] or [{"primary_category": pi["category"] or "product_service",
-               "reason": "analytics keyword detected in conversation"}]
+            {"primary_category": cat, "reason": _get_analytics_reason(cat, preflight_analytics_phrases)}
+            for cat in validated_ac_cats
+        ]
+
+        if preflight_analytics_confidence >= 0.85:
+            logger.debug(
+                "[P1] pre-flight analytics | confidence=%.2f phrases=%s cats=%s",
+                preflight_analytics_confidence, preflight_analytics_phrases[:3], validated_ac_cats,
+            )
+
     data["analytics_decision"] = ad
 
     # ── retrieval_constraints ─────────────────────────────────────────────────
@@ -605,7 +690,7 @@ def _build_fallback(latest_body: str, subject: str, reason: str) -> dict:
         "retrieval_strategy": {
             "categories": [{"category": cat, "priority": 1, "search_queries": [query[:300], q2]}],
         },
-        "analytics_decision":  {"requires_analytics": False, "analytics_categories": []},
+        "analytics_decision":  {"requires_analytics": False, "analytics_confidence": 0.0, "analytics_categories": []},
         "retrieval_constraints": {
             "must_include_categories": [cat],
             "must_exclude_categories": [],
@@ -663,7 +748,9 @@ def _infer_retrieval_intent_type(category: str) -> str:
         "contact_support":     "contact_lookup",
         "policies_legal":      "policy_lookup",
         "issue_resolution":    "troubleshooting_lookup",
-        "data_analytics":      "analytics_lookup",
+        # NOTE: "data_analytics" removed — it is a subtype, not a category.
+        # Analytics retrieval uses analytics_lookup intent type when the
+        # retrieval layer searches category=X + subtype=data_analytics.
     }
     return mapping.get(category, "fact_lookup")
 
@@ -733,6 +820,206 @@ def _deduplicate_queries(queries: list[str]) -> list[str]:
             kept.append(q)
             kept_token_sets.append(tokens)
     return kept
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ANALYTICS INTENT DETECTION ENGINE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _detect_analytics_intent(
+    text: str,
+) -> tuple[bool, float, list[str]]:
+    """
+    Pre-flight analytics intent scorer using ANALYTICS_INTENT_KEYWORDS.
+
+    Scans the combined conversation text (all messages + latest body) for
+    explicit analytics trigger phrases and returns a scored decision BEFORE
+    the LLM call. This allows the validator to correct the LLM if it missed
+    an analytics signal.
+
+    Algorithm:
+      1. Normalize input text to lowercase
+      2. Scan ANALYTICS_INTENT_KEYWORDS in order (highest confidence first)
+      3. Accumulate matched phrases and take the MAX confidence score
+      4. Requires confidence >= 0.80 to set requires_analytics = True
+
+    Domain-agnostic: works for any business type — SaaS, retail, healthcare,
+    manufacturing, finance, etc. The keywords cover universal aggregate/summary
+    intent patterns that any customer might express.
+
+    Returns:
+        (requires_analytics: bool, confidence: float, matched_phrases: list[str])
+
+    Examples:
+        "how many products do you have?" → (True, 0.95, ["how many"])
+        "average price of your laptops"  → (True, 0.97, ["average price"])
+        "summarize your catalog"         → (True, 0.92, ["summarize"])
+        "tell me about your laptops"     → (False, 0.0, [])
+        "show me best gaming laptops"    → (False, 0.0, [])
+    """
+    t = text.lower().strip()
+    if not t:
+        return False, 0.0, []
+
+    matched_phrases: list[str] = []
+    max_confidence = 0.0
+
+    for phrase, confidence in ANALYTICS_INTENT_KEYWORDS:
+        if phrase in t:
+            matched_phrases.append(phrase)
+            if confidence > max_confidence:
+                max_confidence = confidence
+
+    # Require >= 0.80 confidence threshold to trigger analytics
+    # This prevents weak partial matches from activating analytics retrieval
+    ANALYTICS_CONFIDENCE_THRESHOLD = 0.80
+    requires = max_confidence >= ANALYTICS_CONFIDENCE_THRESHOLD and bool(matched_phrases)
+
+    return requires, round(max_confidence, 3), matched_phrases
+
+
+def _infer_analytics_category_from_phrases(
+    matched_phrases: list[str],
+    primary_intent_category: str,
+    business_context: dict | None = None,
+) -> str:
+    """
+    Infer which real category the analytics query targets based on matched phrases.
+
+    When the LLM returns analytics_categories but misses an implied category,
+    this function uses the matched phrases + primary intent category to determine
+    the correct real category for analytics subtype retrieval.
+
+    Logic (priority order):
+      1. Phrase-to-category signal map: specific phrases strongly imply a category
+         (e.g. "shipping capabilities" → delivery_shipping)
+      2. Primary intent category fallback: if no phrase maps cleanly, the primary
+         intent category is the most likely analytics target
+      3. Business context augmentation: for ambiguous phrases, checks business
+         description to disambiguate (e.g. "product overview" for a food company
+         still maps to product_service)
+
+    Domain-agnostic: category signals are derived from universal analytics
+    vocabulary, not from business-specific product names.
+
+    Returns the category string (one of the 8 valid categories).
+    """
+    if not matched_phrases:
+        return primary_intent_category or "product_service"
+
+    # Phrase → category signal map (highest specificity first)
+    PHRASE_CATEGORY_MAP: list[tuple[str, str]] = [
+        # Product catalog signals
+        ("product overview",      "product_service"),
+        ("catalog overview",      "product_service"),
+        ("catalog summary",       "product_service"),
+        ("product tiers",         "product_service"),
+        ("pricing tiers",         "product_service"),
+        ("price distribution",    "product_service"),
+        ("price breakdown",       "product_service"),
+        ("price range",           "product_service"),
+        ("average price",         "product_service"),
+        ("avg price",             "product_service"),
+        ("cheapest",              "product_service"),
+        ("most expensive",        "product_service"),
+        ("total products",        "product_service"),
+        ("how many products",     "product_service"),
+        ("category distribution", "product_service"),
+        ("category breakdown",    "product_service"),
+        ("how many categories",   "product_service"),
+
+        # Offers/promotions signals
+        ("offer summary",         "offers_promotions"),
+        ("total offers",          "offers_promotions"),
+        ("how many offers",       "offers_promotions"),
+        ("discount distribution", "offers_promotions"),
+        ("audience segment",      "offers_promotions"),
+        ("offer type",            "offers_promotions"),
+
+        # Shipping/delivery signals
+        ("shipping capabilities", "delivery_shipping"),
+        ("shipping overview",     "delivery_shipping"),
+        ("delivery methods",      "delivery_shipping"),
+        ("shipping methods",      "delivery_shipping"),
+        ("what delivery",         "delivery_shipping"),
+        ("what shipping",         "delivery_shipping"),
+        ("speed breakdown",       "delivery_shipping"),
+        ("how many shipping",     "delivery_shipping"),
+
+        # Contact/support signals
+        ("support structure",     "contact_support"),
+        ("support teams",         "contact_support"),
+        ("what departments",      "contact_support"),
+        ("department breakdown",  "contact_support"),
+        ("which departments",     "contact_support"),
+        ("channel breakdown",     "contact_support"),
+        ("what channels",         "contact_support"),
+        ("how many departments",  "contact_support"),
+
+        # Policies/legal signals
+        ("policy coverage",       "policies_legal"),
+        ("coverage breakdown",    "policies_legal"),
+        ("what policies",         "policies_legal"),
+        ("what policy",           "policies_legal"),
+        ("how many policies",     "policies_legal"),
+
+        # Educational content signals
+        ("skill level",           "educational_content"),
+        ("skill distribution",    "educational_content"),
+        ("topic coverage",        "educational_content"),
+        ("content type",          "educational_content"),
+        ("what content",          "educational_content"),
+        ("what topics",           "educational_content"),
+
+        # Company info signals
+        ("company profile",       "company_info"),
+        ("company overview",      "company_info"),
+    ]
+
+    # Check each phrase against the map
+    for phrase in matched_phrases:
+        for map_phrase, category in PHRASE_CATEGORY_MAP:
+            if map_phrase in phrase or phrase in map_phrase:
+                return category
+
+    # Fallback to primary intent category
+    if primary_intent_category and primary_intent_category in {
+        "product_service", "offers_promotions", "delivery_shipping",
+        "company_info", "educational_content", "contact_support",
+        "policies_legal", "issue_resolution",
+    }:
+        return primary_intent_category
+
+    return "product_service"
+
+
+def _get_analytics_reason(
+    category: str,
+    matched_phrases: list[str],
+) -> str:
+    """
+    Generate a human-readable reason string for why analytics was triggered
+    for a given category. Used in the analytics_categories output for
+    observability and downstream context.
+
+    Domain-agnostic: reasons are generic enough to apply to any business.
+    """
+    phrase_preview = ", ".join(f'"{p}"' for p in matched_phrases[:3]) if matched_phrases else "analytics signal"
+
+    CATEGORY_REASON_TEMPLATES: dict[str, str] = {
+        "product_service":     f"Customer asking for product statistics, counts, or price distribution ({phrase_preview})",
+        "offers_promotions":   f"Customer asking for offer statistics, counts, or discount summary ({phrase_preview})",
+        "delivery_shipping":   f"Customer asking for shipping capabilities, options summary, or delivery counts ({phrase_preview})",
+        "company_info":        f"Customer asking for company overview or profile summary ({phrase_preview})",
+        "educational_content": f"Customer asking for content distribution, skill levels, or topic coverage ({phrase_preview})",
+        "contact_support":     f"Customer asking for support structure, department breakdown, or channel summary ({phrase_preview})",
+        "policies_legal":      f"Customer asking for policy coverage, count, or legal area distribution ({phrase_preview})",
+        "issue_resolution":    f"Customer asking for issue statistics, resolution rate, or category breakdown ({phrase_preview})",
+    }
+    return CATEGORY_REASON_TEMPLATES.get(
+        category,
+        f"Analytics intent detected via: {phrase_preview}"
+    )
 
 
 def _check_escalation_triggers(text_lower: str) -> bool:
@@ -865,15 +1152,17 @@ def _infer_category(text: str, business_context: dict | None = None) -> str:
     if _matches(EDUCATIONAL_CONTENT_KEYWORDS):
         return "educational_content"
 
-    # Data analytics — reporting and aggregate signals
-    if _matches(DATA_ANALYTICS_KEYWORDS):
-        return "data_analytics"
+    # NOTE: DATA_ANALYTICS_KEYWORDS intentionally NOT routed to "data_analytics" here.
+    # "data_analytics" is a SUBTYPE, not a category. Analytics signals are handled by
+    # _detect_analytics_intent() which sets analytics_decision.requires_analytics=True.
+    # The category fallback remains "product_service" — the retrieval layer will add
+    # subtype=data_analytics filter on top via the analytics_decision output.
 
     # Company info — identity and background signals
     if _matches(COMPANY_INFO_KEYWORDS):
         return "company_info"
 
-    # Product/service — catalog and availability signals
+    # Product/service — catalog and availability signals (also covers analytics signals)
     if _matches(PRODUCT_SERVICE_KEYWORDS):
         return "product_service"
 

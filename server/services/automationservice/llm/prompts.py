@@ -1,5 +1,15 @@
 """
 automationservice — Centralized LLM Prompt Templates
+
+v6 changes — Analytics-Aware Retrieval Planning:
+  - ANALYTICS_INTENT_KEYWORDS: high-confidence explicit analytics triggers
+    (counts, summaries, statistics, distributions, coverage questions).
+    Separated from ANALYTICS_KEYWORDS (soft pre-flight signal set).
+  - System prompt updated with full analytics retrieval planning section.
+  - analytics_decision output schema extended with analytics_confidence and
+    per-category analytics flags for subtype-aware Qdrant filtering.
+  - Analytics must be triggered by EXPLICIT signals only — NOT by
+    "recommend", "best", "top" (those remain product_service retrieval).
 """
 
 ALLOWED_CATEGORIES = [
@@ -11,7 +21,12 @@ ALLOWED_CATEGORIES = [
     "contact_support",
     "policies_legal",
     "issue_resolution",
-    "data_analytics",
+    # NOTE: "data_analytics" is NOT a category — it is a SUBTYPE.
+    # Analytics records are stored as:
+    #   category  = <real category>   (e.g. "product_service")
+    #   subtype   = "data_analytics"
+    # The retrieval layer uses category + subtype filter together.
+    # Never search or route to "data_analytics" as a category.
 ]
 
 VALID_RETRIEVAL_INTENT_TYPES = {
@@ -666,6 +681,147 @@ DATA_ANALYTICS_KEYWORDS: frozenset[str] = frozenset({
 ANALYTICS_KEYWORDS = DATA_ANALYTICS_KEYWORDS
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ANALYTICS INTENT KEYWORDS — HIGH CONFIDENCE TRIGGERS
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# These are EXPLICIT analytics intent signals that require analytics retrieval
+# (subtype=data_analytics). They are MORE SPECIFIC than ANALYTICS_KEYWORDS.
+#
+# IMPORTANT DISTINCTION:
+#   ANALYTICS_KEYWORDS  : broad set used for pre-flight soft check
+#   ANALYTICS_INTENT_KEYWORDS : precise set used for determining analytics_confidence
+#
+# Analytics MUST trigger for:
+#   - Count questions:     "how many", "total count", "number of"
+#   - Stat questions:      "average price", "lowest price", "highest price"
+#   - Summary questions:   "summarize", "overview", "catalog summary"
+#   - Distribution:        "price distribution", "category breakdown"
+#   - Coverage questions:  "what policies", "what departments exist"
+#   - Intelligence:        "analytics", "statistics", "insights", "report"
+#
+# Analytics MUST NOT trigger for:
+#   - "recommend best gaming laptops"   → product_service (no analytics signal)
+#   - "show me top products"            → product_service (browsing, not counting)
+#   - "cheapest laptop under $1000"     → product_service + analytics (price range)
+#     Exception: "$1000" triggers price range lookup which needs analytics too
+#
+# Format: (phrase, confidence_boost)
+# Higher confidence_boost = stronger analytics signal
+# ══════════════════════════════════════════════════════════════════════════════
+
+ANALYTICS_INTENT_KEYWORDS: list[tuple[str, float]] = [
+    # ── COUNT SIGNALS (confidence 0.95) ──────────────────────────────────────
+    ("how many",             0.95),
+    ("how much total",       0.95),
+    ("total count",          0.95),
+    ("total number",         0.95),
+    ("count of",             0.95),
+    ("number of",            0.95),
+    ("how many products",    0.98),
+    ("how many offers",      0.98),
+    ("how many policies",    0.98),
+    ("how many departments", 0.98),
+    ("how many categories",  0.98),
+    ("how many options",     0.95),
+    ("how many shipping",    0.98),
+    ("total offers",         0.95),
+    ("total products",       0.95),
+    ("total policies",       0.95),
+
+    # ── STATISTICAL SIGNALS (confidence 0.95) ─────────────────────────────────
+    ("average price",        0.97),
+    ("avg price",            0.97),
+    ("mean price",           0.97),
+    ("median price",         0.97),
+    ("price range",          0.90),
+    ("price distribution",   0.98),
+    ("lowest price",         0.92),
+    ("highest price",        0.92),
+    ("most expensive",       0.90),
+    ("cheapest",             0.88),
+    ("price breakdown",      0.95),
+    ("cost distribution",    0.95),
+
+    # ── SUMMARY / OVERVIEW SIGNALS (confidence 0.90) ──────────────────────────
+    ("summarize",            0.92),
+    ("summary of",           0.90),
+    ("give me an overview",  0.92),
+    ("product overview",     0.90),
+    ("catalog overview",     0.95),
+    ("catalog summary",      0.95),
+    ("offer summary",        0.95),
+    ("shipping overview",    0.92),
+    ("shipping capabilities", 0.95),
+    ("support structure",    0.95),
+    ("overview of",          0.88),
+    ("tell me about all",    0.85),
+    ("list all",             0.85),
+    ("show all",             0.82),
+
+    # ── DISTRIBUTION / BREAKDOWN SIGNALS (confidence 0.95) ───────────────────
+    ("category distribution", 0.98),
+    ("category breakdown",    0.98),
+    ("skill level",           0.88),
+    ("skill distribution",    0.95),
+    ("audience segment",      0.92),
+    ("offer type",            0.85),
+    ("content type",          0.85),
+    ("speed breakdown",       0.95),
+    ("department breakdown",  0.95),
+    ("policy coverage",       0.95),
+    ("coverage breakdown",    0.95),
+    ("channel breakdown",     0.92),
+    ("topic coverage",        0.92),
+
+    # ── COVERAGE QUESTIONS (confidence 0.90) ──────────────────────────────────
+    ("what policies",         0.90),
+    ("what policy",           0.88),
+    ("what departments",      0.90),
+    ("what channels",         0.88),
+    ("what shipping methods", 0.92),
+    ("what delivery methods", 0.92),
+    ("what content types",    0.90),
+    ("what support teams",    0.90),
+    ("what topics",           0.85),
+    ("what categories",       0.88),
+    ("which categories",      0.88),
+    ("which departments",     0.90),
+
+    # ── INTELLIGENCE / ANALYTICS SIGNALS (confidence 0.95) ───────────────────
+    ("analytics",             0.95),
+    ("statistics",            0.95),
+    ("statistical",           0.92),
+    ("metrics",               0.90),
+    ("business intelligence", 0.98),
+    ("intelligence",          0.88),
+    ("insights",              0.88),
+    ("report",                0.85),
+    ("reporting",             0.88),
+    ("data report",           0.92),
+    ("breakdown",             0.85),
+    ("distribution",          0.88),
+
+    # ── TREND SIGNALS (confidence 0.88) ───────────────────────────────────────
+    ("most popular",          0.88),
+    ("most common",           0.90),
+    ("most available",        0.88),
+    ("trending",              0.85),
+    ("best selling",          0.88),
+    ("top selling",           0.88),
+    ("most used",             0.88),
+
+    # ── BUDGET / TIER SIGNALS (confidence 0.85) — also need analytics ─────────
+    ("budget options",        0.85),
+    ("budget products",       0.85),
+    ("mid range",             0.82),
+    ("mid-range",             0.82),
+    ("premium products",      0.85),
+    ("price tiers",           0.92),
+    ("pricing tiers",         0.92),
+    ("product tiers",         0.88),
+]
+
+# ══════════════════════════════════════════════════════════════════════════════
 # ESCALATION TRIGGER WORDS
 # ══════════════════════════════════════════════════════════════════════════════
 # Latest-message-only escalation triggers — history MUST NOT contribute.
@@ -957,7 +1113,9 @@ Allowed categories:
   contact_support     contact routing, manager/senior requests
   policies_legal      warranty, returns, terms, compliance
   issue_resolution    problems, bugs, complaints, troubleshooting
-  data_analytics      metrics, reports, dashboards, KPIs
+
+NOTE: "data_analytics" is NOT a category — it is a SUBTYPE stored within real categories.
+The retrieval layer handles analytics automatically based on analytics_decision below.
 
 primary_intent.reason: Must cite the SPECIFIC ACTION requested, not the emotion.
   GOOD: "Customer explicitly asked to be connected with senior representative."
@@ -1069,16 +1227,99 @@ retrieval_intent_type — choose exactly one per category:
   policy_lookup        → warranty, returns, legal terms
 
 ════════════════════════════════════════════════════════════════
-ANALYTICS DECISION
+ANALYTICS DECISION — SUBTYPE-AWARE RETRIEVAL INTELLIGENCE
 ════════════════════════════════════════════════════════════════
-requires_analytics: true ONLY for: analytics, metrics, kpi, dashboard,
-  report, reporting, forecast, roi, data visualization, conversion rate,
-  retention rate, revenue report, sales report,
-  how many, count, total number, average, ranking, best selling,
-  most popular, trending, highest, lowest, growth, distribution.
-NOT for: price (of a specific product), specific product details, contact info.
-The key signal is: customer wants AGGREGATE or COMPARATIVE data, not a specific item.
-If false, analytics_categories = [].
+ARCHITECTURE (critical — read carefully):
+  Analytics records are NOT a separate category. They are a SUBTYPE.
+  Every analytics record is stored as:
+    category  = <real category>   (e.g. "product_service")
+    subtype   = "data_analytics"
+
+  The retrieval layer uses your analytics_decision to fetch BOTH:
+    1. analytics subtype records (summaries, stats, counts, distributions)
+    2. regular records (actual products, offers, policies, etc.)
+  Both reach the reranker so the AI can answer both statistical AND operational questions.
+
+WHEN TO SET requires_analytics = true:
+  ALWAYS set true when customer asks for:
+
+  COUNT questions:
+    "How many products do you have?"
+    "Total number of offers?"
+    "How many departments do you support?"
+    "Number of shipping options?"
+    "How many policies are active?"
+    "What is the total count of..."
+
+  STATISTICAL questions:
+    "What is the average price?"
+    "Lowest price / highest price / cheapest / most expensive"
+    "Price range / price distribution / price breakdown"
+    "What are the price tiers?"
+    "Median cost / average discount"
+
+  SUMMARY / OVERVIEW questions:
+    "Summarize your products"
+    "Give me a catalog overview"
+    "What shipping capabilities do you have?"
+    "What support structure do you have?"
+    "Tell me about all your policies"
+    "List all available options"
+    "Show me an overview of..."
+
+  DISTRIBUTION / BREAKDOWN questions:
+    "Category distribution / category breakdown"
+    "What types of offers do you have?"
+    "Skill level distribution"
+    "What departments exist?"
+    "What channels do you support?"
+    "Topic coverage"
+
+  INTELLIGENCE / ANALYTICS questions:
+    "Analytics / statistics / insights / report / reporting"
+    "Business intelligence / metrics / KPIs"
+    "Most popular / most common / most used / trending"
+    "Best selling / top selling"
+    "Distribution / breakdown"
+
+  COVERAGE questions:
+    "What policies are covered?"
+    "What support teams exist?"
+    "What delivery methods are available?"
+    "What content types do you offer?"
+    "Which categories do you serve?"
+
+WHEN TO SET requires_analytics = false:
+  DO NOT set true for:
+    "Tell me about your laptops"            → browsing, not counting
+    "Recommend best gaming laptop"          → recommendation, not analytics
+    "Show me top products"                  → browsing, not statistics
+    "What is the price of [specific item]"  → specific item lookup, not distribution
+    "Do you have [specific product]?"       → availability, not analytics
+    "How do I return a product?"            → policy lookup, not analytics
+
+  KEY RULE: Analytics requires AGGREGATE intent — the customer wants stats/counts/summaries
+  ABOUT the catalog, not a specific item FROM the catalog.
+
+MULTI-CATEGORY ANALYTICS:
+  When a question spans multiple categories, list all relevant categories:
+  "How many active offers do you have and what shipping methods exist?"
+  → analytics_categories: ["offers_promotions", "delivery_shipping"]
+
+analytics_confidence: YOUR confidence (0.0–1.0) that analytics is needed.
+  0.95–1.00: Explicit count/stat/summary signal
+  0.85–0.94: Clear overview/coverage signal
+  0.70–0.84: Moderate signal (distribution, breakdown)
+  Below 0.70: Do not set requires_analytics=true
+
+analytics_categories: List the REAL CATEGORY names (not "data_analytics") for each
+  analytics query needed. Examples:
+    "How many products?" → ["product_service"]
+    "Count of active offers?" → ["offers_promotions"]
+    "Shipping capabilities?" → ["delivery_shipping"]
+    "What policies exist?" → ["policies_legal"]
+    "Support structure?" → ["contact_support"]
+    "Educational content overview?" → ["educational_content"]
 
 ════════════════════════════════════════════════════════════════
 ESCALATION DETECTION — LATEST MESSAGE ONLY
@@ -1154,6 +1395,7 @@ REQUIRED SCHEMA:
   },
   "analytics_decision": {
     "requires_analytics": false,
+    "analytics_confidence": 0.0,
     "analytics_categories": [{"primary_category": "string", "reason": "string"}]
   },
   "retrieval_constraints": {
@@ -1213,6 +1455,11 @@ RULES:
 10. USE THE BUSINESS CONTEXT above to resolve ambiguous terms in the customer message.
     If the customer says "installation", "customization", "range", "model", "it" — resolve
     these using the business domain, NOT generic assumptions.
+11. ANALYTICS DECISION: Set requires_analytics=true and analytics_confidence≥0.85 ONLY
+    when the customer explicitly asks for counts, statistics, summaries, distributions,
+    coverage questions, or business intelligence. DO NOT activate for browsing or specific
+    item lookups. When activated, list only REAL category names (not "data_analytics") in
+    analytics_categories.
 
 Produce the JSON now."""
 
