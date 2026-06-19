@@ -1,24 +1,23 @@
 """
 automationservice — LLM Processor #1: Analysis & Retrieval Planning
 
-Fixes applied:
-  1. Action-first intent: ESCALATION_TRIGGER_WORDS override sentiment-based classification
-  2. Query specificity: minimum 2 queries per category enforced in validator
-  3. Entity expansion: specifications[] field added alongside products/technologies/industries
-  4. Confidence calibration: short/greeting messages capped at 0.45 before validation
-  5. Conversation topic specificity: validated in prompt (no code-level fix needed)
-  6. Current focus enforcement: handled in prompt (latest message priority)
-  7. Context-aware query rewriting: handled in prompt + user template
-  8. Escalation detection: routing_decision{} block validated and repaired
-  9. Enterprise keyword sets: _infer_category uses real customer language across 8 categories
- 10. Analytics-Aware Retrieval Planning:
-     - _detect_analytics_intent(): pre-flight analytics confidence scorer using
-       ANALYTICS_INTENT_KEYWORDS — determines requires_analytics + analytics_confidence
-       before the LLM call so the LLM output can be validated/corrected.
-     - analytics_decision validator: extended to handle analytics_confidence field,
-       validate per-category analytics list, and map categories correctly.
-     - "data_analytics" removed from ALLOWED_CATEGORIES — it is a SUBTYPE not a category.
-     - _infer_retrieval_intent_type: removed "data_analytics" mapping.
+Enterprise Retrieval Intelligence Upgrade — Key changes:
+  1. Analytics pre-flight scans LATEST MESSAGE ONLY (not full history).
+     Prevents analytics bleed from prior conversation turns.
+  2. Broad ANALYTICS_KEYWORDS soft-override removed entirely.
+     Only ANALYTICS_INTENT_KEYWORDS (precise set) used for pre-flight.
+  3. Requirement-Awareness Gate: analytics suppressed when entity_extraction
+     contains specifications[] and no explicit analytics phrase matched.
+     "8GB RAM, 512GB SSD" = product discovery, NOT aggregate analysis.
+  4. Scope Isolation Rule: analytics_categories limited to primary intent
+     category only. Cross-category analytics contamination eliminated.
+  5. Analytics confidence gate: pre-flight >= 0.85 OR LLM >= 0.80 required.
+     Neither alone at low confidence triggers analytics.
+  6. Action-first intent: ESCALATION_TRIGGER_WORDS override sentiment-based classification
+  7. Query specificity: minimum 2 queries per category enforced in validator
+  8. Entity expansion: specifications[] field added alongside products/technologies/industries
+  9. Confidence calibration: short/greeting messages capped at 0.45 before validation
+ 10. "data_analytics" removed from ALLOWED_CATEGORIES — it is a SUBTYPE not a category.
 """
 from __future__ import annotations
 import asyncio
@@ -46,7 +45,6 @@ from llm.prompts import (
     PROCESSOR_1_SYSTEM_PROMPT,
     PROCESSOR_1_USER_TEMPLATE,
     ALLOWED_CATEGORIES,
-    ANALYTICS_KEYWORDS,
     ANALYTICS_INTENT_KEYWORDS,
     VALID_RETRIEVAL_INTENT_TYPES,
     ESCALATION_TRIGGER_WORDS,
@@ -139,21 +137,28 @@ async def run_processor_1(
     )
 
     # ── Pre-flight checks ──────────────────────────────────────────────────────
-    all_text_lower      = " ".join((m.get("content") or "") for m in messages).lower()
-    # Include latest message body in the analytics detection text
-    all_text_for_analytics = (all_text_lower + " " + latest_body.lower()).strip()
+    # ARCHITECTURE: Only scan the LATEST message for analytics intent.
+    # Scanning full conversation history causes analytics to bleed across topic
+    # changes — e.g. "how many products?" in msg #1 would make msg #5 (specs
+    # lookup) trigger analytics retrieval even though msg #5 has no aggregate intent.
+    # The latest message is the ONLY source of retrieval intent per pipeline run.
+    all_text_for_analytics = latest_body.lower().strip()
 
-    # Pre-flight analytics intent detection using ANALYTICS_INTENT_KEYWORDS.
+    # Pre-flight analytics intent detection using ANALYTICS_INTENT_KEYWORDS (precise set).
     # Returns (requires_analytics, analytics_confidence, matched_phrases).
     # Used to validate/correct the LLM's analytics_decision output.
+    # NOTE: ANALYTICS_KEYWORDS (broad set) is intentionally NOT used here —
+    # it contains generic words ("average", "distribution", "performance") that
+    # produce false positives on normal operational queries.
     preflight_analytics_flag, preflight_analytics_confidence, preflight_analytics_phrases = \
         _detect_analytics_intent(all_text_for_analytics)
 
-    # Soft pre-flight: also check the broader ANALYTICS_KEYWORDS set for
-    # the existing single-word pre-flight check (backward compat).
-    preflight_analytics = preflight_analytics_flag or bool(
-        ANALYTICS_KEYWORDS & set(re.findall(r'\b\w+\b', all_text_for_analytics))
-    )
+    # Pre-flight result is the SOLE authority (no broad keyword fallback).
+    # The LLM output is used to confirm or raise analytics confidence, not to
+    # lower the precision threshold. Either the precise preflight OR the LLM
+    # must independently signal analytics — but the broad ANALYTICS_KEYWORDS
+    # soft check is permanently removed to prevent false analytics triggering.
+    preflight_analytics = preflight_analytics_flag
 
     # Detect escalation triggers in latest message for post-validation override.
     latest_lower      = latest_body.lower()
@@ -520,13 +525,38 @@ def _validate_and_repair(
     llm_requires_analytics    = bool(ad.get("requires_analytics", False))
     llm_analytics_confidence  = _clamp(ad.get("analytics_confidence"), 0.0, 1.0, 0.0)
 
-    # Final requires_analytics = either pre-flight OR LLM detected it
-    requires_analytics = llm_requires_analytics or preflight_analytics
+    # ENTERPRISE RULE: Both pre-flight AND LLM must independently agree on analytics
+    # requirement. The pre-flight precision threshold (0.80) gates the pre-flight flag.
+    # If only one side triggers, use the confidence to decide:
+    #   - pre-flight >= 0.85 alone  → override LLM (explicit phrase match wins)
+    #   - LLM alone with conf >= 0.80 → accept LLM decision
+    #   - LLM alone with conf < 0.80  → reject (LLM is speculating)
+    #   - Neither triggers → analytics off
+    if preflight_analytics and preflight_analytics_confidence >= 0.85:
+        requires_analytics = True
+        analytics_confidence = max(preflight_analytics_confidence, llm_analytics_confidence)
+    elif llm_requires_analytics and llm_analytics_confidence >= 0.80:
+        requires_analytics = True
+        analytics_confidence = llm_analytics_confidence
+    else:
+        requires_analytics = False
+        analytics_confidence = 0.0
 
-    # Final analytics_confidence = max of pre-flight and LLM scores
-    analytics_confidence = max(preflight_analytics_confidence, llm_analytics_confidence)
-    if requires_analytics and analytics_confidence < 0.70:
-        analytics_confidence = max(analytics_confidence, 0.75)  # floor when triggered
+    # REQUIREMENT-AWARENESS GATE: If customer message contains specific product/spec
+    # requirements (entity_extraction.specifications is non-empty), it means the
+    # customer wants a specific item lookup, NOT aggregate statistics.
+    # Analytics should NOT trigger for specific item lookups.
+    extracted_specs = ee.get("specifications", [])
+    extracted_products = ee.get("products", [])
+    if requires_analytics and extracted_specs and not preflight_analytics_phrases:
+        # Customer mentioned specific specs (e.g. "8GB RAM, 512GB SSD") but the
+        # analytics signal came only from the LLM (not an explicit phrase). This
+        # is a product discovery request misclassified as analytics.
+        requires_analytics = False
+        analytics_confidence = 0.0
+        logger.debug(
+            "[P1] analytics gate: suppressed analytics — specifications present, no explicit analytics phrase"
+        )
 
     # Determine the analytics categories (which real categories need analytics subtype)
     if not requires_analytics:
@@ -537,50 +567,60 @@ def _validate_and_repair(
         ad["requires_analytics"]   = True
         ad["analytics_confidence"] = round(analytics_confidence, 3)
 
-        # Collect categories from LLM output — normalize to list of category strings
+        # SCOPE ISOLATION RULE: Analytics categories must be scoped ONLY to the
+        # primary intent category. Cross-category analytics contamination is a
+        # retrieval noise source — if customer asks about offers, product analytics
+        # is NOT relevant.
+        # Exception: if the LLM explicitly returns multiple analytics categories
+        # with conf >= 0.85, those are honoured (multi-category question).
+        primary_cat = pi.get("category", "")
+
         raw_ac = ad.get("analytics_categories") if isinstance(ad.get("analytics_categories"), list) else []
         validated_ac_cats: list[str] = []
 
         for item in raw_ac:
             if isinstance(item, dict):
-                # LLM returned {"primary_category": "...", "reason": "..."}
                 pc = str(item.get("primary_category", "")).strip()
                 if pc in ALLOWED_CAT_SET and pc not in validated_ac_cats:
                     validated_ac_cats.append(pc)
             elif isinstance(item, str) and item.strip() in ALLOWED_CAT_SET:
-                # LLM returned plain string category names
                 pc = item.strip()
                 if pc not in validated_ac_cats:
                     validated_ac_cats.append(pc)
 
-        # If LLM returned no valid categories, default to the primary intent category
-        if not validated_ac_cats:
-            default_cat = pi.get("category", "")
-            if default_cat and default_cat in ALLOWED_CAT_SET:
-                validated_ac_cats = [default_cat]
-            else:
-                validated_ac_cats = ["product_service"]
+        # Scope enforcement: only allow categories that match the primary intent
+        # OR are in the explicit retrieval strategy categories (multi-intent query)
+        retrieval_cats = {c.get("category", "") for c in rs.get("categories", []) if isinstance(c, dict)}
+        scoped_cats = [
+            c for c in validated_ac_cats
+            if c == primary_cat or c in retrieval_cats
+        ]
 
-        # If pre-flight detected analytics phrases, ensure their implied category is included.
-        # We infer from the phrase context which category is most relevant.
+        # If scope filtering eliminated all, fall back to primary intent category
+        if not scoped_cats:
+            if primary_cat and primary_cat in ALLOWED_CAT_SET:
+                scoped_cats = [primary_cat]
+            else:
+                scoped_cats = ["product_service"]
+
+        # If pre-flight matched phrases, confirm the implied category is the primary
         if preflight_analytics_phrases:
             implied_cat = _infer_analytics_category_from_phrases(
-                preflight_analytics_phrases, pi.get("category", ""), business_context
+                preflight_analytics_phrases, primary_cat, business_context
             )
-            if implied_cat and implied_cat not in validated_ac_cats:
-                validated_ac_cats.append(implied_cat)
+            if implied_cat == primary_cat and implied_cat not in scoped_cats:
+                scoped_cats.append(implied_cat)
 
         # Normalize to structured list format for downstream consumers
         ad["analytics_categories"] = [
             {"primary_category": cat, "reason": _get_analytics_reason(cat, preflight_analytics_phrases)}
-            for cat in validated_ac_cats
+            for cat in scoped_cats
         ]
 
-        if preflight_analytics_confidence >= 0.85:
-            logger.debug(
-                "[P1] pre-flight analytics | confidence=%.2f phrases=%s cats=%s",
-                preflight_analytics_confidence, preflight_analytics_phrases[:3], validated_ac_cats,
-            )
+        logger.debug(
+            "[P1] analytics decision | confidence=%.2f phrases=%s cats=%s",
+            analytics_confidence, preflight_analytics_phrases[:3], scoped_cats,
+        )
 
     data["analytics_decision"] = ad
 

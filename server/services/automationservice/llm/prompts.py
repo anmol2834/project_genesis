@@ -1297,6 +1297,14 @@ WHEN TO SET requires_analytics = false:
     "What is the price of [specific item]"  → specific item lookup, not distribution
     "Do you have [specific product]?"       → availability, not analytics
     "How do I return a product?"            → policy lookup, not analytics
+    "I need a laptop with 8GB RAM"          → spec-based product search, NOT analytics
+    "Do you have 512GB SSD laptops?"        → attribute-filtered catalog search, NOT analytics
+    "Show me business laptops under $1000" → filtered browsing, NOT analytics
+
+  CRITICAL RULE: Whenever the customer message contains SPECIFIC PRODUCT ATTRIBUTES
+  or SPECIFICATIONS (RAM, storage, screen size, price range, color, size, etc.),
+  this is a PRODUCT DISCOVERY request, NOT an analytics request.
+  requires_analytics MUST be false when specifications[] is non-empty.
 
   KEY RULE: Analytics requires AGGREGATE intent — the customer wants stats/counts/summaries
   ABOUT the catalog, not a specific item FROM the catalog.
@@ -1458,8 +1466,11 @@ RULES:
 11. ANALYTICS DECISION: Set requires_analytics=true and analytics_confidence≥0.85 ONLY
     when the customer explicitly asks for counts, statistics, summaries, distributions,
     coverage questions, or business intelligence. DO NOT activate for browsing or specific
-    item lookups. When activated, list only REAL category names (not "data_analytics") in
-    analytics_categories.
+    item lookups. CRITICAL: If the customer message contains specific product attributes
+    or specifications (RAM, storage, price, size, color, etc.), requires_analytics MUST
+    be false — this is product discovery, not aggregate analysis. When activated, list
+    only REAL category names (not "data_analytics") in analytics_categories, and ONLY
+    include the PRIMARY intent category (do not add unrelated categories).
 
 Produce the JSON now."""
 

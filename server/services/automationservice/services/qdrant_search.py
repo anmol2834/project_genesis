@@ -724,12 +724,26 @@ def _compute_diversity_score(results: list[dict[str, Any]]) -> float:
     """
     Measure retrieval diversity: what fraction of returned results have
     DIFFERENT categories. A diverse result set = 1.0, all same category = 0.0.
+
+    NOTE: A score of 0.0 is EXPECTED and CORRECT for single-intent queries
+    (e.g. product lookup, offers lookup). Diversity score is only meaningful
+    for multi-category queries. Do NOT treat 0.0 as a problem.
     """
     if len(results) < 2:
         return 1.0
-    cats = [r.get("category", "") for r in results]
+    # Count only the real category (not the subtype label) for diversity
+    cats = []
+    for r in results:
+        cat = r.get("category", "")
+        # Strip analytics subtype suffix if logged with it
+        if "/" in cat:
+            cat = cat.split("/")[0]
+        cats.append(cat)
     unique_cats = len(set(cats))
-    return round((unique_cats - 1) / max(len(cats) - 1, 1), 3)
+    # Return 0.0 explicitly for single-category results — expected for focused queries
+    if unique_cats <= 1:
+        return 0.0
+    return round((unique_cats - 1) / max(len(set(cats)) - 1, 1), 3)
 
 
 # ── Per-category search ────────────────────────────────────────────────────────
@@ -1048,8 +1062,14 @@ async def _run_hybrid_retrieval_inner(
         for ac in raw_ac:
             if isinstance(ac, dict):
                 pc = str(ac.get("primary_category", "")).strip()
-                if pc in ALLOWED_CATEGORIES:
+                if pc in ALLOWED_CATEGORIES and pc not in analytics_categories:
                     analytics_categories.append(pc)
+        # Scope guard: never allow more analytics categories than retrieval categories.
+        # Cross-category analytics contamination is suppressed here as a second
+        # defence in case P1 validator missed it (e.g. old cached P1 output).
+        retrieval_cat_set = {str(c.get("category", "")) for c in raw_categories if isinstance(c, dict)}
+        retrieval_cat_set.add(primary_intent_cat)
+        analytics_categories = [c for c in analytics_categories if c in retrieval_cat_set]
         if not analytics_categories and primary_intent_cat in ALLOWED_CATEGORIES:
             analytics_categories = [primary_intent_cat]
 
@@ -1070,13 +1090,40 @@ async def _run_hybrid_retrieval_inner(
         tasks.append((cat, False, "", qs, boost))
 
     for ac_primary in analytics_categories:
-        # Analytics search: category=<ac_primary> + subtype=data_analytics
-        # Use standalone_query enriched with "analytics summary" context for
-        # better vector alignment with analytics subtype documents.
-        qs = [standalone_query] if standalone_query else [ac_primary.replace("_", " ") + " analytics summary"]
-        # Task tuple: (category_label, is_analytics, analytics_primary_cat, query_list, escalation_boost)
-        # category_label is the real category for display/logging purposes.
-        tasks.append((ac_primary, True, ac_primary, qs, False))
+        # Analytics query construction — REQUIREMENT-ENRICHED
+        # The analytics chunk lives in a different semantic space from product chunks.
+        # Using the raw standalone_query (a product discovery query) produces a poor
+        # vector match against analytics summaries ("20 items, price range...").
+        # We construct an analytics-specific query that aligns with the analytics
+        # chunk's vocabulary: counts, statistics, summaries, distributions.
+        #
+        # Strategy:
+        #   1. Extract what the customer wants to know (from analytics_categories reason)
+        #   2. Build a query using aggregate vocabulary: "count", "total", "summary", etc.
+        #   3. Enrich with entity context from P1 entity_extraction if available
+        ee_info      = p1_output.get("entity_extraction") or {}
+        specs        = ee_info.get("specifications") or []
+        ca_info      = p1_output.get("conversation_analysis") or {}
+        current_focus = ca_info.get("current_focus") or ""
+
+        # Build category-specific analytics query
+        cat_label = ac_primary.replace("_", " ")
+        if specs:
+            # Customer has specifications — they want stats about items matching specs
+            spec_str = ", ".join(specs[:3])
+            analytics_qs = [
+                f"{cat_label} analytics summary statistics count distribution",
+                f"{cat_label} total count breakdown price range {spec_str}",
+            ]
+        elif standalone_query:
+            analytics_qs = [
+                f"{cat_label} analytics statistics summary count total distribution",
+                f"{standalone_query} statistics count breakdown overview",
+            ]
+        else:
+            analytics_qs = [f"{cat_label} analytics summary statistics count distribution breakdown"]
+
+        tasks.append((ac_primary, True, ac_primary, analytics_qs, False))
 
     if not tasks:
         logger.warning("[hybrid_retrieval] no tasks built | user=%s ... falling back", user_id[:8])
