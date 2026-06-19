@@ -88,7 +88,12 @@ class WorkerRuntime:
         self.metrics = get_metrics_collector()
 
         self._running = False
-        self._worker_count = 1
+        # Worker concurrency: read from env var WORKER_CONCURRENCY (default 1).
+        # Increase via environment for higher throughput.  Keep at 1 for single-
+        # process deployments (standard); uvicorn multi-worker mode should keep
+        # this at 1 per process to avoid XRANGE race conditions on the stream.
+        import os
+        self._worker_count = max(1, int(os.getenv("AUTOMATION_WORKER_CONCURRENCY", "1")))
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
@@ -271,6 +276,14 @@ class WorkerRuntime:
                     "Message processing failed: %s | msg=%s user=%s",
                     e, message.get("message_id"), message.get("user_id"),
                 )
+
+        # ── Acknowledge processed messages (XDEL) ─────────────────────────
+        # All messages in this batch have now reached a terminal state (either
+        # response sent, DLQ'd, or in the retry queue). It is now safe to delete
+        # them from the stream. If the worker crashes before this line, the
+        # messages remain on the stream and will be reprocessed on restart
+        # (dedup key prevents double-sending within the 10-minute TTL window).
+        await self.consumer.ack_batch()
 
         elapsed = (time.perf_counter() - start) * 1000
 

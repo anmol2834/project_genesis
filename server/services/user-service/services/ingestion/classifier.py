@@ -1,11 +1,15 @@
 """
 Category Classifier + Subtype Detector
-Uses intfloat/e5-base-v2 to classify each data row into category + subtype.
+Uses BAAI/bge-m3 to classify each data row into category + subtype.
 
 Confidence merge (enforced at pipeline):
   ai_confidence > 0.75  -> ai_category wins
   elif user_category    -> user_category wins
   else                  -> "uncategorized"
+
+Prefix contract:
+  BAAI/bge-m3 does NOT use instruction prefixes.
+  Text is passed as-is to .encode() for both prototypes and query rows.
 """
 
 import logging
@@ -144,7 +148,7 @@ def _get_model():
     if _model is None:
         from services.ingestion.model_singleton import get_shared_model
         _model = get_shared_model()
-        logger.info("Classifier: e5-base-v2 loaded")
+        logger.info("Classifier: BAAI/bge-m3 loaded")
     return _model
 
 
@@ -153,8 +157,7 @@ def _get_proto_embeddings() -> Dict[str, np.ndarray]:
     if not _proto_embeddings:
         model = _get_model()
         for cat, phrases in CATEGORY_PROTOTYPES.items():
-            encoded = [f"passage: {p}" for p in phrases]
-            embs = model.encode(encoded, normalize_embeddings=True, batch_size=32)
+            embs = model.encode(phrases, normalize_embeddings=True, batch_size=32)
             mean_emb = embs.mean(axis=0)
             norm = np.linalg.norm(mean_emb)
             _proto_embeddings[cat] = mean_emb / norm if norm > 0 else mean_emb
@@ -169,8 +172,7 @@ def _get_subtype_embeddings() -> Dict[str, Dict[str, np.ndarray]]:
         for cat, subtypes in SUBTYPE_PROTOTYPES.items():
             _subtype_embeddings[cat] = {}
             for subtype, phrases in subtypes.items():
-                encoded = [f"passage: {p}" for p in phrases]
-                embs = model.encode(encoded, normalize_embeddings=True, batch_size=32)
+                embs = model.encode(phrases, normalize_embeddings=True, batch_size=32)
                 mean_emb = embs.mean(axis=0)
                 norm = np.linalg.norm(mean_emb)
                 _subtype_embeddings[cat][subtype] = mean_emb / norm if norm > 0 else mean_emb
@@ -210,7 +212,7 @@ def classify_text(text: str) -> Tuple[str, Optional[str], float]:
     model = _get_model()
     proto_embs = _get_proto_embeddings()
 
-    query_emb = model.encode([f"query: {text[:512]}"], normalize_embeddings=True)[0]
+    query_emb = model.encode([text[:512]], normalize_embeddings=True)[0]
 
     best_cat, best_score = "uncategorized", -1.0
     for cat, proto_emb in proto_embs.items():
@@ -239,7 +241,7 @@ def classify_batch(rows: List[Dict[str, Any]]) -> List[Tuple[str, Optional[str],
     model = _get_model()
     proto_embs = _get_proto_embeddings()
 
-    texts = [f"query: {_row_to_text(r)[:512]}" for r in rows]
+    texts = [_row_to_text(r)[:512] for r in rows]
     embs = model.encode(texts, normalize_embeddings=True, batch_size=32)
 
     results = []

@@ -2,7 +2,7 @@
 Embedding Service — Qdrant Storage + Deduplication
 
 Collection : user_data_entries
-Model      : intfloat/e5-base-v2  (768-dim, Cosine)
+Model      : BAAI/bge-m3  (1024-dim, Cosine)
 
 Qdrant payload per point (enterprise, context-builder-safe):
     user_id, entry_id, source_id,
@@ -22,6 +22,10 @@ Multi-tenancy:
 Auto-sync contract:
     Any write to structured_data in Postgres MUST be followed by
     upsert_entries(). Enforced by run_update_pipeline in pipeline.py.
+
+Prefix contract:
+    BAAI/bge-m3 does NOT use instruction prefixes.
+    Text is passed as-is to .encode() — no "passage: " or "query: " prefix.
 """
 
 import logging
@@ -33,7 +37,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "user_data_entries"
-VECTOR_SIZE     = 768
+VECTOR_SIZE     = 1024
 DEDUP_THRESHOLD = 0.95
 BATCH_SIZE      = 50
 
@@ -47,7 +51,7 @@ def _get_model():
     if _model is None:
         from services.ingestion.model_singleton import get_shared_model
         _model = get_shared_model()
-        logger.info("Embedding service: e5-base-v2 loaded")
+        logger.info("Embedding service: BAAI/bge-m3 loaded")
     return _model
 
 
@@ -67,13 +71,12 @@ def ensure_collection() -> bool:
 
 def embed_texts(texts: List[str]) -> np.ndarray:
     """
-    Encode a list of search_text strings with e5-base-v2.
-    Uses 'passage:' prefix as required by the e5 instruction-tuned model.
-    Returns a (N, 768) float32 ndarray of L2-normalised vectors.
+    Encode a list of search_text strings with BAAI/bge-m3.
+    BGE-M3 does NOT use instruction prefixes — text is passed as-is.
+    Returns a (N, 1024) float32 ndarray of L2-normalised vectors.
     """
     model = _get_model()
-    prefixed = [f"passage: {t[:512]}" for t in texts]
-    return model.encode(prefixed, normalize_embeddings=True, batch_size=32)
+    return model.encode(texts, normalize_embeddings=True, batch_size=32)
 
 
 # ── Upsert ────────────────────────────────────────────────────────────────────
@@ -83,7 +86,7 @@ def upsert_entries(entries: List[Dict[str, Any]], user_id: str) -> List[str]:
     Embed and upsert a batch of entry payloads into Qdrant.
 
     Steps per entry:
-      1. Embed search_text with e5-base-v2
+      1. Embed search_text with BAAI/bge-m3
       2. Dedup check: cosine > 0.95 with same user -> reuse existing point ID
       3. Build enterprise payload
       4. Batch upsert to Qdrant
@@ -146,7 +149,8 @@ def upsert_entries(entries: List[Dict[str, Any]], user_id: str) -> List[str]:
 
                 # Classification — enables category + subtype filtering
                 "category":       entry.get("category") or "uncategorized",
-                "subtype":        entry.get("subtype") or "",
+                # Store None when no subtype — empty string breaks Qdrant null-checks
+                "subtype":        entry.get("subtype") or None,
 
                 # Search + display
                 "title":          entry.get("title") or "",
@@ -293,9 +297,16 @@ _CAPABILITY_PATTERNS = [
 ]
 
 _PHYSICAL_KEYWORDS = {
+    # Original hardware/device terms
     "drone", "uav", "aircraft", "hardware", "device", "equipment", "machine",
     "robot", "vehicle", "unit", "sensor", "camera", "battery", "motor", "frame",
     "propeller", "controller", "transmitter", "receiver", "gimbal",
+    # Consumer electronics — laptops, phones, tablets
+    "laptop", "notebook", "computer", "desktop", "tablet", "phone", "smartphone",
+    "monitor", "keyboard", "mouse", "headphone", "headset", "speaker", "printer",
+    "charger", "cable", "adapter", "dock", "accessory",
+    # Appliances / physical goods
+    "appliance", "furniture", "tool", "instrument", "gadget",
 }
 _SOFTWARE_KEYWORDS = {
     "software", "app", "application", "platform", "dashboard", "saas",

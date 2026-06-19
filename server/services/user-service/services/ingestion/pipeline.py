@@ -4,7 +4,7 @@ Coordinates the full data intelligence flow for every input method.
 
 Flow (file/sheet/webhook):
   Raw rows
-    -> Column mapping (AI-assisted, e5-base-v2)
+    -> Column mapping (AI-assisted, BAAI/bge-m3)
     -> Apply mapping (rename keys to canonical)
     -> Batch AI classification (category + subtype + confidence)
     -> Category merge (ai_confidence > 0.75 -> ai wins, else user_category)
@@ -144,10 +144,20 @@ async def run_file_pipeline(
     # ── Step 5: PostgreSQL insert (raw_data preserved) ────────────────────
     entry_ids = await _insert_entries_pg(payloads, source_id, user_id, source_type, session)
 
+    # ── Step 5b: Commit immediately after insert ──────────────────────────
+    # CRITICAL: commit the pipeline session NOW, before the Qdrant upsert.
+    # The Qdrant upsert runs in a thread and takes 20-60s for large batches.
+    # If we hold the session open across that wait, the asyncpg pool recycles
+    # the underlying TCP connection to RDS, and the final session.commit()
+    # raises: InterfaceError: cannot call Transaction.commit(): the underlying
+    # connection is closed.
+    # Committing here releases the connection back to the pool immediately
+    # so it is never held idle long enough to be recycled.
+    await session.commit()
+
     # ── Step 6: Qdrant embed + upsert (enterprise payload) ────────────────
-    # NOTE: upsert_entries runs in a thread and takes ~20s for 100 rows.
-    # The pipeline session connection may be recycled by the pool during this
-    # time. _update_qdrant_ids opens its OWN fresh session to avoid this.
+    # Runs in a thread — may take 20-60s for large batches.
+    # Pipeline session is already committed above; no DB connection is held.
     qdrant_payloads = [
         {**p, "entry_id": eid, "source_id": source_id, "updated_at": datetime.utcnow().isoformat()}
         for p, eid in zip(payloads, entry_ids)
@@ -155,15 +165,12 @@ async def run_file_pipeline(
     qdrant_point_ids = await asyncio.to_thread(upsert_entries, qdrant_payloads, user_id)
 
     # ── Step 7: Store Qdrant point IDs back in Postgres ───────────────────
-    # Opens its own fresh session — avoids stale connection after long upsert
+    # Uses its own fresh session (pipeline session already committed above).
     await _update_qdrant_ids(entry_ids, qdrant_point_ids, session)
 
     # ── Step 8: Update source stats ───────────────────────────────────────
-    # Opens its own fresh session — same reason
+    # Uses its own fresh session.
     await _update_source_stats(source_id, len(payloads), payloads, session)
-
-    # Commit the pipeline session (covers _insert_entries_pg flush)
-    await session.commit()
 
     # ── Step 9: Compute + store analytics object in Qdrant ────────────────
     # Opens its OWN fresh session — never reuses the pipeline session.
@@ -236,6 +243,11 @@ async def run_manual_pipeline(
 
     entry_ids = await _insert_entries_pg([payload], source_id, user_id, "manual", session)
 
+    # Commit immediately after insert — before the Qdrant upsert.
+    # Same reason as run_file_pipeline: holding the session open across
+    # asyncio.to_thread(upsert_entries) risks connection recycling on RDS.
+    await session.commit()
+
     qdrant_payloads = [{
         **payload,
         "entry_id":  entry_ids[0],
@@ -245,7 +257,6 @@ async def run_manual_pipeline(
     qdrant_point_ids = await asyncio.to_thread(upsert_entries, qdrant_payloads, user_id)
     await _update_qdrant_ids(entry_ids, qdrant_point_ids, session)
     await _update_source_stats(source_id, 1, [payload], session)
-    await session.commit()
 
     # Compute + store analytics after manual entry (own fresh session)
     asyncio.create_task(_compute_and_store_analytics(

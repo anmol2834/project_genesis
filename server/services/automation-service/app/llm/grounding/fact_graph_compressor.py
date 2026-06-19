@@ -272,6 +272,48 @@ class FactGraphCompressor:
     # Product accumulator — merges multiple chunks for same product
     # ══════════════════════════════════════════════════════════════════════
 
+    # ── Internal Qdrant category names — never expose these to customers ───
+    _INTERNAL_CATEGORIES = frozenset({
+        "product_service", "offers_promotions", "delivery_shipping",
+        "company_info", "educational_content", "contact_support",
+        "policies_legal", "issue_resolution", "data_analytics",
+    })
+
+    def _resolve_display_category(self, metadata: Dict) -> str:
+        """
+        Return the human-readable business category for a product/entry.
+
+        Priority:
+          1. attributes.category  (e.g. "Business", "Gaming", "Education")
+          2. structured_data.category
+          3. metadata.category — ONLY if it is NOT an internal Qdrant category name
+          4. Empty string — never expose internal category values to customers
+
+        This prevents "Category: product_service" from leaking into responses.
+        The 9 canonical internal category values (product_service, data_analytics, etc.)
+        are Qdrant collection routing tags, not customer-visible business categories.
+        """
+        attrs  = metadata.get("attributes") or {}
+        sd     = metadata.get("structured_data") or {}
+
+        # Priority 1: attributes.category (most reliable — set by the ingestion pipeline)
+        cat = (attrs.get("category") or "").strip()
+        if cat and cat.lower() not in self._INTERNAL_CATEGORIES:
+            return cat
+
+        # Priority 2: structured_data.category
+        cat = (sd.get("category") or "").strip()
+        if cat and cat.lower() not in self._INTERNAL_CATEGORIES:
+            return cat
+
+        # Priority 3: metadata-level category — only if not an internal name
+        cat = (metadata.get("category") or "").strip()
+        if cat and cat.lower() not in self._INTERNAL_CATEGORIES:
+            return cat
+
+        # Do NOT fall back to an internal category name
+        return ""
+
     def _accumulate_product(
         self,
         content: str,
@@ -307,11 +349,8 @@ class FactGraphCompressor:
         if name_lower not in product_map:
             product_map[name_lower] = {
                 "name":           name,
-                "category":       (
-                    metadata.get("category", "")
-                    or metadata.get("attributes", {}).get("category", "")
-                    or metadata.get("structured_data", {}).get("category", "")
-                ),
+                # Use display category (human-readable), never internal Qdrant category
+                "category":       self._resolve_display_category(metadata),
                 "description":    (
                     metadata.get("description", "")
                     or metadata.get("attributes", {}).get("description", "")
@@ -1058,8 +1097,12 @@ class FactGraphCompressor:
                         lines.append(f"   Price: {currency_sym}{price_val}")
                 elif p.get("price_conflict"):
                     lines.append(f"   Price: not confirmed - multiple values detected")
-                if p.get("category"):
-                    lines.append(f"   Category: {p['category']}")
+                # Only render category when it is a human-readable business category
+                # (e.g. "Business", "Gaming", "Education") — never render the 9 internal
+                # Qdrant routing values like "product_service", "data_analytics", etc.
+                display_cat = p.get("category", "")
+                if display_cat and display_cat.lower() not in self._INTERNAL_CATEGORIES:
+                    lines.append(f"   Category: {display_cat}")
                 if p.get("description") and not p.get("description", "").startswith(name):
                     lines.append(f"   Description: {p['description'][:100]}")
                 if p.get("features"):

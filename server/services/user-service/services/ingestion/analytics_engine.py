@@ -53,8 +53,10 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_ANALYTICS_CATEGORY = "data_analytics"
-_ANALYTICS_SUBTYPE  = "source_insights"
+# Subtype written on every analytics (source_insights) point.
+# Distinct from regular data subtypes — lets automationservice filter
+# analytics entries separately from regular ingested records.
+_ANALYTICS_SUBTYPE = "data_analytics"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -90,7 +92,7 @@ def compute_source_analytics(
     keywords    = _build_keywords(intelligence, source_name, category)
 
     return {
-        "category":        _ANALYTICS_CATEGORY,
+        "category":        category,        # scoped to the actual source category, not a generic bucket
         "subtype":         _ANALYTICS_SUBTYPE,
         "title":           f"Analytics: {source_name}",
         "search_text":     search_text,
@@ -295,34 +297,48 @@ class ProductIntelligenceBuilder(_BaseBuilder):
                 priced_items.append({"name": title, "price": price})
 
             # Category / subcategory distribution from actual field values
+            # Use _attr which already merges attrs + sd with attrs taking precedence
             cat_val = self._attr(entry, "category") or self._attr(entry, "type") or ""
             if cat_val and str(cat_val).strip():
                 k = str(cat_val).strip()
                 cat_dist[k] = cat_dist.get(k, 0) + 1
 
             subcat_val = self._attr(entry, "subcategory") or self._attr(entry, "subtype") or ""
-            if subcat_val and str(subcat_val).strip():
+            # Exclude the analytics subtype marker from subcategory distribution
+            if subcat_val and str(subcat_val).strip() and str(subcat_val).strip() != "data_analytics":
                 k = str(subcat_val).strip()
                 subcat_dist[k] = subcat_dist.get(k, 0) + 1
 
             # Collect ALL numeric field values (domain-agnostic spec detection)
-            for src in (entry.get("attributes") or {}, entry.get("structured_data") or {}):
-                for field_key, field_val in src.items():
-                    # Skip identity/meta fields
-                    if field_key in ("price", "cost", "rate", "fee", "amount", "mrp",
-                                     "priority_score", "quality_score"):
-                        continue
-                    if isinstance(field_val, (int, float)) and not isinstance(field_val, bool):
-                        if field_key not in numeric_fields:
-                            numeric_fields[field_key] = []
-                        numeric_fields[field_key].append(float(field_val))
-                    elif isinstance(field_val, str):
-                        cleaned = re.sub(r"[^\d.]", "", field_val)
-                        if cleaned and len(cleaned) <= 10:
-                            try:
-                                numeric_fields.setdefault(field_key, []).append(float(cleaned))
-                            except ValueError:
-                                pass
+            # Only collect from fields whose values are genuinely numeric —
+            # skip string fields that happen to contain a digit (e.g. product names,
+            # processor model strings). Rule: accept a string only if it consists
+            # ENTIRELY of digits and at most one decimal point (no letters).
+            #
+            # DEDUP: merge attributes and structured_data into a single dict so
+            # that overlapping keys (e.g. "ram" in both) are not double-counted.
+            # attributes takes precedence over structured_data.
+            attrs_sd = {**(entry.get("structured_data") or {}), **(entry.get("attributes") or {})}
+            for field_key, field_val in attrs_sd.items():
+                # Skip identity/meta/price fields — already handled above
+                if field_key in ("price", "cost", "rate", "fee", "amount", "mrp",
+                                 "priority_score", "quality_score",
+                                 "product_name", "name", "title", "description",
+                                 "processor", "category", "subcategory", "status",
+                                 "source_id", "source_name", "primary_category"):
+                    continue
+                if isinstance(field_val, (int, float)) and not isinstance(field_val, bool):
+                    numeric_fields.setdefault(field_key, []).append(float(field_val))
+                elif isinstance(field_val, str):
+                    # Only accept strings that are purely numeric (no letters)
+                    stripped = field_val.strip()
+                    cleaned  = re.sub(r"[^\d.]", "", stripped)
+                    # Reject if original had any letter — it's a model/name string
+                    if cleaned and len(cleaned) <= 10 and not re.search(r"[a-zA-Z]", stripped):
+                        try:
+                            numeric_fields.setdefault(field_key, []).append(float(cleaned))
+                        except ValueError:
+                            pass
 
         # Price tiers — percentile-based, adapts to any price range
         price_dist:     Dict[str, int]      = {}
@@ -513,6 +529,17 @@ class OffersIntelligenceBuilder(_BaseBuilder):
             discount_dist["free_item"] = len(free_item_offers)
 
         total = len(entries)
+
+        # Validate: discount buckets count offers by pattern match, not by offer_type field,
+        # so some offers may match multiple patterns. Log a warning when totals diverge.
+        total_bucketed = sum(discount_dist.values())
+        if total_bucketed > total:
+            logger.warning(
+                "discount_distribution total (%d) exceeds offer count (%d) — "
+                "some offers match multiple discount patterns (counted in each matching bucket)",
+                total_bucketed, total,
+            )
+
         summary_parts = [
             f"{total} offers: {active} active, {scheduled} scheduled, {expired} expired."
         ]
@@ -521,7 +548,7 @@ class OffersIntelligenceBuilder(_BaseBuilder):
         if largest_fixed:
             summary_parts.append(f"Largest fixed discount: {largest_fixed['name']}.")
         if audience_segments:
-            segs = ", ".join(f"{k}({v})" for k, v in list(audience_segments.items())[:5])
+            segs = ", ".join(f"{k}({v})" for k, v in audience_segments.items())
             summary_parts.append(f"Audience segments: {segs}.")
         if free_item_offers:
             summary_parts.append(f"Free item offers: {len(free_item_offers)}.")
@@ -612,13 +639,19 @@ class ContactIntelligenceBuilder(_BaseBuilder):
                 dept_label = words[0].title() if words else "General"
                 dept_counts[dept_label] = dept_counts.get(dept_label, 0) + 1
 
-            # Channel detection from actual field values
+            # Channel detection — check actual field values AND title text
             for channel, field_names in self._CHANNEL_FIELDS.items():
+                # 1) Field-value presence check
                 for fn in field_names:
                     v = merged.get(fn)
                     if v and str(v).strip() and str(v).strip().lower() not in ("none", "n/a", "-"):
                         channel_presence[channel] = True
                         break
+                # 2) Title-text fallback — catches entries whose title IS the channel
+                #    (e.g. "Live Chat", "WhatsApp Support", "Email Helpdesk")
+                if not channel_presence[channel]:
+                    if self._contains_any(tl, field_names):
+                        channel_presence[channel] = True
 
             # Region/location detection from title
             for sig in self._REGION_SIGNALS:
@@ -630,7 +663,8 @@ class ContactIntelligenceBuilder(_BaseBuilder):
 
             # Specialized team: any entry with escalation/vip/specialist signals
             if self._contains_any(tl, ["escalation", "vip", "specialist", "expert",
-                                        "senior", "dedicated", "priority", "key account"]):
+                                        "senior", "dedicated", "priority", "key account",
+                                        "premium care", "ai features"]):
                 if title not in specialized_teams:
                     specialized_teams.append(title)
 
@@ -819,8 +853,8 @@ class CompanyIntelligenceBuilder(_BaseBuilder):
                             "portfolio", "catalog", "range", "collection"]
 
     _PRESENCE_SIGNALS   = ["global", "international", "worldwide", "country",
-                            "region", "office", "branch", "partner",
-                            "distributor", "reseller", "franchise"]
+                            "region", "branch", "partner",
+                            "distributor", "reseller", "franchise", "locations"]
 
     _RESEARCH_SIGNALS   = ["research", "r&d", "innovation", "lab", "patent",
                             "technology", "development", "centre", "center"]
@@ -917,7 +951,10 @@ class PoliciesIntelligenceBuilder(_BaseBuilder):
                               "environmental", "esg", "ethics", "code of conduct",
                               "supplier", "vendor", "anti-bribery", "aml",
                               "kyc", "sanctions"],
-        "product_coverage": ["warranty", "guarantee", "maintenance", "service level",
+        # Named "product_warranty" (not "warranty" alone) to avoid key collision
+        # with generic "warranty" tokens that exist in multiple other categories.
+        # Coverage flag will be emitted as "product_warranty_coverage".
+        "product_warranty": ["warranty", "guarantee", "maintenance", "service level",
                               "sla", "uptime", "support policy", "after-sales",
                               "product liability"],
         "hr_employment":    ["employment", "hr", "human resources", "leave",
@@ -1085,12 +1122,15 @@ class EducationIntelligenceBuilder(_BaseBuilder):
 
         total     = len(entries)
         skill_str = ", ".join(f"{k}({v})" for k, v in skill_counts.items() if v)
-        summary   = (
-            f"{total} educational articles. "
-            + (f"Skill levels: {skill_str}. " if skill_str else "")
-            + ("Content types: " + ", ".join(type_counts.keys()) + ". " if type_counts else "")
-            + ("Topics: " + ", ".join(list(topic_map.keys())[:6]) + "." if topic_map else "")
-        )
+        type_str  = ", ".join(type_counts.keys())
+        summary_parts = [f"{total} educational articles."]
+        if skill_str:
+            summary_parts.append(f"Skill levels: {skill_str}.")
+        if type_str:
+            summary_parts.append(f"Content types: {type_str}.")
+        if topic_map:
+            summary_parts.append("Topics: " + ", ".join(list(topic_map.keys())[:6]) + ".")
+        summary = " ".join(summary_parts)
 
         return {
             **meta,
@@ -1346,9 +1386,8 @@ def _build_search_text(intelligence: Dict[str, Any], source_name: str, category:
             parts.append("Coverage: " + ", ".join(covered) + ".")
 
     elif category == "educational_content":
-        skill = intelligence.get("skill_level_breakdown") or {}
-        if skill:
-            parts.append("Skills: " + ", ".join(f"{k}({v})" for k, v in skill.items()) + ".")
+        # Skill and topic details are already in intelligence_summary —
+        # only add topic map keys here to avoid repeating skill counts twice.
         topics = intelligence.get("topic_coverage") or {}
         if topics:
             parts.append("Topics: " + ", ".join(list(topics.keys())[:8]) + ".")
@@ -1404,7 +1443,10 @@ _CATEGORY_AI_TAGS: Dict[str, List[str]] = {
 
 
 def _build_ai_tags(category: str, intelligence: Dict[str, Any]) -> List[str]:
-    base     = ["data_analytics", "business_intelligence", "source_insights"]
+    # base tags: "business_intelligence" and "data_analytics" mark these as
+    # analytics/navigation entries. The actual source category (e.g. "delivery_shipping")
+    # is stored in the category field for retrieval routing.
+    base     = ["business_intelligence", "data_analytics", "source_insights"]
     specific = _CATEGORY_AI_TAGS.get(category, ["general_analytics"])
     return base + specific
 
@@ -1531,7 +1573,7 @@ def upsert_analytics_to_qdrant(
                 "user_id":         user_id,
                 "entry_id":        point_id,
                 "source_id":       source_id,
-                "category":        _ANALYTICS_CATEGORY,
+                "category":        analytics_payload.get("category", ""),
                 "subtype":         _ANALYTICS_SUBTYPE,
                 "title":           analytics_payload.get("title", ""),
                 "search_text":     search_text[:500],

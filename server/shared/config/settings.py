@@ -132,7 +132,7 @@ class GlobalConfig(BaseSettings):
     QDRANT_URL: str = Field(default="http://qdrant:6333")
     QDRANT_GRPC_URL: str = Field(default="http://qdrant:6334")
     QDRANT_COLLECTION: str = Field(default="business_context")
-    QDRANT_VECTOR_SIZE: int = Field(default=768)
+    QDRANT_VECTOR_SIZE: int = Field(default=1024)
     QDRANT_DISTANCE_METRIC: str = Field(default="Cosine")
 
     # ── LLM Configuration ──────────────────────────────────────────────────

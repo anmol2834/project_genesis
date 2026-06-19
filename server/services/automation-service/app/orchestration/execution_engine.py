@@ -577,6 +577,29 @@ class ExecutionEngine:
             )
             return retrieval
 
+        # DEDUP PROTECTION: when retrieval confidence is high (intent-cache hit with real data)
+        # but existing_chunks is empty because dedup removed all previously-shown chunks,
+        # do NOT fall through to analytics injection for product/pricing intents.
+        # Injecting delivery/education analytics when the user asks "tell me which products"
+        # is worse than showing no context — the LLM will format analytics as "products".
+        #
+        # Instead: skip analytics injection entirely. The fact_graph compressor will produce
+        # an empty products section → the LLM prompt will say "no specific verified information"
+        # and gracefully prompt the user to ask about something new or specific.
+        # This is far better than sending "20 delivery options" as an answer to "which products".
+        if intent_str in product_intents and not has_product_chunks and not user_wants_catalog_overview:
+            retrieval_conf = retrieval.get("retrieval_confidence", 0.0)
+            cache_hit = retrieval.get("cache_hit", False)
+            if retrieval_conf >= 0.70 or cache_hit:
+                # High-confidence retrieval that was deduped → all chunks were already shown.
+                # Don't inject analytics; let the LLM gracefully say the catalog was already shared.
+                logger.info(
+                    "analytics_injection_blocked_dedup | intent=%s conf=%.2f cache_hit=%s "
+                    "existing_chunks=0 (all deduped — catalog already presented)",
+                    intent_str, retrieval_conf, cache_hit,
+                )
+                return retrieval
+
         # Company inquiry ALWAYS needs business_context injection — no gate
         is_business_context_request = intent_str in business_context_intents
 
@@ -603,6 +626,70 @@ class ExecutionEngine:
         # ── CACHE-FIRST: reuse discovery_context stored by a previous turn ─
         mem = memory or {}
         cached_discovery = mem.get("discovery_context")
+
+        # ── Intent-aware cache filtering ──────────────────────────────────
+        # The discovery_context cache may contain analytics from a DIFFERENT intent
+        # (e.g. delivery+education analytics from a support_request turn).
+        # When intent has changed, filter the cache to only inject analytics
+        # that are RELEVANT to the current intent.
+        #
+        # Intent → relevant primary_category in analytics structured_data:
+        _INTENT_TO_ANALYTICS_CATEGORY = {
+            "product_inquiry":    "product_service",
+            "pricing_inquiry":    "product_service",
+            "offers_inquiry":     "offers_promotions",
+            "shipping_inquiry":   "delivery_shipping",
+            "educational_inquiry":"educational_content",
+            "support_request":    "contact_support",
+            "technical_support_request": "contact_support",
+            "company_inquiry":    "company_info",
+            "refund_request":     "policies_legal",
+        }
+        target_analytics_cat = _INTENT_TO_ANALYTICS_CATEGORY.get(intent_str)
+
+        # For offers_inquiry: ONLY inject offers analytics, never delivery/education
+        # For product_inquiry: ONLY inject product analytics, never delivery/education
+        # For other specific intents with a known category: filter accordingly
+        # For generic/catalog-overview queries: keep all analytics
+        if cached_discovery and isinstance(cached_discovery, list) and cached_discovery:
+            if target_analytics_cat and not user_wants_catalog_overview:
+                # Filter cache to only chunks whose primary_category matches
+                filtered_cache = []
+                for c in cached_discovery:
+                    # Check structured_data.primary_category or attributes.primary_category
+                    meta = c.get("metadata") or {}
+                    if not isinstance(meta, dict):
+                        meta = {}
+                    sd   = meta.get("structured_data") or c.get("structured_data") or {}
+                    attr = meta.get("attributes") or c.get("attributes") or {}
+                    chunk_cat = (
+                        (sd.get("primary_category") if isinstance(sd, dict) else "")
+                        or (attr.get("primary_category") if isinstance(attr, dict) else "")
+                        or (meta.get("category") if isinstance(meta, dict) else "")
+                        or ""
+                    ).lower()
+                    if chunk_cat == target_analytics_cat:
+                        filtered_cache.append(c)
+                # If no matching analytics in cache → bypass cache, fall through to Qdrant fetch
+                if not filtered_cache:
+                    logger.info(
+                        "discovery_cache_filtered | intent=%s target_cat=%s "
+                        "cache_size=%d filtered=0 → falling through to Qdrant",
+                        intent_str, target_analytics_cat, len(cached_discovery),
+                        trace_id=trace_id,
+                    )
+                    cached_discovery = None  # Force Qdrant fetch for correct analytics
+                else:
+                    cached_discovery = filtered_cache
+                    logger.info(
+                        "discovery_cache_filtered | intent=%s target_cat=%s "
+                        "cache_size→filtered=%d→%d",
+                        intent_str, target_analytics_cat,
+                        len(filtered_cache) + (len(mem.get("discovery_context", [])) - len(filtered_cache)),
+                        len(filtered_cache),
+                        trace_id=trace_id,
+                    )
+
         if cached_discovery and isinstance(cached_discovery, list) and cached_discovery:
             # Apply score cap before injecting from cache
             capped_cache = [
@@ -673,11 +760,42 @@ class ExecutionEngine:
                         )
                         return retrieval
 
-            analytics_chunks = await qdrant_repo.scroll(
-                user_id=user_id,
-                filters={"category": "data_analytics"},
-                limit=3,
-            )
+            # Fetch analytics filtered to the current intent's relevant category.
+            # Fetching all 7 analytics chunks and injecting unrelated ones is the root
+            # cause of "delivery options" appearing in product queries, and
+            # "I don't have offers" when offers analytics are buried under 2 irrelevant ones.
+            #
+            # Strategy:
+            # - If we have a specific target category → fetch only that analytics chunk (limit=1)
+            # - For catalog-overview / generic queries → fetch up to 3 (product analytics preferred)
+            # - Always save the fetched chunk(s) to discovery_context for future turns
+            if target_analytics_cat and not user_wants_catalog_overview:
+                # Intent-specific: only fetch the analytics chunk for this category
+                analytics_chunks = await qdrant_repo.scroll(
+                    user_id=user_id,
+                    filters={
+                        "category": "data_analytics",
+                        "primary_category": target_analytics_cat,  # matched in structured_data
+                    },
+                    limit=1,
+                )
+                # Fallback: if primary_category filter not supported, fetch all and filter
+                if not analytics_chunks:
+                    all_analytics = await qdrant_repo.scroll(
+                        user_id=user_id,
+                        filters={"category": "data_analytics"},
+                        limit=7,  # fetch all to filter locally
+                    )
+                    analytics_chunks = [
+                        r for r in all_analytics
+                        if _match_analytics_category(r, target_analytics_cat)
+                    ][:1]
+            else:
+                analytics_chunks = await qdrant_repo.scroll(
+                    user_id=user_id,
+                    filters={"category": "data_analytics"},
+                    limit=3,
+                )
 
             analytics_found = len(analytics_chunks)
             logger.info(
@@ -931,5 +1049,40 @@ class ExecutionEngine:
         )
 
 execution_engine = ExecutionEngine()
+
+
+def _match_analytics_category(record: Dict, target_cat: str) -> bool:
+    """
+    Check if a Qdrant analytics record's primary_category matches the target.
+    Works with both flat payload dicts and nested metadata structures.
+
+    The analytics structured_data always contains primary_category as per the
+    Qdrant ingestion schema. This function handles all layout variants.
+    """
+    payload = record.get("payload", {})
+    if not isinstance(payload, dict):
+        payload = {}
+
+    # Try structured_data first (most reliable — always set by analytics engine)
+    sd = payload.get("structured_data") or {}
+    if isinstance(sd, dict):
+        cat = sd.get("primary_category", "")
+        if cat and cat.lower() == target_cat.lower():
+            return True
+
+    # Try attributes
+    attr = payload.get("attributes") or {}
+    if isinstance(attr, dict):
+        cat = attr.get("primary_category", "")
+        if cat and cat.lower() == target_cat.lower():
+            return True
+
+    # Try top-level payload category
+    cat = payload.get("category", "") or payload.get("primary_category", "")
+    if cat and cat.lower() == target_cat.lower():
+        return True
+
+    return False
+
 
 __all__ = ["ExecutionEngine", "WorkflowExecutionContext", "ExecutionState", "execution_engine"]

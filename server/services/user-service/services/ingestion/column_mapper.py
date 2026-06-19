@@ -1,7 +1,7 @@
 """
 Intelligent Column Mapper
 Maps arbitrary CSV/sheet headers to canonical field names using
-e5-base-v2 semantic similarity + keyword override rules.
+BAAI/bge-m3 semantic similarity + keyword override rules.
 
 Design principles:
   - NEVER produce duplicate suffixes like sku_2, availability_2
@@ -10,6 +10,10 @@ Design principles:
      fall back to a slugified version of the original header)
   - Keyword override rules fire before the model for common exact matches
     (e.g. "Product ID" → product_id, "Stock Quantity" → stock)
+
+Prefix contract:
+  BAAI/bge-m3 does NOT use instruction prefixes.
+  Text is passed as-is to .encode().
 """
 
 import logging
@@ -261,7 +265,7 @@ def _get_model():
     if _model is None:
         from services.ingestion.model_singleton import get_shared_model
         _model = get_shared_model()
-        logger.info("Column mapper: e5-base-v2 loaded")
+        logger.info("Column mapper: BAAI/bge-m3 loaded")
     return _model
 
 
@@ -269,7 +273,7 @@ def _get_phrase_embeddings():
     global _phrase_embeddings, _phrase_keys
     if _phrase_embeddings is None:
         model = _get_model()
-        phrases = [f"query: {p}" for _, p in _FIELD_PHRASES]
+        phrases = [p for _, p in _FIELD_PHRASES]
         _phrase_keys = [k for k, _ in _FIELD_PHRASES]
         _phrase_embeddings = model.encode(phrases, normalize_embeddings=True, batch_size=64)
         logger.info(f"Column mapper: {len(phrases)} phrase embeddings pre-computed")
@@ -294,7 +298,7 @@ def map_columns(
 
     Rules:
       1. Keyword override fires first (exact substring match).
-      2. Semantic similarity via e5-base-v2 for remaining headers.
+      2. Semantic similarity via BAAI/bge-m3 for remaining headers.
       3. Each canonical key is assigned to at most ONE header
          (highest confidence wins; duplicates fall back to slug).
       4. NEVER produces sku_2, availability_2, etc.
@@ -320,7 +324,7 @@ def map_columns(
     if remaining:
         model = _get_model()
         phrase_embs, phrase_keys = _get_phrase_embeddings()
-        header_queries = [f"query: {h.lower()}" for h in remaining]
+        header_queries = [h.lower() for h in remaining]
         header_embs = model.encode(header_queries, normalize_embeddings=True, batch_size=32)
 
         for i, header in enumerate(remaining):

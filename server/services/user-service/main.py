@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Qdrant collection init failed (non-fatal): {e}")
 
-    # Pre-warm the e5-base-v2 model in background so first upload is fast
+    # Pre-warm the BAAI/bge-m3 model in background so first upload is fast
     # Without this, the first file upload triggers a ~30s model load which
     # causes the gateway to time out and open the circuit breaker.
     asyncio.create_task(_warmup_ml_model())
@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
 
 async def _warmup_ml_model() -> None:
     """
-    Pre-load the e5-base-v2 model at startup.
+    Pre-load the BAAI/bge-m3 model at startup.
     Runs in background — doesn't block startup.
     Without this, the first upload request triggers model loading (~30s),
     causing the gateway to time out and open the circuit breaker.
@@ -69,7 +69,7 @@ async def _warmup_ml_model() -> None:
     try:
         from services.ingestion.model_singleton import get_shared_model
         await asyncio.to_thread(get_shared_model)
-        logger.info("ML model (e5-base-v2) pre-warmed successfully")
+        logger.info("ML model (BAAI/bge-m3) pre-warmed successfully")
     except Exception as e:
         logger.warning(f"ML model warmup failed (non-fatal): {e}")
 

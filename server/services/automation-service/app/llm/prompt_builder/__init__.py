@@ -388,7 +388,43 @@ class PromptRouter:
         # NEVER suppress hardware specs (8GB RAM, 512GB SSD) — those are
         # search criteria, not products. Suppressing them causes Brain #2
         # to say "I don't have products with those specs" when context shows them.
+        #
+        # INTENT-AWARE GUARD: only inject the repetition note when the current
+        # intent is the SAME class as the intent under which those products were
+        # shared. If the customer switched from product_inquiry → offers_inquiry,
+        # mentioning "you already discussed IngenAI Pro 14" is wrong — they are
+        # now asking about something completely different. Cross-intent bleeding
+        # causes Brain #2 to repeat product info when answering offers questions.
         already_shared = memory.get("already_shared_entities", [])
+        # Detect current intent
+        _cur_intent_pb = _get_primary_intent(intelligence)
+        # Detect the intent under which entities were last shared
+        # The memory key last_intent reflects the most recent completed turn intent
+        _last_intent_pb = memory.get("last_intent", "")
+        # Intent families — entities should only repeat-guard within the same family
+        _PRODUCT_INTENTS_PB  = {"product_inquiry", "pricing_inquiry", "feature_request"}
+        _OFFERS_INTENTS_PB   = {"offers_inquiry"}
+        _SUPPORT_INTENTS_PB  = {"support_request", "technical_support_request", "complaint"}
+        _SHIPPING_INTENTS_PB = {"shipping_inquiry"}
+        _OTHER_INTENTS_PB    = {"company_inquiry", "educational_inquiry", "refund_request", "billing_inquiry"}
+
+        def _intent_family(intent_str: str) -> str:
+            if intent_str in _PRODUCT_INTENTS_PB:  return "product"
+            if intent_str in _OFFERS_INTENTS_PB:   return "offers"
+            if intent_str in _SUPPORT_INTENTS_PB:  return "support"
+            if intent_str in _SHIPPING_INTENTS_PB: return "shipping"
+            return "other"
+
+        _cur_family  = _intent_family(_cur_intent_pb)
+        _last_family = _intent_family(_last_intent_pb)
+        # Only inject repetition guard when intent families match
+        # (same type of request repeating) OR when it's a follow-up continuation
+        _same_intent_family = (
+            _cur_family == _last_family
+            or _cur_intent_pb in {"follow_up", "general_inquiry"}
+            or _last_intent_pb in {"follow_up", "general_inquiry", ""}
+        )
+
         # Filter: only include real product names (not specs/generic terms)
         _SPEC_PAT_PB = re.compile(
             r"^\d+\s*(?:gb|tb|mb|ghz|mhz|inch|\")\b"
@@ -404,7 +440,7 @@ class PromptRouter:
             if e and not _SPEC_PAT_PB.search(str(e).strip())
             and str(e).lower() not in _GENERIC_PB
         ]
-        if product_names_already_shown and not _is_explicit_reask(message):
+        if product_names_already_shown and not _is_explicit_reask(message) and _same_intent_family:
             shared_str = ", ".join(str(e) for e in product_names_already_shown[:8])
             parts.append(
                 f"\n\nNOTE: The following PRODUCTS were already discussed: "

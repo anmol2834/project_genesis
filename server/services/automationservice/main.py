@@ -212,7 +212,7 @@ async def lifespan(app: FastAPI):
     _notify_task = asyncio.create_task(_notify_loop())
     logger.info("Notify loop started — ready")
 
-    # Pre-warm retrieval engine (e5-base-v2 + Qdrant client)
+    # Pre-warm retrieval engine (BAAI/bge-m3 + Qdrant client)
     # Eliminates ~30s cold-start on first real request
     try:
         from services.qdrant_search import warmup as _qdrant_warmup

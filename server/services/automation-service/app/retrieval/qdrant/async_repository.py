@@ -49,23 +49,38 @@ def _normalize_payload(payload: Dict) -> Dict:
       chunk_type  — category enum value
       chunk_id    — stable identifier
       user_id     — tenant key
+
+    BUSINESS-AGNOSTIC: The content field is built from every available text field
+    without assuming any specific business domain. Rather than pulling a fixed list
+    of hardware-specific keys (ram, storage, processor…), we iterate ALL keys in
+    structured_data and attributes so that:
+      - A laptop company's "ram: 8GB" is included
+      - A restaurant's "cuisine: Italian" is included
+      - A law firm's "practice_area: Corporate" is included
+      - A medical device company's "certification: ISO-13485" is included
+    No business-specific field names are hardcoded here.
     """
     normalized = dict(payload)
 
-    # content: prefer explicit content, else build from search_text + title + key structured_data values
+    # content: prefer explicit content, else build from all available text sources
     if not normalized.get("content"):
         parts = []
         if normalized.get("title"):
             parts.append(str(normalized["title"]))
         if normalized.get("search_text"):
             parts.append(str(normalized["search_text"]))
-        # Append key structured_data values so BM25 scoring finds specs like "8GB", "512GB SSD"
-        sd = normalized.get("structured_data") or {}
-        if isinstance(sd, dict):
-            for key in ("ram", "storage", "processor", "gpu", "display", "battery"):
-                val = sd.get(key)
-                if val:
-                    parts.append(str(val))
+
+        # Append ALL structured_data values so BM25 scoring picks up any domain's specs.
+        # This is intentionally domain-agnostic — we iterate every key/value pair
+        # rather than hardcoding specific field names like "ram" or "storage".
+        for src_key in ("structured_data", "attributes"):
+            src = normalized.get(src_key) or {}
+            if isinstance(src, dict):
+                for k, v in src.items():
+                    if v is not None and str(v).strip():
+                        # Include both key and value for richer token overlap scoring
+                        parts.append(f"{k}: {v}")
+
         if parts:
             normalized["content"] = " | ".join(parts)
         elif normalized.get("type"):
@@ -313,89 +328,124 @@ class AsyncQdrantRepository:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _build_conditions(self, filters: Dict[str, Any]) -> List[FieldCondition]:
+        """
+        Build Qdrant filter conditions from a dict of filter parameters.
+
+        BUSINESS-AGNOSTIC DESIGN:
+        ---------------------------------------------------------------------------
+        This method does NOT know or assume anything about the business domain.
+        It supports two categories of filters:
+
+        1. SYSTEM FILTERS (always supported — used for routing/isolation):
+           - category / chunk_type: routes to the correct Qdrant category bucket
+           - primary_category: used by analytics injection to find the right analytics
+             chunk (e.g. primary_category="offers_promotions")
+
+        2. DYNAMIC ATTRIBUTE FILTERS (domain-agnostic):
+           The caller can pass any key/value pair under the "attributes" sub-dict.
+           Each key is mapped to a Qdrant field condition using dot-notation:
+             filters={"attributes": {"price_min": 500, "price_max": 1000}}
+           This works for:
+             - A laptop company: {"attributes": {"ram_gb": 8, "storage_gb": 512}}
+             - A restaurant:     {"attributes": {"cuisine": "Italian"}}
+             - A law firm:       {"attributes": {"practice_area": "Corporate"}}
+             - Any business:     {"attributes": {<any_field>: <any_value>}}
+
+        3. LEGACY COMPAT FILTERS (kept for backward compatibility):
+           - price_min / price_max: maps to Range on "price" field
+           - features: list of feature tags
+           These exist because older callers pass these directly; new callers should
+           use the "attributes" sub-dict approach instead.
+        ---------------------------------------------------------------------------
+        """
         conditions: List[FieldCondition] = []
 
-        # chunk_type / category: map to the Qdrant "category" field in user_data_entries
-        for field in ("category", "chunk_type", "department"):
-            if filters.get(field):
-                raw_value = filters[field]
-                qdrant_field = "category" if field == "chunk_type" else field
+        # ── 1. System routing filters ──────────────────────────────────────────
+        # category / chunk_type: routes to the correct Qdrant category bucket
+        for field_alias in ("category", "chunk_type"):
+            if filters.get(field_alias):
                 conditions.append(
-                    FieldCondition(key=qdrant_field, match=MatchValue(value=raw_value))
+                    FieldCondition(key="category", match=MatchValue(value=filters[field_alias]))
                 )
 
+        # primary_category: used by analytics scroll to find intent-specific analytics
+        if filters.get("primary_category"):
+            conditions.append(
+                FieldCondition(
+                    key="structured_data.primary_category",
+                    match=MatchValue(value=filters["primary_category"]),
+                )
+            )
+
+        # department: direct field match (supported by some legacy data schemas)
+        if filters.get("department"):
+            conditions.append(
+                FieldCondition(key="department", match=MatchValue(value=filters["department"]))
+            )
+
+        # ── 2. Dynamic attribute filters — fully business-agnostic ────────────
+        # Any key/value pair passed under "attributes" is turned into a Qdrant
+        # FieldCondition on the corresponding dot-notation path.
+        # Numeric values → Range condition; string values → MatchValue condition.
+        # This design means zero code changes are needed to support a new business
+        # type or a new filterable attribute.
+        dynamic_attrs = filters.get("attributes", {})
+        if isinstance(dynamic_attrs, dict):
+            for attr_key, attr_val in dynamic_attrs.items():
+                if attr_val is None:
+                    continue
+                qdrant_field = f"structured_data.{attr_key}"
+                if isinstance(attr_val, dict) and ("gte" in attr_val or "lte" in attr_val):
+                    # Explicit range condition: {"gte": 100, "lte": 500}
+                    range_kwargs = {}
+                    if attr_val.get("gte") is not None:
+                        range_kwargs["gte"] = float(attr_val["gte"])
+                    if attr_val.get("lte") is not None:
+                        range_kwargs["lte"] = float(attr_val["lte"])
+                    conditions.append(
+                        FieldCondition(key=qdrant_field, range=Range(**range_kwargs))
+                    )
+                elif isinstance(attr_val, (int, float)):
+                    # Numeric single value → exact range match (gte=lte)
+                    conditions.append(
+                        FieldCondition(
+                            key=qdrant_field,
+                            range=Range(gte=float(attr_val), lte=float(attr_val)),
+                        )
+                    )
+                else:
+                    # String or other → exact match
+                    conditions.append(
+                        FieldCondition(key=qdrant_field, match=MatchValue(value=str(attr_val)))
+                    )
+                # Also try the attributes.* path for businesses that store flat attributes
+                conditions.append(
+                    FieldCondition(
+                        key=f"attributes.{attr_key}",
+                        match=MatchValue(value=str(attr_val)),
+                    )
+                )
+
+        # ── 3. Legacy compat filters ───────────────────────────────────────────
+        # price_min / price_max: backwards-compatible range on the "price" field.
+        # New integrations should use filters["attributes"]["price"] = {"gte": x, "lte": y}
         range_params: Dict[str, Any] = {}
-        if "price_min" in filters:
-            range_params["gte"] = filters["price_min"]
-        if "price_max" in filters:
-            range_params["lte"] = filters["price_max"]
+        if "price_min" in filters and filters["price_min"] is not None:
+            range_params["gte"] = float(filters["price_min"])
+        if "price_max" in filters and filters["price_max"] is not None:
+            range_params["lte"] = float(filters["price_max"])
         if range_params:
             conditions.append(FieldCondition(key="price", range=Range(**range_params)))
+            # Also try structured_data.price for businesses that store price there
+            conditions.append(
+                FieldCondition(key="structured_data.price", range=Range(**range_params))
+            )
 
+        # features: list of feature/tag values — stored as array in Qdrant payload
         for feature in filters.get("features", []):
-            conditions.append(
-                FieldCondition(key="features", match=MatchValue(value=feature))
-            )
-
-        # ── Structured key/value spec filters ─────────────────────────────
-        # These match nested fields inside structured_data JSON payload.
-        # Qdrant supports dot-notation for nested payload fields.
-        #
-        # CRITICAL: The actual data stored in user_data_entries uses STRING values
-        # for hardware specs (ram="8GB", storage="512GB SSD"), NOT integer fields
-        # (ram_gb=8). The old paths (structured_data.ram_gb, structured_data.storage_gb)
-        # never matched anything. We now map to the actual field names used by the
-        # ingestion pipeline, using MatchValue (string match) instead of Range.
-        # This works for any business domain — the field names come from the data itself.
-        #
-        # To keep this generic (not hardcoded to laptop/electronics), we try BOTH
-        # the string field (structured_data.ram) and the integer field (structured_data.ram_gb)
-        # so businesses that store numeric specs also benefit from this filter.
-        if "ram_gb" in filters and filters["ram_gb"] is not None:
-            val_gb = filters["ram_gb"]
-            # Try string match against structured_data.ram: "8GB", "8 GB", "8gb"
-            conditions.append(
-                FieldCondition(key="structured_data.ram", match=MatchValue(value=f"{val_gb}GB"))
-            )
-            # Also try integer range for businesses that store numeric ram_gb
-            try:
+            if feature:
                 conditions.append(
-                    FieldCondition(key="structured_data.ram_gb", range=Range(gte=float(val_gb), lte=float(val_gb)))
+                    FieldCondition(key="features", match=MatchValue(value=feature))
                 )
-            except Exception:
-                pass
-
-        if "storage_gb" in filters and filters["storage_gb"] is not None:
-            val_gb = filters["storage_gb"]
-            # Determine storage type (SSD/HDD)
-            storage_type = filters.get("storage_type", "")
-            # Try string match: "512GB SSD", "512GB", "512 GB SSD"
-            if val_gb >= 1024:
-                tb_val = val_gb // 1024
-                storage_str = f"{tb_val}TB {storage_type.upper()}" if storage_type else f"{tb_val}TB"
-            else:
-                storage_str = f"{val_gb}GB {storage_type.upper()}" if storage_type else f"{val_gb}GB"
-            conditions.append(
-                FieldCondition(key="structured_data.storage", match=MatchValue(value=storage_str.strip()))
-            )
-            try:
-                conditions.append(
-                    FieldCondition(key="structured_data.storage_gb", range=Range(gte=float(val_gb), lte=float(val_gb)))
-                )
-            except Exception:
-                pass
-
-        if "cpu" in filters and filters["cpu"]:
-            conditions.append(
-                FieldCondition(key="structured_data.processor", match=MatchValue(value=str(filters["cpu"])))
-            )
-        if "gpu" in filters and filters["gpu"]:
-            conditions.append(
-                FieldCondition(key="structured_data.gpu", match=MatchValue(value=str(filters["gpu"])))
-            )
-        if "brand" in filters and filters["brand"]:
-            conditions.append(
-                FieldCondition(key="structured_data.brand", match=MatchValue(value=str(filters["brand"]).lower()))
-            )
 
         return conditions

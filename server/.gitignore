@@ -69,3 +69,7 @@ Thumbs.db
 *.temp
 tmp/
 temp/
+
+# ML model cache — BAAI/bge-m3 weights (~2.3GB), downloaded once at first startup
+# Never commit these — they are re-downloaded automatically from HuggingFace
+.model_cache/

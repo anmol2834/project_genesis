@@ -222,53 +222,73 @@ class QdrantRepository:
     ) -> List[FieldCondition]:
         """
         Build Qdrant filter conditions from dict.
-        
-        Supported filters:
-        - category: str
-        - chunk_type: str
-        - price_min: float
-        - price_max: float
-        - features: List[str]
+
+        BUSINESS-AGNOSTIC: supports any domain via the "attributes" sub-dict.
+        Legacy filters (category, chunk_type, price_min, price_max, features)
+        are kept for backward compatibility.
+
+        For domain-specific filtering pass:
+            filters={"attributes": {"<any_field>": <value>}}
+        e.g. {"attributes": {"cuisine": "Italian"}} for a restaurant,
+             {"attributes": {"practice_area": "Corporate"}} for a law firm.
         """
         conditions = []
-        
-        # Exact match filters
-        for field in ["category", "chunk_type", "department"]:
-            if field in filters and filters[field]:
+
+        # Routing filters
+        for field_alias in ("category", "chunk_type"):
+            if filters.get(field_alias):
                 conditions.append(
-                    FieldCondition(
-                        key=field,
-                        match=MatchValue(value=filters[field])
-                    )
+                    FieldCondition(key="category", match=MatchValue(value=filters[field_alias]))
                 )
-        
-        # Range filters
+        if filters.get("department"):
+            conditions.append(
+                FieldCondition(key="department", match=MatchValue(value=filters["department"]))
+            )
+
+        # Dynamic attribute filters — domain-agnostic
+        dynamic_attrs = filters.get("attributes", {})
+        if isinstance(dynamic_attrs, dict):
+            for attr_key, attr_val in dynamic_attrs.items():
+                if attr_val is None:
+                    continue
+                qdrant_field = f"structured_data.{attr_key}"
+                if isinstance(attr_val, dict) and ("gte" in attr_val or "lte" in attr_val):
+                    range_kwargs = {}
+                    if attr_val.get("gte") is not None:
+                        range_kwargs["gte"] = float(attr_val["gte"])
+                    if attr_val.get("lte") is not None:
+                        range_kwargs["lte"] = float(attr_val["lte"])
+                    conditions.append(FieldCondition(key=qdrant_field, range=Range(**range_kwargs)))
+                elif isinstance(attr_val, (int, float)):
+                    conditions.append(
+                        FieldCondition(
+                            key=qdrant_field,
+                            range=Range(gte=float(attr_val), lte=float(attr_val)),
+                        )
+                    )
+                else:
+                    conditions.append(
+                        FieldCondition(key=qdrant_field, match=MatchValue(value=str(attr_val)))
+                    )
+
+        # Legacy range filters
         if "price_min" in filters or "price_max" in filters:
             range_params = {}
-            
-            if "price_min" in filters:
-                range_params["gte"] = filters["price_min"]
-            
-            if "price_max" in filters:
-                range_params["lte"] = filters["price_max"]
-            
-            conditions.append(
-                FieldCondition(
-                    key="price",
-                    range=Range(**range_params)
-                )
-            )
-        
-        # Array contains filters
+            if "price_min" in filters and filters["price_min"] is not None:
+                range_params["gte"] = float(filters["price_min"])
+            if "price_max" in filters and filters["price_max"] is not None:
+                range_params["lte"] = float(filters["price_max"])
+            if range_params:
+                conditions.append(FieldCondition(key="price", range=Range(**range_params)))
+
+        # Legacy array contains filters
         if "features" in filters and filters["features"]:
             for feature in filters["features"]:
-                conditions.append(
-                    FieldCondition(
-                        key="features",
-                        match=MatchValue(value=feature)
+                if feature:
+                    conditions.append(
+                        FieldCondition(key="features", match=MatchValue(value=feature))
                     )
-                )
-        
+
         return conditions
     
     async def count(

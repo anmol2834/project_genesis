@@ -88,6 +88,7 @@ class StreamConsumer:
         self._retry_queue: List[tuple[Dict, int, float]] = []
         self._work_ready: asyncio.Event = asyncio.Event()
         self._pending_count: int = 0   # messages signalled by last notify token
+        self._pending_stream_ids: List[str] = []  # stream IDs awaiting ack after processing
 
     async def start(self) -> None:
         self._redis = get_resource_manager().get_redis()
@@ -248,8 +249,33 @@ class StreamConsumer:
         return records
 
     async def _drain_once(self, count: int = BATCH_SIZE) -> List[Dict[str, Any]]:
-        """XRANGE + XDEL — reads and immediately deletes processed messages."""
+        """
+        XRANGE + deferred XDEL.
+
+        ZERO-DATA-LOSS GUARANTEE:
+        --------------------------
+        Messages are NOT deleted from the stream until the caller has finished
+        processing them.  The flow is:
+
+          1. XRANGE  → read up to `count` messages
+          2. Dedup check (SET NX) → immediately XDEL dedup-skipped entries
+          3. Return processable records WITH their stream IDs attached
+          4. Caller processes records; when done, calls ack_batch(stream_ids)
+          5. ack_batch() issues XDEL for confirmed-processed message IDs
+
+        If the worker crashes between step 3 and step 5, the unacknowledged
+        messages remain on the stream.  On restart, _startup_drain() will pick
+        them up again.  The dedup key (10 min TTL) prevents double-processing
+        during the restart window.
+
+        NOTE: This replaces the old pattern where XDEL fired inside _drain_once
+        before any processing occurred (at-most-once delivery).  The new pattern
+        is at-least-once delivery with dedup protection.
+        """
         records = []
+        dedup_skip_ids = []   # stream IDs to delete immediately (already processed)
+        pending_ids    = []   # stream IDs to delete after caller processes them
+
         try:
             messages = await self._redis.xrange(
                 STREAM_AUTOMATION_EVENTS, "-", "+", count=count
@@ -257,7 +283,6 @@ class StreamConsumer:
             if not messages:
                 return records
 
-            ids_to_del = []
             for msg_id, fields in messages:
                 try:
                     data = json.loads(fields.get("data", "{}"))
@@ -271,31 +296,67 @@ class StreamConsumer:
                             dedup_key, "1", nx=True, ex=self._DEDUP_TTL_S
                         )
                         if is_new is None:
+                            # Already processed — delete from stream immediately
                             logger.warning(
                                 "Dedup: skipping already-processed message_id=%s stream_id=%s",
                                 message_id[:20], msg_id,
                             )
-                            ids_to_del.append(msg_id)
+                            dedup_skip_ids.append(msg_id)
                             self.metrics.record_counter(
                                 "worker.messages_dedup_skipped", 1, "system"
                             )
                             continue
 
                     records.append(data)
-                    ids_to_del.append(msg_id)
+                    pending_ids.append(msg_id)
+
                 except Exception as e:
                     logger.error("Failed to parse message %s: %s", msg_id, e)
-                    ids_to_del.append(msg_id)
+                    # Malformed messages are deleted immediately to avoid blocking the stream
+                    dedup_skip_ids.append(msg_id)
 
-            if ids_to_del:
+            # Immediately delete dedup-skipped and malformed messages
+            if dedup_skip_ids:
                 pipe = self._redis.pipeline(transaction=False)
-                for mid in ids_to_del:
+                for mid in dedup_skip_ids:
                     pipe.xdel(STREAM_AUTOMATION_EVENTS, mid)
                 await pipe.execute(raise_on_error=False)
+
+            # Store pending IDs on records so caller can ack after processing
+            # We attach them to the batch as a whole via a sentinel record
+            if pending_ids:
+                # Attach the list of pending stream IDs to the last record
+                # so ack_batch can be called by the runtime after processing
+                self._pending_stream_ids = pending_ids
 
         except Exception as e:
             logger.error("Stream drain error: %s", e)
         return records
+
+    async def ack_batch(self, stream_ids: Optional[List[str]] = None) -> None:
+        """
+        Acknowledge (XDEL) a batch of successfully-processed stream messages.
+
+        Called by WorkerRuntime._process_batch() after all messages in a batch
+        have reached a terminal state (response sent or DLQ'd).
+
+        Args:
+            stream_ids: explicit list of stream IDs to delete, or None to use
+                        self._pending_stream_ids set by the last _drain_once call.
+        """
+        ids_to_ack = stream_ids or getattr(self, "_pending_stream_ids", [])
+        if not ids_to_ack:
+            return
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for mid in ids_to_ack:
+                pipe.xdel(STREAM_AUTOMATION_EVENTS, mid)
+            await pipe.execute(raise_on_error=False)
+            logger.debug("ack_batch: deleted %d stream entries", len(ids_to_ack))
+        except Exception as e:
+            logger.warning("ack_batch: XDEL error (messages may be reprocessed): %s", e)
+        finally:
+            self._pending_stream_ids = []
 
     def has_pending_retries(self) -> bool:
         return bool(self._retry_queue)

@@ -2,7 +2,7 @@
 automationservice — Enterprise Hybrid Retrieval Engine
 =======================================================
 Collection  : user_data_entries
-Model       : intfloat/e5-base-v2  (768-dim, Cosine)
+Model       : BAAI/bge-m3  (1024-dim, Cosine)
 Architecture: Dense (vector) + Metadata (scroll/filter) fusion
 
 Multi-tenancy contract:
@@ -15,15 +15,15 @@ Pipeline position:
 Phases:
     1. Category filter build  — strict per-category Qdrant filters
     2. Analytics routing      — data_analytics category + primary_category attr
-    3. Dense retrieval        — e5-base-v2 "query: " prefix, top-K=20 per query
+    3. Dense retrieval        — BAAI/bge-m3 (no prefix), top-K=20 per query
     4. Metadata retrieval     — scroll with keyword/attribute/value matching
     5. Parallel execution     — asyncio.gather() across all category × query pairs
     6. Score fusion           — vector + metadata + quality + priority weighted sum
     7. Result limiting        — top-20 per category → top-10 after fusion
 
-Embedding prefix contract (must match user-service embedding_service.py):
-    Storage : "passage: {search_text}"   ← user-service writes this
-    Query   : "query: {query_text}"      ← automationservice reads with this
+Prefix contract (must match user-service embedding_service.py):
+    BAAI/bge-m3 does NOT use instruction prefixes.
+    Both storage (user-service) and query (automationservice) pass text as-is.
 """
 from __future__ import annotations
 
@@ -47,7 +47,16 @@ logger = logging.getLogger("automationservice.qdrant_search")
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 COLLECTION_NAME = "user_data_entries"
-VECTOR_SIZE     = 768
+VECTOR_SIZE     = 1024
+
+# Stable model cache — same path as user-service model_singleton so both
+# services share a single on-disk download.
+_THIS_DIR        = os.path.dirname(os.path.abspath(__file__))      # .../services
+_SVC_DIR         = os.path.dirname(_THIS_DIR)                      # .../automationservice
+_SERVICES_DIR_AS = os.path.dirname(_SVC_DIR)                       # .../services
+_SERVER_DIR_AS   = os.path.dirname(_SERVICES_DIR_AS)               # .../server
+_MODEL_CACHE_DIR = os.path.join(_SERVER_DIR_AS, ".model_cache")
+os.makedirs(_MODEL_CACHE_DIR, exist_ok=True)
 
 # Per-query vector search top-K (candidates before fusion)
 DENSE_TOP_K          = 20
@@ -88,7 +97,7 @@ _embed_model_lock   = None   # created once at first access (avoids import-time 
 
 def _get_embed_model():
     """
-    Lazy-load intfloat/e5-base-v2 singleton.
+    Lazy-load BAAI/bge-m3 singleton.
 
     Thread-safety: module-level lock created on first call (not inside the
     guarded block) so double-checked locking actually works correctly.
@@ -102,20 +111,21 @@ def _get_embed_model():
     global _embed_model, _embed_model_lock
     import threading
 
-    # Create the lock once (first call from any thread — still safe, Python GIL
-    # protects the simple object assignment)
     if _embed_model_lock is None:
         _embed_model_lock = threading.Lock()
 
     if _embed_model is None:
         with _embed_model_lock:
-            if _embed_model is None:          # second check inside the lock
+            if _embed_model is None:
                 from sentence_transformers import SentenceTransformer
                 import logging as _log
                 _log.getLogger("sentence_transformers").setLevel(_log.ERROR)
-                _embed_model = SentenceTransformer("intfloat/e5-base-v2")
+                _embed_model = SentenceTransformer(
+                    "BAAI/bge-m3",
+                    cache_folder=_MODEL_CACHE_DIR,
+                )
                 _log.getLogger("sentence_transformers").setLevel(_log.INFO)
-                logger.info("automationservice: e5-base-v2 loaded (768-dim)")
+                logger.info("automationservice: BAAI/bge-m3 loaded (1024-dim)")
     return _embed_model
 
 
@@ -133,22 +143,19 @@ def _get_qdrant_client():
 
 def _embed_query(query: str) -> list[float]:
     """
-    Embed a single retrieval query using e5-base-v2 with "query: " prefix.
+    Embed a single retrieval query using BAAI/bge-m3.
 
-    e5-base-v2 instruction:
-        Storage   → "passage: {text}"  (user-service writes this)
-        Retrieval → "query: {text}"    (we use this)
-    This asymmetry is required by the e5 architecture for max recall.
+    BGE-M3 does NOT require instruction prefixes — text is passed as-is.
+    This matches the storage encoding in user-service/embedding_service.py.
     """
     model    = _get_embed_model()
-    prefixed = f"query: {query.strip()[:512]}"
-    vector   = model.encode(prefixed, normalize_embeddings=True)
+    vector   = model.encode(query.strip()[:512], normalize_embeddings=True)
     return vector.tolist()
 
 
 async def warmup() -> None:
     """
-    Pre-warm the e5-base-v2 model and Qdrant client at service startup.
+    Pre-warm the BAAI/bge-m3 model and Qdrant client at service startup.
 
     Without pre-warming, the first real request incurs ~30s cold-start latency
     (model load + JIT compilation). After warmup, each embed call takes ~50ms.
@@ -160,11 +167,10 @@ async def warmup() -> None:
     def _run() -> None:
         try:
             model = _get_embed_model()
-            # Single encode to trigger JIT compilation
-            model.encode("query: warmup", normalize_embeddings=True)
-            logger.info("automationservice: e5-base-v2 warmup complete")
+            model.encode("warmup", normalize_embeddings=True)
+            logger.info("automationservice: BAAI/bge-m3 warmup complete")
         except Exception as exc:
-            logger.warning("automationservice: e5-base-v2 warmup failed (non-fatal): %s", exc)
+            logger.warning("automationservice: BAAI/bge-m3 warmup failed (non-fatal): %s", exc)
         try:
             _get_qdrant_client()
             logger.info("automationservice: Qdrant client warmup complete")

@@ -35,7 +35,7 @@ SERVICE_REGISTRY = {
     "user-service": {
         "url": config.USER_SERVICE_URL or "http://localhost:8002",
         "prefix": "/user-service",
-        "timeout": 120.0,   # 120s — ML model loading (e5-base-v2) takes ~30s on first call
+        "timeout": 120.0,   # 120s — BGE-M3 model loading takes ~30s on first call
         "retry": 1,
         "circuit_breaker_threshold": 10,  # higher threshold — ML service is slow but not broken
     },
@@ -105,11 +105,17 @@ SERVICE_REGISTRY = {
 _http_client: Optional[httpx.AsyncClient] = None
 
 def get_http_client() -> httpx.AsyncClient:
-    """Get or create HTTP client with connection pooling"""
+    """Get or create HTTP client with connection pooling.
+
+    Client-level timeout is intentionally set to None so each request uses
+    its own per-service timeout (e.g. 120s for user-service which loads BGE-M3).
+    A hardcoded client-level timeout would silently override the per-request
+    value and cause premature 503s on slow services.
+    """
     global _http_client
     if _http_client is None:
         _http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=5.0),
+            timeout=httpx.Timeout(None),   # no client-level cap — use per-request timeout
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
             follow_redirects=False,
         )

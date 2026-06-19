@@ -68,26 +68,18 @@ class IntentCacheEngine:
         
         try:
             cached = await self.redis.get(intent_key)
-            
+
             if not cached:
                 logger.debug(f"L1 intent cache MISS: {intent_type}")
                 return None
-            
+
             data = json.loads(cached)
-            
-            # Check if cache is still fresh
-            cached_at = datetime.fromisoformat(data["cached_at"])
-            age_seconds = (datetime.utcnow() - cached_at).total_seconds()
-            
-            if age_seconds > self.default_ttl:
-                logger.debug(f"L1 intent cache EXPIRED: {intent_type}")
-                return None
-            
+
             logger.info(
                 f"L1 intent cache HIT: {intent_type} | "
-                f"chunks={len(data['chunk_ids'])} age={age_seconds:.0f}s"
+                f"chunks={len(data['chunk_ids'])}"
             )
-            
+
             return data
             
         except Exception as e:
@@ -162,32 +154,42 @@ class IntentCacheEngine:
         intent_type: Optional[str] = None
     ) -> int:
         """
-        Invalidate intent cache.
-        
+        Invalidate intent cache using SCAN (non-blocking, safe on large keyspaces).
+
+        Uses HSCAN-compatible cursor iteration instead of KEYS so that Redis
+        is never blocked on large datasets.  KEYS is O(N) and blocks the server
+        — SCAN is O(1) per call and iterates lazily.
+
         Args:
             user_id: Tenant ID
-            intent_type: Specific intent or None for all
-            
+            intent_type: Specific intent or None for all tenant intents
+
         Returns:
             Number of keys deleted
         """
         if intent_type:
-            # Delete specific intent patterns
             pattern = f"{self.key_prefix}:{user_id}:*{intent_type}*"
         else:
-            # Delete all intents for user
             pattern = f"{self.key_prefix}:{user_id}:*"
-        
+
+        deleted = 0
         try:
-            keys = await self.redis.keys(pattern)
-            if keys:
-                deleted = await self.redis.delete(*keys)
-                logger.info(f"L1 intent cache invalidated: {deleted} keys")
-                return deleted
-            return 0
-            
+            # Use SCAN with a cursor loop — non-blocking, works on all Redis sizes
+            cursor = 0
+            while True:
+                cursor, keys = await self.redis.scan(cursor, match=pattern, count=100)
+                if keys:
+                    result = await self.redis.delete(*keys)
+                    deleted += result if isinstance(result, int) else len(keys)
+                if cursor == 0:
+                    break
+
+            if deleted:
+                logger.info("L1 intent cache invalidated: %d keys for user=%s", deleted, user_id[:12])
+            return deleted
+
         except Exception as e:
-            logger.error(f"L1 intent cache invalidation error: {e}")
+            logger.error("L1 intent cache invalidation error: %s", e)
             return 0
     
     def _generate_intent_key(

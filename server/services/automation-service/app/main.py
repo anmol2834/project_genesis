@@ -197,19 +197,36 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    import multiprocessing
-    
+
     config = initialize_config()
-    workers = min(4, max(1, multiprocessing.cpu_count()))
-    
-    logger.info("Starting automation-service | workers=%d", workers)
-    
+
+    # IMPORTANT — single worker process only.
+    #
+    # The automation-service uses a Redis Streams consumer (BLPOP + XRANGE) for
+    # message processing.  Running multiple uvicorn worker *processes* (workers > 1)
+    # causes every process to read the same stream entries simultaneously via XRANGE,
+    # creating a race condition where the same email is processed by N processes.
+    # The dedup key (automation:processed:{message_id}) with SET NX provides
+    # correctness — only one process wins — but the remaining N-1 processes waste
+    # an entire AI pipeline call before discovering the dedup hit.
+    #
+    # The correct pattern for horizontal scaling is:
+    #   - Run ONE uvicorn process per container/VM (workers=1)
+    #   - Scale horizontally by deploying multiple containers
+    #   - Each container owns a separate Redis connection and wins its own BLPOP
+    #     tokens; the dedup key still handles the rare race on the same message
+    #
+    # Async concurrency within the single process handles all I/O parallelism.
+    # The worker loop itself supports AUTOMATION_WORKER_CONCURRENCY > 1 for
+    # CPU-bound parallelism if needed.
+    logger.info("Starting automation-service | workers=1 (single-process async)")
+
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
         port=config.service.service_port,
         reload=False,
-        workers=workers,
+        workers=1,          # Always 1 — see comment above
         access_log=False,
         timeout_keep_alive=30,
         backlog=2048,

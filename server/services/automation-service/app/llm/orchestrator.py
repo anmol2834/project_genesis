@@ -499,7 +499,13 @@ class LLMOrchestrator:
                         sym = sym_map.get(currency_val.upper() if currency_val else "USD", "\u20b9")
                         line += f"\n   - Price: {sym}{price}"
                     cat = p.get("category")
-                    if cat:
+                    # Only render human-readable categories, never internal Qdrant category names
+                    _INTERNAL_CATS_ORCH = frozenset({
+                        "product_service", "offers_promotions", "delivery_shipping",
+                        "company_info", "educational_content", "contact_support",
+                        "policies_legal", "issue_resolution", "data_analytics",
+                    })
+                    if cat and cat.lower() not in _INTERNAL_CATS_ORCH:
                         line += f"\n   - Category: {cat}"
                     specs = p.get("specifications") or {}
                     spec_parts = [f"{k.title()}: {v}" for k, v in list(specs.items())[:4] if v]
