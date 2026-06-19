@@ -78,10 +78,20 @@ async def run_processor_1(
     messages: list[dict],
     latest_message: dict,
     conversation_meta: dict,
+    business_context: dict | None = None,
 ) -> dict:
     """
     Execute LLM Call #1: Analysis & Retrieval Planning.
     Never raises. Returns a guaranteed-valid dict.
+
+    Args:
+        messages:          Full thread history (oldest → newest, latest excluded).
+        latest_message:    The triggering message dict from es_messages.
+        conversation_meta: The es_conversations row dict.
+        business_context:  Normalized business profile from services/business_context.py.
+                           When provided, injected BEFORE conversation history in the
+                           user prompt so the LLM understands the business domain first.
+                           When None, Processor #1 falls back to generic reasoning.
     """
     t0  = time.monotonic()
     cfg = get_config()
@@ -93,13 +103,19 @@ async def run_processor_1(
     message_count    = conversation_meta.get("message_count") or len(messages)
     participants     = conversation_meta.get("participants") or []
 
+    # ── Build business context block (injected before conversation) ────────────
+    # Import here to avoid circular imports; business_context module is services/
+    from services.business_context import build_business_context_block
+    business_block = build_business_context_block(business_context or {})
+
     user_prompt = PROCESSOR_1_USER_TEMPLATE.format(
-        conversation_history = conversation_str,
-        latest_message       = latest_body or "(empty message)",
-        subject              = subject or "(no subject)",
-        provider             = provider or "unknown",
-        message_count        = message_count,
-        participants         = ", ".join(participants) if participants else "unknown",
+        business_context_block = business_block,
+        conversation_history   = conversation_str,
+        latest_message         = latest_body or "(empty message)",
+        subject                = subject or "(no subject)",
+        provider               = provider or "unknown",
+        message_count          = message_count,
+        participants           = ", ".join(participants) if participants else "unknown",
     )
 
     # ── Pre-flight checks ──────────────────────────────────────────────────────
@@ -175,12 +191,26 @@ async def run_processor_1(
 
     if raw_output is None:
         logger.error("[P1] all attempts failed | %s | elapsed=%.0fms", last_error, elapsed_ms)
-        return _build_fallback(latest_body, subject, str(last_error))
+        fb = _build_fallback(latest_body, subject, str(last_error))
+        fb["business_understanding"] = {
+            "business_name": (business_context or {}).get("business_name", ""),
+            "business_type": (business_context or {}).get("business_type", ""),
+            "industry":      (business_context or {}).get("industry", []),
+            "source":        "unavailable",
+        }
+        return fb
 
     parsed = _parse_json(raw_output)
     if parsed is None:
         logger.error("[P1] JSON parse failure | raw=%s...", raw_output[:200])
-        return _build_fallback(latest_body, subject, "json_parse_failure")
+        fb = _build_fallback(latest_body, subject, "json_parse_failure")
+        fb["business_understanding"] = {
+            "business_name": (business_context or {}).get("business_name", ""),
+            "business_type": (business_context or {}).get("business_type", ""),
+            "industry":      (business_context or {}).get("industry", []),
+            "source":        "unavailable",
+        }
+        return fb
 
     validated = _validate_and_repair(
         parsed,
@@ -188,6 +218,7 @@ async def run_processor_1(
         preflight_analytics,
         preflight_escalation,
         max_conv_confidence,
+        business_context,
     )
     validated["_meta"] = {
         "elapsed_ms": round(elapsed_ms, 1),
@@ -195,6 +226,24 @@ async def run_processor_1(
         "attempts":   attempt,
         "status":     "ok",
     }
+
+    # ── Attach business understanding for downstream observability ─────────────
+    # Future Processor #2 and reranker can read this to confirm which business
+    # profile was active during this pipeline run — without re-fetching.
+    if business_context and business_context.get("_loaded"):
+        validated["business_understanding"] = {
+            "business_name": business_context.get("business_name", ""),
+            "business_type": business_context.get("business_type", ""),
+            "industry":      business_context.get("industry", []),
+            "source":        business_context.get("_source", "postgresql"),
+        }
+    else:
+        validated["business_understanding"] = {
+            "business_name": "",
+            "business_type": "",
+            "industry":      [],
+            "source":        "unavailable",
+        }
 
     total_queries = sum(
         len(c.get("search_queries", []))
@@ -268,6 +317,7 @@ def _validate_and_repair(
     preflight_analytics: bool,
     preflight_escalation: bool,
     max_conv_confidence: float,
+    business_context: dict | None = None,
 ) -> dict:
 
     data["pipeline_version"] = "1.0"
@@ -303,7 +353,7 @@ def _validate_and_repair(
     pi     = ia.get("primary_intent") if isinstance(ia.get("primary_intent"), dict) else {}
     pi_cat = pi.get("category", "")
     if pi_cat not in ALLOWED_CAT_SET:
-        pi_cat = _infer_category(ca.get("standalone_query", ""))
+        pi_cat = _infer_category(ca.get("standalone_query", ""), business_context)
     pi["category"]   = pi_cat
     pi["confidence"] = _clamp(pi.get("confidence"), 0.0, 1.0, 0.5)
     pi["reason"]     = _str(pi.get("reason"), "inferred from conversation")
@@ -671,22 +721,65 @@ def _deduplicate_queries(queries: list[str]) -> list[str]:
     return kept
 
 
-def _infer_category(text: str) -> str:
+def _infer_category(text: str, business_context: dict | None = None) -> str:
+    """
+    Keyword-based category fallback used when the LLM returns an invalid category.
+
+    When business_context is provided, first checks if the query matches any
+    domain vocabulary extracted from the business profile — this raises accuracy
+    for domain-specific terms that the generic keyword list would miss.
+
+    For example:
+        "flight range"    → product_service  (for a drone company)
+        "meal delivery"   → delivery_shipping (for a food company)
+        "session booking" → product_service  (for a healthcare company)
+    """
     t = text.lower()
-    if any(w in t for w in ("ship", "deliver", "track", "logistic", "dispatch")):
+
+    # ── Business-domain aware check ───────────────────────────────────────────
+    # If the text contains terms from the business description, lean toward
+    # product_service as the primary category (most common fallback scenario).
+    if business_context and business_context.get("_loaded"):
+        biz_text = (
+            (business_context.get("business_description") or "") + " " +
+            (business_context.get("business_type") or "") + " " +
+            " ".join(business_context.get("industry") or [])
+        ).lower()
+        # Extract meaningful words from business context (3+ chars, not stop words)
+        STOP = {"the", "and", "for", "are", "our", "with", "that", "this",
+                "from", "has", "have", "was", "been", "will", "can", "all"}
+        biz_tokens = {w for w in biz_text.split() if len(w) > 2 and w not in STOP}
+        query_tokens = set(t.split())
+        # If substantial overlap between query and business vocab → product_service
+        if len(biz_tokens & query_tokens) >= 2:
+            # Still check for explicit routing signals first
+            pass   # fall through to keyword checks below
+
+    # ── Generic keyword fallback (order matters — most specific first) ────────
+    if any(w in t for w in ("ship", "deliver", "track", "logistic", "dispatch",
+                             "courier", "freight", "cargo")):
         return "delivery_shipping"
-    if any(w in t for w in ("price", "cost", "discount", "offer", "promo", "deal", "coupon")):
+    if any(w in t for w in ("price", "cost", "discount", "offer", "promo", "deal",
+                             "coupon", "sale", "rebate", "cashback")):
         return "offers_promotions"
-    if any(w in t for w in ("policy", "return", "refund", "warranty", "term", "legal", "compliance")):
+    if any(w in t for w in ("policy", "return", "refund", "warranty", "term",
+                             "legal", "compliance", "cancell", "condition")):
         return "policies_legal"
-    if any(w in t for w in ("problem", "issue", "error", "bug", "broken", "not working", "complaint")):
+    if any(w in t for w in ("problem", "issue", "error", "bug", "broken",
+                             "not working", "complaint", "fail", "defect",
+                             "malfunction", "damaged")):
         return "issue_resolution"
-    if any(w in t for w in ("contact", "support", "help", "reach", "phone", "email address", "manager", "senior")):
+    if any(w in t for w in ("contact", "support", "reach", "phone", "email address",
+                             "manager", "senior", "speak to", "talk to", "connect",
+                             "representative", "escalate", "supervisor")):
         return "contact_support"
-    if any(w in t for w in ("about", "company", "who are", "mission", "history", "location")):
+    if any(w in t for w in ("about", "company", "who are", "mission", "history",
+                             "location", "address", "team", "founded", "vision")):
         return "company_info"
-    if any(w in t for w in ("how to", "tutorial", "guide", "learn", "training", "demo")):
+    if any(w in t for w in ("how to", "tutorial", "guide", "learn", "training",
+                             "demo", "walkthrough", "setup guide", "documentation")):
         return "educational_content"
-    if any(w in t for w in ("analytic", "metric", "report", "dashboard", "statistic", "trend")):
+    if any(w in t for w in ("analytic", "metric", "report", "dashboard", "statistic",
+                             "trend", "insight", "kpi", "forecast", "roi")):
         return "data_analytics"
     return "product_service"

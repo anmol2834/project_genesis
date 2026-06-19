@@ -26,6 +26,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from services.email_context import fetch_thread_messages
+from services.business_context import get_business_context
 from llm.processor_1 import run_processor_1
 from services.qdrant_search import run_hybrid_retrieval
 
@@ -101,11 +102,26 @@ async def process_event(event: dict) -> dict:
     latest_message = context.get("latest_message") or {}
     messages       = context["messages"]
 
+    # ── Step 2.5: Load Business Context (PostgreSQL) ───────────────────────────
+    # Single indexed UUID query → < 20 ms.
+    # Must run BEFORE Processor #1 so the LLM knows the business domain.
+    # Source: users table (NOT Qdrant). Qdrant remains knowledge retrieval only.
+    biz_ctx = await get_business_context(user_id)
+    logger.info(
+        "[BIZ_CTX] loaded=%s  business=%s  type=%s  industry=%s  source=%s",
+        biz_ctx.get("_loaded", False),
+        biz_ctx.get("business_name", "(none)"),
+        biz_ctx.get("business_type", "(none)"),
+        ", ".join(biz_ctx.get("industry", [])) or "(none)",
+        biz_ctx.get("_source", "?"),
+    )
+
     # ── Step 3: Processor 1 — LLM Call #1 ─────────────────────────────────────
     p1_output = await run_processor_1(
         messages          = messages,
         latest_message    = latest_message,
         conversation_meta = conv_meta,
+        business_context  = biz_ctx,
     )
 
     elapsed_ms = (time.monotonic() - t_start) * 1000
@@ -182,6 +198,15 @@ async def process_event(event: dict) -> dict:
         logger.warning("[P1 STATUS] FALLBACK — reason: %s", p1_meta.get("reason", "unknown"))
     else:
         logger.info("[P1 STATUS] ok  |  attempts=%d", p1_meta.get("attempts", 1))
+    # Log which business understanding was active
+    bu = p1_output.get("business_understanding", {})
+    logger.info(
+        "[BIZ_UNDERSTANDING] business=%s  type=%s  industry=%s  source=%s",
+        bu.get("business_name", "(none)"),
+        bu.get("business_type", "(none)"),
+        ", ".join(bu.get("industry", [])) or "(none)",
+        bu.get("source", "?"),
+    )
     logger.info("─" * 68)
     logger.info("Pipeline 1-3 complete | user=%s conv=%s intent=%s conv_conf=%.2f intent_conf=%.2f msgs=%d elapsed=%.0fms",
                 user_id, conversation_id[:8], pi.get("category", "?"),
@@ -273,6 +298,7 @@ async def process_event(event: dict) -> dict:
         "fetch_reason":      context["fetch_reason"],
         "conversation":      conv_meta,
         "latest_message":    latest_message,
+        "business_context":  biz_ctx,          # pipeline state — Processor #2 will read this
         "processor_1_output": p1_output,
         "retrieval_output":  retrieval_output,
         "elapsed_ms":        elapsed_ms,
