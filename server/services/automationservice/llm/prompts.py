@@ -729,16 +729,16 @@ ANALYTICS_INTENT_KEYWORDS: list[tuple[str, float]] = [
     ("total policies",       0.95),
 
     # ── STATISTICAL SIGNALS (confidence 0.95) ─────────────────────────────────
+    # NOTE: "cheapest", "most expensive", "lowest price", "highest price" are
+    # DETERMINISTIC queries, NOT analytics. They are handled by the deterministic
+    # retrieval mode (metadata sort by price) — NOT analytics subtype retrieval.
+    # These have been intentionally removed from this list.
     ("average price",        0.97),
     ("avg price",            0.97),
     ("mean price",           0.97),
     ("median price",         0.97),
     ("price range",          0.90),
     ("price distribution",   0.98),
-    ("lowest price",         0.92),
-    ("highest price",        0.92),
-    ("most expensive",       0.90),
-    ("cheapest",             0.88),
     ("price breakdown",      0.95),
     ("cost distribution",    0.95),
 
@@ -889,6 +889,81 @@ SPEC_IMPOSSIBILITY_RULES = [
     (r'(-\d+)',                         "negative", None),
     # Zero quantities for tangible products are always impossible
     # (e.g. "0 bedrooms", "0 units") — not validated here, left to LLM
+]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DETERMINISTIC RETRIEVAL KEYWORDS
+# ══════════════════════════════════════════════════════════════════════════════
+# These phrases signal that the customer wants a DETERMINISTIC result:
+# a specific extreme value (min/max) or ordered list.
+# When detected, the retrieval layer disables vector ranking for the primary sort
+# and instead applies metadata-based ordering (price ascending for min, descending
+# for max). This ensures business truth overrides semantic similarity.
+#
+# CRITICAL: These are NOT analytics signals. "Cheapest laptop" does NOT require
+# the analytics subtype document — it requires the actual product records sorted
+# by price ascending. The analytics document may be retrieved as supplementary
+# context but must NEVER be the primary result.
+#
+# Format: (phrase, sort_field, sort_direction)
+#   sort_field: the Qdrant payload field to sort by (in attributes{})
+#   sort_direction: "asc" for min, "desc" for max
+DETERMINISTIC_RETRIEVAL_KEYWORDS: list[tuple[str, str, str]] = [
+    # Price minimum signals
+    ("cheapest",          "price", "asc"),
+    ("lowest price",      "price", "asc"),
+    ("least expensive",   "price", "asc"),
+    ("most affordable",   "price", "asc"),
+    ("budget option",     "price", "asc"),
+    ("under",             "price", "asc"),    # "under $1000" → price ascending
+    ("below",             "price", "asc"),    # "below 500" → price ascending
+
+    # Price maximum signals
+    ("most expensive",    "price", "desc"),
+    ("highest price",     "price", "desc"),
+    ("most premium",      "price", "desc"),
+    ("top of the line",   "price", "desc"),
+    ("highest cost",      "price", "desc"),
+    ("priciest",          "price", "desc"),
+
+    # Generic min/max signals (field resolved by context)
+    ("lowest",            "price", "asc"),
+    ("highest",           "price", "desc"),
+    ("maximum",           "price", "desc"),
+    ("minimum",           "price", "asc"),
+]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NUMERIC CONSTRAINT PATTERNS
+# ══════════════════════════════════════════════════════════════════════════════
+# Regex patterns for extracting numeric price/attribute constraints from
+# customer messages. Used by the requirement extraction engine in processor_1.py
+# to build precise Qdrant Range filters.
+#
+# Format: (pattern, field, operator)
+#   pattern : compiled regex with ONE capture group for the numeric value
+#   field   : Qdrant payload attribute field name
+#   operator: "lte" | "gte" | "eq"
+import re as _re
+NUMERIC_CONSTRAINT_PATTERNS: list[tuple[object, str, str]] = [
+    # Price upper bounds — "under $X", "below $X", "less than $X", "max $X"
+    (_re.compile(r'under\s*\$?([\d,]+(?:\.\d+)?)', _re.I),    "price", "lte"),
+    (_re.compile(r'below\s*\$?([\d,]+(?:\.\d+)?)', _re.I),    "price", "lte"),
+    (_re.compile(r'less than\s*\$?([\d,]+(?:\.\d+)?)', _re.I), "price", "lte"),
+    (_re.compile(r'max\s+\$?([\d,]+(?:\.\d+)?)', _re.I),       "price", "lte"),
+    (_re.compile(r'maximum\s+\$?([\d,]+(?:\.\d+)?)', _re.I),   "price", "lte"),
+    (_re.compile(r'no more than\s*\$?([\d,]+(?:\.\d+)?)', _re.I), "price", "lte"),
+    (_re.compile(r'\$([\d,]+(?:\.\d+)?)\s+or less', _re.I),    "price", "lte"),
+    # Price lower bounds — "above $X", "over $X", "at least $X"
+    (_re.compile(r'above\s*\$?([\d,]+(?:\.\d+)?)', _re.I),    "price", "gte"),
+    (_re.compile(r'over\s*\$?([\d,]+(?:\.\d+)?)', _re.I),     "price", "gte"),
+    (_re.compile(r'at least\s*\$?([\d,]+(?:\.\d+)?)', _re.I), "price", "gte"),
+    (_re.compile(r'min\s+\$?([\d,]+(?:\.\d+)?)', _re.I),       "price", "gte"),
+    (_re.compile(r'minimum\s+\$?([\d,]+(?:\.\d+)?)', _re.I),   "price", "gte"),
+    (_re.compile(r'\$([\d,]+(?:\.\d+)?)\s+or more', _re.I),   "price", "gte"),
+    # Price exact: "$X laptop", "costs $X" (used as gte+lte range with 5% tolerance)
+    (_re.compile(r'costs?\s*\$([\d,]+(?:\.\d+)?)', _re.I),    "price", "eq"),
+    (_re.compile(r'priced at\s*\$([\d,]+(?:\.\d+)?)', _re.I), "price", "eq"),
 ]
 
 PROCESSOR_1_SYSTEM_PROMPT = """You are Processor #1 of an Enterprise Customer Communication Automation Platform.
@@ -1253,10 +1328,12 @@ WHEN TO SET requires_analytics = true:
 
   STATISTICAL questions:
     "What is the average price?"
-    "Lowest price / highest price / cheapest / most expensive"
     "Price range / price distribution / price breakdown"
     "What are the price tiers?"
     "Median cost / average discount"
+    NOTE: "cheapest", "lowest price", "most expensive", "highest price" are
+    DETERMINISTIC LOOKUPS — requires_analytics = false for these.
+    These fetch the actual min/max priced product, not a statistical distribution.
 
   SUMMARY / OVERVIEW questions:
     "Summarize your products"

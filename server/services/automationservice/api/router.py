@@ -116,6 +116,19 @@ async def process_event(event: dict) -> dict:
         biz_ctx.get("_source", "?"),
     )
 
+    # Issue 5 — Business context domain enforcement
+    # Build a vocabulary from the business description to detect out-of-domain queries.
+    # If the customer asks about something clearly outside the business domain,
+    # log a warning so downstream (Processor #2) can handle it appropriately.
+    if biz_ctx.get("_loaded"):
+        biz_desc = (biz_ctx.get("business_description") or "").lower()
+        biz_type = (biz_ctx.get("business_type") or "").lower()
+        biz_text = biz_desc + " " + biz_type
+        # Inject domain context into p1_output so retrieval layer can use it
+        biz_ctx["_domain_tokens"] = set(
+            w for w in biz_text.split() if len(w) > 3
+        )
+
     # ── Step 3: Processor 1 — LLM Call #1 ─────────────────────────────────────
     p1_output = await run_processor_1(
         messages          = messages,
@@ -198,6 +211,19 @@ async def process_event(event: dict) -> dict:
         logger.warning("[P1 STATUS] FALLBACK — reason: %s", p1_meta.get("reason", "unknown"))
     else:
         logger.info("[P1 STATUS] ok  |  attempts=%d", p1_meta.get("attempts", 1))
+
+    # Log retrieval_contract (Issues 1/2/3/6)
+    rc_contract = p1_output.get("retrieval_contract") or {}
+    det_mode    = rc_contract.get("deterministic_mode") or {}
+    num_constr  = rc_contract.get("numeric_constraints") or []
+    if det_mode.get("active"):
+        logger.info("[CONTRACT] deterministic=True  field=%s  direction=%s",
+                    det_mode.get("field"), det_mode.get("direction"))
+    if num_constr:
+        logger.info("[CONTRACT] numeric_constraints=%s", num_constr)
+    if rc_contract.get("entity"):
+        logger.info("[CONTRACT] entity=%s  specs=%s",
+                    rc_contract.get("entity"), rc_contract.get("specifications", []))
     # Log which business understanding was active
     bu = p1_output.get("business_understanding", {})
     logger.info(
@@ -284,8 +310,9 @@ async def process_event(event: dict) -> dict:
 
     # ── Fix 8: Observability logs for retrieval diversity ──────────────────
     logger.info(
-        "[RETRIEVAL]  diversity_score=%.3f",
+        "[RETRIEVAL]  diversity_score=%.3f  deterministic=%s",
         retrieval_output.get("retrieval_diversity_score", 0.0),
+        retrieval_output.get("deterministic_mode_used", False),
     )
 
     return {

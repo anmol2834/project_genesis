@@ -46,6 +46,8 @@ from llm.prompts import (
     PROCESSOR_1_USER_TEMPLATE,
     ALLOWED_CATEGORIES,
     ANALYTICS_INTENT_KEYWORDS,
+    DETERMINISTIC_RETRIEVAL_KEYWORDS,
+    NUMERIC_CONSTRAINT_PATTERNS,
     VALID_RETRIEVAL_INTENT_TYPES,
     ESCALATION_TRIGGER_WORDS,
     SPEC_IMPOSSIBILITY_RULES,
@@ -698,6 +700,31 @@ def _validate_and_repair(
         "focus_changed":  bool(st.get("focus_changed",   False)),
     }
 
+    # -- retrieval_contract --------------------------------------------------
+    # Structured specification consumed by the Qdrant retrieval layer.
+    # Contains: entity, numeric constraints (price filters), deterministic sort
+    # mode (cheapest/most expensive), analytics decision.
+    # This is the single source of truth for what the retrieval layer must fetch.
+    latest_text = ca.get("latest_message", "").lower()
+    numeric_constraints = _extract_numeric_constraints(latest_text)
+    deterministic_mode  = _extract_deterministic_mode(latest_text)
+
+    data["retrieval_contract"] = {
+        "intent":              pi.get("category", "product_service"),
+        "entity":              ee.get("products", [""])[0] if ee.get("products") else "",
+        "entities":            ee.get("products", []),
+        "specifications":      ee.get("specifications", []),
+        "numeric_constraints": numeric_constraints,
+        "deterministic_mode":  deterministic_mode,
+        "categories":          [c.get("category") for c in rs.get("categories", []) if isinstance(c, dict)],
+        "standalone_query":    ca.get("standalone_query", ""),
+        "analytics_required":  ad.get("requires_analytics", False),
+        "analytics_categories": [
+            ac.get("primary_category") for ac in ad.get("analytics_categories", [])
+            if isinstance(ac, dict)
+        ],
+    }
+
     return data
 
 
@@ -865,6 +892,60 @@ def _deduplicate_queries(queries: list[str]) -> list[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 # ANALYTICS INTENT DETECTION ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Requirement extraction engine ─────────────────────────────────────────────
+
+def _extract_numeric_constraints(text: str) -> list[dict]:
+    """
+    Extract numeric constraints (price ranges, attribute filters) from the
+    customer message text.
+
+    Returns a list of constraint dicts:
+        {"field": "price", "operator": "lte", "value": 1000.0}
+
+    Operators: "lte" (<=), "gte" (>=), "eq" (==)
+    Used by the Qdrant retrieval layer to build Range filters.
+    Domain-agnostic — works for price, RAM, storage, area, dosage, etc.
+    """
+    from llm.prompts import NUMERIC_CONSTRAINT_PATTERNS
+    constraints: list[dict] = []
+    seen: set[str] = set()
+    for pattern, field, operator in NUMERIC_CONSTRAINT_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            raw = m.group(1).replace(",", "")
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            key = f"{field}:{operator}:{value}"
+            if key not in seen:
+                seen.add(key)
+                constraints.append({"field": field, "operator": operator, "value": value})
+    return constraints
+
+
+def _extract_deterministic_mode(text: str) -> dict:
+    """
+    Detect whether the customer wants a deterministic (min/max) result.
+
+    Returns:
+        {"active": bool, "field": str, "direction": str}
+        direction: "asc" (cheapest/min) or "desc" (most expensive/max)
+
+    When active=True, the retrieval layer bypasses vector ranking for the
+    primary sort and uses metadata ordering instead.
+    This ensures business facts (actual price values) override semantic
+    similarity scores — the cheapest item must rank #1, not the most
+    semantically similar one.
+    """
+    from llm.prompts import DETERMINISTIC_RETRIEVAL_KEYWORDS
+    for phrase, field, direction in DETERMINISTIC_RETRIEVAL_KEYWORDS:
+        if phrase in text:
+            return {"active": True, "field": field, "direction": direction}
+    return {"active": False, "field": "", "direction": ""}
+
 
 def _detect_analytics_intent(
     text: str,
