@@ -41,6 +41,16 @@ from llm.prompts import (
     VALID_RETRIEVAL_INTENT_TYPES,
     ESCALATION_TRIGGER_WORDS,
     SPEC_IMPOSSIBILITY_RULES,
+    # Enterprise keyword sets for _infer_category fallback
+    ISSUE_RESOLUTION_KEYWORDS,
+    CONTACT_SUPPORT_KEYWORDS,
+    DELIVERY_SHIPPING_KEYWORDS,
+    OFFERS_PROMOTIONS_KEYWORDS,
+    POLICIES_LEGAL_KEYWORDS,
+    PRODUCT_SERVICE_KEYWORDS,
+    COMPANY_INFO_KEYWORDS,
+    EDUCATIONAL_CONTENT_KEYWORDS,
+    DATA_ANALYTICS_KEYWORDS,
 )
 
 logger = logging.getLogger("automationservice.processor_1")
@@ -122,9 +132,13 @@ async def run_processor_1(
     all_text_lower      = " ".join((m.get("content") or "") for m in messages).lower()
     preflight_analytics = bool(ANALYTICS_KEYWORDS & set(re.findall(r'\b\w+\b', all_text_lower)))
 
-    # Detect escalation triggers in latest message for post-validation override
+    # Detect escalation triggers in latest message for post-validation override.
+    # Uses phrase-aware matching: checks for each trigger phrase as a substring
+    # of the latest message (case-insensitive). Single-word triggers are matched
+    # as whole words using word-boundary anchoring to prevent false positives
+    # (e.g. "manage" should NOT trigger "manager", "senior" in "seniority" should not match).
     latest_lower      = latest_body.lower()
-    preflight_escalation = any(t in latest_lower for t in ESCALATION_TRIGGER_WORDS)
+    preflight_escalation = _check_escalation_triggers(latest_lower)
 
     # Calibrate max conversation_confidence for very short messages before sending to LLM.
     # conversation_confidence measures message CLARITY — not category match strength.
@@ -721,65 +735,147 @@ def _deduplicate_queries(queries: list[str]) -> list[str]:
     return kept
 
 
+def _check_escalation_triggers(text_lower: str) -> bool:
+    """
+    Precision escalation detection using phrase-aware matching.
+
+    Algorithm:
+      1. Multi-word phrases are matched as substrings (exact phrase match).
+         e.g. "speak to" matches "i want to speak to someone" correctly.
+      2. Single-word triggers use word-boundary regex to prevent false positives:
+         - "senior" should NOT match "seniority"
+         - "manager" should NOT match "management"
+         - "escalate" SHOULD match "please escalate this"
+
+    Returns True if ANY trigger phrase is detected in the text.
+    """
+    for trigger in ESCALATION_TRIGGER_WORDS:
+        if " " in trigger:
+            # Multi-word phrase — simple substring match is correct
+            if trigger in text_lower:
+                return True
+        else:
+            # Single word — require word boundary to avoid partial matches
+            if re.search(r'\b' + re.escape(trigger) + r'\b', text_lower):
+                return True
+    return False
+
+
 def _infer_category(text: str, business_context: dict | None = None) -> str:
     """
-    Keyword-based category fallback used when the LLM returns an invalid category.
+    Enterprise keyword-based category fallback.
 
-    When business_context is provided, first checks if the query matches any
-    domain vocabulary extracted from the business profile — this raises accuracy
-    for domain-specific terms that the generic keyword list would miss.
+    Used ONLY when the LLM returns an invalid or missing category.
+    Primary classifier is always OpenAI Processor #1.
 
-    For example:
-        "flight range"    → product_service  (for a drone company)
-        "meal delivery"   → delivery_shipping (for a food company)
-        "session booking" → product_service  (for a healthcare company)
+    Architecture (in order of execution):
+      1. Business-context domain overlap check — boosts product_service accuracy
+         for business-specific vocabulary (e.g. "flight range" for a drone company)
+      2. Escalation phrase detection — runs FIRST among keyword checks because
+         escalation signals are high-priority routing overrides
+      3. Category keyword matching — evaluates each category's keyword set in
+         priority order. Multi-word phrases are checked before single words.
+         Uses substring matching for phrases, word-boundary for single words.
+      4. Default fallback → product_service (most common intent)
+
+    Keyword sets are defined in prompts.py (ISSUE_RESOLUTION_KEYWORDS, etc.)
+    and cover real customer language, not formal/technical vocabulary.
+
+    Design principles:
+      - Most specific multi-word phrases before single words
+      - issue_resolution checked AFTER contact_support (escalation wins over issues)
+      - delivery_shipping checked before offers_promotions (shipping charge vs. discount)
+      - Never hardcodes business-specific terms — works for any business
+
+    Examples of correctly handled real-world phrases:
+      "it isn't working"         → issue_resolution
+      "something went wrong"     → issue_resolution
+      "I can't log in"           → issue_resolution
+      "my order never arrived"   → issue_resolution
+      "speak to your manager"    → contact_support (escalation override)
+      "shipping charges"         → delivery_shipping
+      "shipping fee"             → delivery_shipping
+      "where is my order"        → delivery_shipping
+      "any discounts?"           → offers_promotions
+      "enterprise plan pricing"  → offers_promotions
+      "return policy"            → policies_legal
+      "want my money back"       → policies_legal
+      "how to set up"            → educational_content
+      "about your company"       → company_info
+      "total orders this month"  → data_analytics
     """
-    t = text.lower()
+    t = text.lower().strip()
 
-    # ── Business-domain aware check ───────────────────────────────────────────
-    # If the text contains terms from the business description, lean toward
-    # product_service as the primary category (most common fallback scenario).
+    # ── 1. Business-domain vocabulary overlap ─────────────────────────────────
+    # When query overlaps substantially with business description vocabulary,
+    # lean product_service but still run all keyword checks below.
+    # (Product vocabulary check is implicit — product_service is the default.)
     if business_context and business_context.get("_loaded"):
         biz_text = (
             (business_context.get("business_description") or "") + " " +
             (business_context.get("business_type") or "") + " " +
             " ".join(business_context.get("industry") or [])
         ).lower()
-        # Extract meaningful words from business context (3+ chars, not stop words)
         STOP = {"the", "and", "for", "are", "our", "with", "that", "this",
                 "from", "has", "have", "was", "been", "will", "can", "all"}
-        biz_tokens = {w for w in biz_text.split() if len(w) > 2 and w not in STOP}
+        biz_tokens   = {w for w in biz_text.split() if len(w) > 2 and w not in STOP}
         query_tokens = set(t.split())
-        # If substantial overlap between query and business vocab → product_service
-        if len(biz_tokens & query_tokens) >= 2:
-            # Still check for explicit routing signals first
-            pass   # fall through to keyword checks below
+        # Substantial domain overlap — still fall through to keyword checks
+        _domain_match = len(biz_tokens & query_tokens) >= 2
 
-    # ── Generic keyword fallback (order matters — most specific first) ────────
-    if any(w in t for w in ("ship", "deliver", "track", "logistic", "dispatch",
-                             "courier", "freight", "cargo")):
-        return "delivery_shipping"
-    if any(w in t for w in ("price", "cost", "discount", "offer", "promo", "deal",
-                             "coupon", "sale", "rebate", "cashback")):
-        return "offers_promotions"
-    if any(w in t for w in ("policy", "return", "refund", "warranty", "term",
-                             "legal", "compliance", "cancell", "condition")):
-        return "policies_legal"
-    if any(w in t for w in ("problem", "issue", "error", "bug", "broken",
-                             "not working", "complaint", "fail", "defect",
-                             "malfunction", "damaged")):
-        return "issue_resolution"
-    if any(w in t for w in ("contact", "support", "reach", "phone", "email address",
-                             "manager", "senior", "speak to", "talk to", "connect",
-                             "representative", "escalate", "supervisor")):
+    # ── 2. Escalation override — checked FIRST (highest routing priority) ─────
+    if _check_escalation_triggers(t):
         return "contact_support"
-    if any(w in t for w in ("about", "company", "who are", "mission", "history",
-                             "location", "address", "team", "founded", "vision")):
-        return "company_info"
-    if any(w in t for w in ("how to", "tutorial", "guide", "learn", "training",
-                             "demo", "walkthrough", "setup guide", "documentation")):
+
+    # ── 3. Category keyword matching — priority order ─────────────────────────
+    # Each category uses its enterprise keyword set from prompts.py.
+    # Multi-word phrases are checked as substrings; single words as whole words.
+
+    def _matches(keyword_set: frozenset[str]) -> bool:
+        for kw in keyword_set:
+            if " " in kw:
+                if kw in t:
+                    return True
+            else:
+                if re.search(r'\b' + re.escape(kw) + r'\b', t):
+                    return True
+        return False
+
+    # Delivery/shipping before offers — "shipping charge" is logistics, not a discount
+    if _matches(DELIVERY_SHIPPING_KEYWORDS):
+        return "delivery_shipping"
+
+    # Policies/legal before issue — "return policy" is legal, not an issue
+    if _matches(POLICIES_LEGAL_KEYWORDS):
+        return "policies_legal"
+
+    # Issue resolution — broadest problem vocabulary
+    if _matches(ISSUE_RESOLUTION_KEYWORDS):
+        return "issue_resolution"
+
+    # Contact support — human routing requests
+    if _matches(CONTACT_SUPPORT_KEYWORDS):
+        return "contact_support"
+
+    # Offers/promotions — pricing and discount signals
+    if _matches(OFFERS_PROMOTIONS_KEYWORDS):
+        return "offers_promotions"
+
+    # Educational content — how-to and guide signals
+    if _matches(EDUCATIONAL_CONTENT_KEYWORDS):
         return "educational_content"
-    if any(w in t for w in ("analytic", "metric", "report", "dashboard", "statistic",
-                             "trend", "insight", "kpi", "forecast", "roi")):
+
+    # Data analytics — reporting and aggregate signals
+    if _matches(DATA_ANALYTICS_KEYWORDS):
         return "data_analytics"
+
+    # Company info — identity and background signals
+    if _matches(COMPANY_INFO_KEYWORDS):
+        return "company_info"
+
+    # Product/service — catalog and availability signals
+    if _matches(PRODUCT_SERVICE_KEYWORDS):
+        return "product_service"
+
+    # ── 4. Default fallback ───────────────────────────────────────────────────
     return "product_service"

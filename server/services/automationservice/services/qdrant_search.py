@@ -384,18 +384,29 @@ def _metadata_score(payload: dict[str, Any], query_tokens: frozenset[str], escal
     hits = len(query_tokens & st_tokens)
     score += (hits / n) * 0.15
 
-    # Escalation boost (Fix 5): prioritize senior/manager/escalation contacts
+    # Escalation boost (Fix 5): prioritize senior/manager/escalation contacts.
+    # Uses the same enterprise ESCALATION_TRIGGER_WORDS from prompts.py for
+    # consistency with processor_1.py pre-flight detection.
     if escalation_boost:
-        ESCALATION_WORDS = {
-            "senior", "manager", "escalation", "head", "director",
-            "vip", "priority", "dedicated", "lead", "specialist",
-        }
+        try:
+            import sys, os
+            _llm_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "llm")
+            if _llm_dir not in sys.path:
+                sys.path.insert(0, _llm_dir)
+            from prompts import ESCALATION_TRIGGER_WORDS as _ESC_TRIGGERS
+        except ImportError:
+            _ESC_TRIGGERS = frozenset({
+                "senior", "manager", "escalation", "head", "director",
+                "supervisor", "lead", "specialist", "vip", "priority",
+                "dedicated", "representative", "customer success",
+                "live agent", "real person", "complaint team",
+            })
         all_text = (
             str(payload.get("title", "")) + " " +
             str(payload.get("search_text", "")) + " " +
             " ".join(str(v) for v in _json_values(payload.get("attributes") or {}))
         ).lower()
-        if any(w in all_text for w in ESCALATION_WORDS):
+        if any(trigger in all_text for trigger in _ESC_TRIGGERS):
             score = min(score + 0.30, 1.0)
 
     return min(score, 1.0)
