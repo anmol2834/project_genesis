@@ -30,13 +30,22 @@ ALLOWED_CATEGORIES = [
 ]
 
 VALID_RETRIEVAL_INTENT_TYPES = {
-    "catalog_lookup",
-    "fact_lookup",
-    "troubleshooting_lookup",
-    "analytics_lookup",
-    "comparison_lookup",
-    "contact_lookup",
-    "policy_lookup",
+    # Core lookups
+    "catalog_lookup",        # browsing products, listing options
+    "fact_lookup",           # specific factual question
+    "troubleshooting_lookup",# problem, error, malfunction
+    "analytics_lookup",      # metrics, reports, counts, KPIs
+    "comparison_lookup",     # comparing two or more options
+    "contact_lookup",        # contact details, support routing
+    "policy_lookup",         # warranty, returns, legal terms
+    # Extended enterprise taxonomy (Issue #6)
+    "recommendation_lookup", # best option for use case
+    "alternative_lookup",    # can't afford / different from current
+    "upgrade_lookup",        # moving to higher tier
+    "downgrade_lookup",      # moving to lower tier
+    "compatibility_lookup",  # works with / compatible with
+    "eligibility_lookup",    # am I eligible for
+    "bundle_lookup",         # packages / bundles / combos
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -946,6 +955,9 @@ DETERMINISTIC_RETRIEVAL_KEYWORDS: list[tuple[str, str, str]] = [
 #   operator: "lte" | "gte" | "eq"
 import re as _re
 NUMERIC_CONSTRAINT_PATTERNS: list[tuple[object, str, str]] = [
+# ── between operator: "between 500 and 700", "from 500 to 700"
+    (_re.compile(r'between\s*\$?([\d,]+(?:\.\d+)?)\s*(?:and|to)\s*\$?([\d,]+(?:\.\d+)?)', _re.I), "price", "between"),
+    (_re.compile(r'from\s*\$?([\d,]+(?:\.\d+)?)\s*to\s*\$?([\d,]+(?:\.\d+)?)', _re.I), "price", "between"),
     # Price upper bounds — "under $X", "below $X", "less than $X", "max $X"
     (_re.compile(r'under\s*\$?([\d,]+(?:\.\d+)?)', _re.I),    "price", "lte"),
     (_re.compile(r'below\s*\$?([\d,]+(?:\.\d+)?)', _re.I),    "price", "lte"),

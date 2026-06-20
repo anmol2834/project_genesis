@@ -189,6 +189,7 @@ async def run_processor_1(
                 temperature     = 0.0,
                 top_p           = 1.0,
                 seed            = 42,
+                max_tokens      = 2048,
                 response_format = {"type": "json_object"},
                 messages = [
                     {"role": "system", "content": PROCESSOR_1_SYSTEM_PROMPT},
@@ -261,6 +262,8 @@ async def run_processor_1(
         preflight_escalation,
         max_conv_confidence,
         business_context,
+        messages=messages,
+        latest_message=latest_message,
     )
     validated["_meta"] = {
         "elapsed_ms": round(elapsed_ms, 1),
@@ -362,6 +365,8 @@ def _validate_and_repair(
     preflight_escalation: bool,
     max_conv_confidence: float,
     business_context: dict | None = None,
+    messages: list[dict] | None = None,
+    latest_message: dict | None = None,
 ) -> dict:
 
     data["pipeline_version"] = "1.0"
@@ -701,19 +706,81 @@ def _validate_and_repair(
     }
 
     # -- retrieval_contract --------------------------------------------------
-    # Structured specification consumed by the Qdrant retrieval layer.
-    # Contains: entity, numeric constraints (price filters), deterministic sort
-    # mode (cheapest/most expensive), analytics decision.
-    # This is the single source of truth for what the retrieval layer must fetch.
+    # Enterprise Retrieval Contract v2 — Schema-Free, Intent-Centric
+    # Requirements are now semantic (type+value) not field-based.
+    # Retrieval layer enriches vector queries with requirement values
+    # rather than applying hard MatchValue filters on guessed field names.
     latest_text = ca.get("latest_message", "").lower()
     numeric_constraints = _extract_numeric_constraints(latest_text)
     deterministic_mode  = _extract_deterministic_mode(latest_text)
+    requirements        = _extract_requirements(ee.get("specifications", []))
+
+    # Enrich search queries with requirement values so vector search
+    # finds matching records regardless of field name schema
+    enriched_categories = []
+    for cat_entry in rs.get("categories", []):
+        if not isinstance(cat_entry, dict):
+            continue
+        base_qs = cat_entry.get("search_queries", [])
+        if requirements and base_qs:
+            # Enrich the primary query with requirement values
+            enriched_qs = _build_requirement_enriched_queries(base_qs[0], requirements)
+            # Merge enriched + original, deduplicated
+            merged_qs = list(dict.fromkeys(enriched_qs + base_qs))[:3]
+        else:
+            merged_qs = base_qs
+        enriched_entry = dict(cat_entry)
+        enriched_entry["search_queries"] = merged_qs
+        enriched_categories.append(enriched_entry)
+    if enriched_categories:
+        rs["categories"] = enriched_categories
+        data["retrieval_strategy"] = rs
+
+    # Infer retrieval intent type from message text (more precise than category only)
+    retrieval_intent = _infer_retrieval_intent_from_text(
+        ca.get("latest_message", ""), pi.get("category", "")
+    )
+
+    # Conversation entity memory (Issue #7)
+    # Built from the actual message thread passed in from run_processor_1
+    conv_entities: list[dict] = []
+    reference_entity = ""
+    if messages and latest_message:
+        conv_entities = _extract_conversation_entities(messages, latest_message)
+    # reference_entity: resolved entity name from ordinal/pronoun references (Issue #12)
+    if conv_entities:
+        reference_entity = _extract_reference_entity(
+            ca.get("latest_message", ""), conv_entities
+        )
+
+    # Issue #10 — Confidence Gate
+    # When the system cannot understand what the customer wants with sufficient
+    # clarity, flag clarification_required=True. The retrieval layer and
+    # downstream response generator should STOP and ask for clarification
+    # instead of retrieving and potentially hallucinating a response.
+    conv_confidence = ca.get("conversation_confidence", 0.5)
+    intent_confidence = pi.get("confidence", 0.5)
+    clarification_required = (
+        conv_confidence < 0.45
+        and intent_confidence < 0.60
+        and not ee.get("products")  # no entity extracted
+        and not ee.get("specifications")  # no spec extracted
+    )
+    if clarification_required:
+        logger.info(
+            "[P1] clarification_required=True | conv_conf=%.2f intent_conf=%.2f",
+            conv_confidence, intent_confidence,
+        )
 
     data["retrieval_contract"] = {
         "intent":              pi.get("category", "product_service"),
+        "retrieval_intent":    retrieval_intent,
         "entity":              ee.get("products", [""])[0] if ee.get("products") else "",
         "entities":            ee.get("products", []),
         "specifications":      ee.get("specifications", []),
+        # Schema-free requirements: [{type, value, raw_value, raw_spec, operator}]
+        # Retrieval layer uses these for query enrichment and scoring, NOT hard filters
+        "requirements":        requirements,
         "numeric_constraints": numeric_constraints,
         "deterministic_mode":  deterministic_mode,
         "categories":          [c.get("category") for c in rs.get("categories", []) if isinstance(c, dict)],
@@ -723,6 +790,12 @@ def _validate_and_repair(
             ac.get("primary_category") for ac in ad.get("analytics_categories", [])
             if isinstance(ac, dict)
         ],
+        # Conversation state
+        "conversation_entities": conv_entities,
+        "reference_entity":      reference_entity,
+        "clarification_required": clarification_required,
+        # Status filter passed to retrieval layer
+        "status_filter": "active",
     }
 
     return data
@@ -815,11 +888,48 @@ def _infer_retrieval_intent_type(category: str) -> str:
         "contact_support":     "contact_lookup",
         "policies_legal":      "policy_lookup",
         "issue_resolution":    "troubleshooting_lookup",
-        # NOTE: "data_analytics" removed — it is a subtype, not a category.
-        # Analytics retrieval uses analytics_lookup intent type when the
-        # retrieval layer searches category=X + subtype=data_analytics.
     }
     return mapping.get(category, "fact_lookup")
+
+
+def _infer_retrieval_intent_from_text(text: str, category: str) -> str:
+    """
+    Infer the retrieval intent type from the customer's message text.
+    More precise than the category-based fallback.
+
+    Maps customer language patterns to the extended taxonomy (Issue #6).
+    """
+    t = text.lower()
+    # Comparison signals
+    if any(w in t for w in ("compare", "vs", "versus", "difference between", "which is better")):
+        return "comparison_lookup"
+    # Alternative signals
+    if any(w in t for w in ("can't afford", "cannot afford", "cheaper alternative",
+                             "similar to", "instead of", "other option", "something else")):
+        return "alternative_lookup"
+    # Upgrade signals
+    if any(w in t for w in ("upgrade", "better version", "higher tier", "move up")):
+        return "upgrade_lookup"
+    # Downgrade signals
+    if any(w in t for w in ("downgrade", "lower tier", "something cheaper", "basic version")):
+        return "downgrade_lookup"
+    # Recommendation signals
+    if any(w in t for w in ("recommend", "suggest", "best for", "which one should", "what would you")):
+        return "recommendation_lookup"
+    # Compatibility signals
+    if any(w in t for w in ("compatible", "works with", "support", "integrate")):
+        return "compatibility_lookup"
+    # Eligibility signals
+    if any(w in t for w in ("eligible", "qualify", "can i get", "am i able", "do i qualify")):
+        return "eligibility_lookup"
+    # Bundle signals
+    if any(w in t for w in ("bundle", "package", "combo", "together", "include")):
+        return "bundle_lookup"
+    # Analytics
+    if any(w in t for w in ("how many", "average", "total", "count", "statistics")):
+        return "analytics_lookup"
+    # Fall back to category-based inference
+    return _infer_retrieval_intent_type(category)
 
 
 def _validate_specs(specifications: list[str]) -> tuple[bool, float]:
@@ -894,19 +1004,163 @@ def _deduplicate_queries(queries: list[str]) -> list[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-# ── Requirement extraction engine ─────────────────────────────────────────────
+# ── Requirement extraction engine — SCHEMA-FREE (Issues #1, #2, #3) ────────────
+
+def _extract_requirements(specifications: list[str]) -> list[dict]:
+    """
+    Extract semantic requirements from raw specification strings.
+
+    ENTERPRISE ARCHITECTURE (Issues #1, #2, #3):
+    This extractor is SCHEMA-FREE — it NEVER guesses field names like
+    "ram", "memory", "storage". Different businesses store the same
+    concept under completely different field names:
+        Laptop company  : {"ram": "16GB"}
+        Hospital system : {"memory_capacity": "16GB"}
+        IoT platform    : {"technical_specs": {"primary_memory": "16GB"}}
+
+    Instead, we extract SEMANTIC INTENT:
+        type  : what KIND of requirement (memory, storage, capacity, quality_level, etc.)
+        value : the ACTUAL VALUE the customer wants ("16GB", "premium", "512GB SSD")
+        raw   : original text for downstream use
+
+    The retrieval layer uses these to:
+      1. Enrich vector queries ("16GB" becomes part of the search text)
+      2. Score candidates by full-text value presence anywhere in payload
+      3. NOT by hard MatchValue on a specific field key
+
+    This makes the system work identically for:
+      E-commerce, Hospitals, Hotels, Law Firms, Schools, SaaS, Insurance,
+      Manufacturing, Real Estate — ANY future business.
+
+    Works for qualitative requirements too:
+        "beginner course"   → {type: "skill_level",    value: "beginner"}
+        "affordable option" → {type: "budget_level",   value: "affordable"}
+        "premium package"   → {type: "quality_level",  value: "premium"}
+        "student plan"      → {type: "audience",       value: "student"}
+    """
+    import re as _re
+    requirements: list[dict] = []
+    seen: set[str] = set()
+
+    # Semantic type patterns — ordered by specificity
+    # (regex, semantic_type, value_group)
+    # Value group 1 always contains the primary value to extract
+    SEMANTIC_PATTERNS: list[tuple] = [
+        # Memory/capacity values: "16GB", "8 GB", "16-GB", "16 gigabytes"
+        (_re.compile(r'(\d+\s*(?:gb|tb|mb|pb|gigabyte|terabyte|megabyte)s?)', _re.I), "capacity", 1),
+        # Speed/frequency: "3.2GHz", "100Mbps"
+        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:ghz|mhz|mbps|gbps|fps|hz))', _re.I), "performance", 1),
+        # Screen/display: "15 inch", '15"', "4K", "1080p", "FHD", "UHD"
+        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:inch|in|"|\'))', _re.I), "screen_size", 1),
+        (_re.compile(r'(4k|2k|1080p|720p|fhd|uhd|qhd|retina)', _re.I), "display_resolution", 1),
+        # Dimensions/area: "1200 sq ft", "200 sqm"
+        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:sq\s*ft|sqft|sq\s*m|sqm|m2|ft2))', _re.I), "area", 1),
+        # Duration: "2 year", "30 day", "6 month"
+        (_re.compile(r'(\d+\s*(?:year|month|week|day|hour|yr|mo)s?)', _re.I), "duration", 1),
+        # Quantity/count: "3 bedrooms", "2 bathrooms", "50 users"
+        (_re.compile(r'(\d+)\s*(bedroom|bathroom|floor|seat|door|wheel|room|unit|user|person|people|seat|license)', _re.I), "count", 1),
+        # Weight: "5kg", "10 lbs"
+        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:kg|lb|lbs|gram|g|oz|ton)s?)', _re.I), "weight", 1),
+        # Dosage/medical: "500mg", "10ml"
+        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:mg|ml|mcg|ug|iu|units?))', _re.I), "dosage", 1),
+        # Color: "red", "colour red", "color blue"
+        (_re.compile(r'\b(?:colou?r\s+)?(red|blue|green|black|white|silver|gold|grey|gray|pink|purple|yellow|orange|brown|navy)\b', _re.I), "color", 1),
+        # Size labels: "XL", "large", "small", "medium", "king", "queen"
+        (_re.compile(r'\b(xs|small|medium|large|xl|xxl|xxxl|king|queen|twin|full|double|single)\b', _re.I), "size", 1),
+        # Quality level: "premium", "basic", "standard", "enterprise", "professional"
+        (_re.compile(r'\b(premium|luxury|deluxe|elite|pro|professional|enterprise|advanced|basic|standard|entry.?level|budget|affordable|economy)\b', _re.I), "quality_level", 1),
+        # Audience/persona: "student", "beginner", "expert"
+        (_re.compile(r'\b(student|beginner|intermediate|advanced|expert|senior|junior|professional|business|personal|family|corporate)\b', _re.I), "audience", 1),
+        # Billing cycle: "annual", "monthly", "quarterly"
+        (_re.compile(r'\b(annual|monthly|quarterly|weekly|yearly|one.?time|lifetime)\b', _re.I), "billing_cycle", 1),
+        # Storage media type: "SSD", "HDD", "NVMe" — value only, no field guess
+        (_re.compile(r'\b(ssd|hdd|nvme|flash|emmc|optical)\b', _re.I), "storage_type", 1),
+        # Connectivity: "5G", "4G", "WiFi 6", "Bluetooth"
+        (_re.compile(r'\b(5g|4g|lte|wifi\s*6?|bluetooth\s*\d*\.?\d*|ethernet|usb.?c|thunderbolt\s*\d*)\b', _re.I), "connectivity", 1),
+    ]
+
+    for spec in specifications:
+        s = spec.strip()
+        matched = False
+        for pattern, sem_type, val_group in SEMANTIC_PATTERNS:
+            m = pattern.search(s)
+            if m:
+                val = m.group(val_group).strip()
+                # Normalize whitespace and uppercase for consistent matching
+                val_norm = _re.sub(r'\s+', '', val).upper()
+                key = f"{sem_type}:{val_norm}"
+                if key not in seen:
+                    seen.add(key)
+                    requirements.append({
+                        "type":      sem_type,
+                        "value":     val_norm,
+                        "raw_value": val,
+                        "raw_spec":  spec,
+                        "operator":  "semantic",  # signals: use semantic matching, not hard filter
+                    })
+                matched = True
+                # Don't break — one spec may have multiple semantic types (e.g. "512GB SSD")
+                # Continue to extract both capacity AND storage_type
+        if not matched:
+            # Unrecognized spec — store as keyword for full-text enrichment
+            key = f"keyword:{s.lower()}"
+            if key not in seen:
+                seen.add(key)
+                requirements.append({
+                    "type":      "keyword",
+                    "value":     s,
+                    "raw_value": s,
+                    "raw_spec":  spec,
+                    "operator":  "keyword",
+                })
+
+    return requirements
+
+
+def _build_requirement_enriched_queries(base_query: str, requirements: list[dict]) -> list[str]:
+    """
+    Enrich search queries with requirement values for better vector retrieval.
+
+    Instead of relying on hard field filters (which break across schemas),
+    we inject requirement values directly into the search query text so
+    BAAI/bge-m3 can find semantically similar records regardless of how
+    the business stored the field.
+
+    Example:
+        base_query = "laptop models with specifications"
+        requirements = [{type:"capacity", value:"16GB"}, {type:"storage_type", value:"SSD"}]
+        → "laptop models with specifications 16GB SSD"
+
+    This is domain-agnostic: works for RAM, hotel room types, medication
+    dosages, insurance coverage levels — any business.
+    """
+    if not requirements:
+        return [base_query]
+
+    # Collect semantic and keyword values to append
+    value_tokens: list[str] = []
+    for req in requirements:
+        val = req.get("raw_value") or req.get("value") or ""
+        if val and val.lower() not in base_query.lower():
+            value_tokens.append(val)
+
+    if not value_tokens:
+        return [base_query]
+
+    enriched = f"{base_query} {' '.join(value_tokens)}"
+    return [enriched, base_query]  # enriched first, base as fallback
+
 
 def _extract_numeric_constraints(text: str) -> list[dict]:
     """
-    Extract numeric constraints (price ranges, attribute filters) from the
-    customer message text.
+    Extract numeric constraints from customer message text.
 
-    Returns a list of constraint dicts:
+    Returns constraint dicts:
         {"field": "price", "operator": "lte", "value": 1000.0}
+        {"field": "price", "operator": "between", "min": 500.0, "max": 700.0}
 
-    Operators: "lte" (<=), "gte" (>=), "eq" (==)
-    Used by the Qdrant retrieval layer to build Range filters.
-    Domain-agnostic — works for price, RAM, storage, area, dosage, etc.
+    Operators: "lte", "gte", "eq", "between"
+    Domain-agnostic — works for price, RAM, storage, area, dosage, duration, etc.
     """
     from llm.prompts import NUMERIC_CONSTRAINT_PATTERNS
     constraints: list[dict] = []
@@ -914,16 +1168,126 @@ def _extract_numeric_constraints(text: str) -> list[dict]:
     for pattern, field, operator in NUMERIC_CONSTRAINT_PATTERNS:
         m = pattern.search(text)
         if m:
-            raw = m.group(1).replace(",", "")
-            try:
-                value = float(raw)
-            except ValueError:
-                continue
-            key = f"{field}:{operator}:{value}"
-            if key not in seen:
-                seen.add(key)
-                constraints.append({"field": field, "operator": operator, "value": value})
+            if operator == "between":
+                try:
+                    min_val = float(m.group(1).replace(",", ""))
+                    max_val = float(m.group(2).replace(",", ""))
+                except (ValueError, IndexError):
+                    continue
+                key = f"{field}:between:{min_val}:{max_val}"
+                if key not in seen:
+                    seen.add(key)
+                    constraints.append({"field": field, "operator": "between",
+                                        "min": min_val, "max": max_val})
+            else:
+                raw = m.group(1).replace(",", "")
+                try:
+                    value = float(raw)
+                except ValueError:
+                    continue
+                key = f"{field}:{operator}:{value}"
+                if key not in seen:
+                    seen.add(key)
+                    constraints.append({"field": field, "operator": operator, "value": value})
     return constraints
+
+
+def _extract_conversation_entities(messages: list[dict], latest_message: dict) -> list[dict]:
+    """
+    Issue #7 — Conversation Entity Memory.
+
+    Scans the conversation thread for named entities that were presented
+    as options (e.g. "Plan A", "Plan B", "IngenAI Student 13") and
+    tracks them with ordinal positions so references like "the second one"
+    can be resolved.
+
+    Returns a list of entity dicts:
+        [{"id": "entity_1", "name": "Plan A", "ordinal": 1, "source": "agent"}, ...]
+
+    This list is attached to the retrieval_contract so downstream
+    components can resolve pronouns and ordinal references.
+    """
+    entities: list[dict] = []
+    latest_id = latest_message.get("message_id", "")
+
+    # Patterns that indicate the agent presented a list of named options
+    import re as _re
+    ENTITY_PATTERNS = [
+        # Numbered list: "1. Plan A", "2) IngenAI Pro"
+        _re.compile(r'^\s*(?:\d+[.)\s]+)([A-Z][\w\s\-\.]{2,50})', _re.M),
+        # Bullet list: "- Plan A", "• Plan B"
+        _re.compile(r'^\s*[-•*]+\s*([A-Z][\w\s\-\.]{2,50})', _re.M),
+    ]
+
+    entity_idx = 1
+    for msg in messages:
+        if msg.get("message_id") == latest_id:
+            continue
+        direction = (msg.get("direction") or "").upper()
+        if direction == "INCOMING":  # customer messages don't present product lists
+            continue
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        for pattern in ENTITY_PATTERNS:
+            for m in pattern.finditer(content):
+                name = m.group(1).strip().rstrip(".,:;")
+                if len(name) < 3:
+                    continue
+                # Avoid duplicates
+                existing_names = {e["name"].lower() for e in entities}
+                if name.lower() not in existing_names:
+                    entities.append({
+                        "id":      f"entity_{entity_idx}",
+                        "name":    name,
+                        "ordinal": entity_idx,
+                        "source":  "agent",
+                    })
+                    entity_idx += 1
+
+    return entities
+
+
+def _extract_reference_entity(latest_body: str, conversation_entities: list[dict]) -> str:
+    """
+    Issue #12 — Resolve ordinal/pronoun references to named entities.
+
+    When customer says "the second one" or "that plan" or "the other option",
+    resolve to the actual entity name from conversation_entities[].
+
+    Returns the resolved entity name, or empty string if not resolvable.
+    """
+    if not conversation_entities:
+        return ""
+
+    import re as _re
+    t = latest_body.lower().strip()
+
+    # Ordinal reference: "the first one", "second option", "3rd plan"
+    ORDINAL_MAP = {
+        "first": 1, "1st": 1, "one": 1,
+        "second": 2, "2nd": 2, "two": 2,
+        "third": 3, "3rd": 3, "three": 3,
+        "fourth": 4, "4th": 4, "four": 4,
+        "fifth": 5, "5th": 5, "five": 5,
+        "last": -1,  # last = final entity
+    }
+    for word, ordinal in ORDINAL_MAP.items():
+        if re.search(r'\b' + word + r'\b', t):
+            idx = ordinal if ordinal > 0 else len(conversation_entities)
+            for ent in conversation_entities:
+                if ent.get("ordinal") == idx:
+                    return ent["name"]
+
+    # Direct number reference: "option 2", "plan 3"
+    m = _re.search(r'(?:option|plan|item|one|product|package|model)\s*(\d+)', t)
+    if m:
+        ordinal = int(m.group(1))
+        for ent in conversation_entities:
+            if ent.get("ordinal") == ordinal:
+                return ent["name"]
+
+    return ""
 
 
 def _extract_deterministic_mode(text: str) -> dict:

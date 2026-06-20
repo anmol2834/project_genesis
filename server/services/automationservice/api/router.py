@@ -213,14 +213,19 @@ async def process_event(event: dict) -> dict:
         logger.info("[P1 STATUS] ok  |  attempts=%d", p1_meta.get("attempts", 1))
 
     # Log retrieval_contract (Issues 1/2/3/6)
-    rc_contract = p1_output.get("retrieval_contract") or {}
-    det_mode    = rc_contract.get("deterministic_mode") or {}
-    num_constr  = rc_contract.get("numeric_constraints") or []
+    rc_contract  = p1_output.get("retrieval_contract") or {}
+    det_mode     = rc_contract.get("deterministic_mode") or {}
+    num_constr   = rc_contract.get("numeric_constraints") or []
+    requirements = rc_contract.get("requirements") or []
     if det_mode.get("active"):
         logger.info("[CONTRACT] deterministic=True  field=%s  direction=%s",
                     det_mode.get("field"), det_mode.get("direction"))
     if num_constr:
         logger.info("[CONTRACT] numeric_constraints=%s", num_constr)
+    if requirements:
+        logger.info("[CONTRACT] requirements=%s",
+                    [{"field": r.get("field"), "op": r.get("operator"), "value": r.get("value")}
+                     for r in requirements[:5]])
     if rc_contract.get("entity"):
         logger.info("[CONTRACT] entity=%s  specs=%s",
                     rc_contract.get("entity"), rc_contract.get("specifications", []))
@@ -308,11 +313,11 @@ async def process_event(event: dict) -> dict:
         r_total, r_final, r_analytics, r_elapsed, elapsed_ms,
     )
 
-    # ── Fix 8: Observability logs for retrieval diversity ──────────────────
     logger.info(
-        "[RETRIEVAL]  diversity_score=%.3f  deterministic=%s",
+        "[RETRIEVAL]  diversity_score=%.3f  deterministic=%s  requirements=%d",
         retrieval_output.get("retrieval_diversity_score", 0.0),
         retrieval_output.get("deterministic_mode_used", False),
+        len((retrieval_output.get("retrieval_contract_applied") or {}).get("requirements", [])),
     )
 
     return {

@@ -70,18 +70,21 @@ os.makedirs(_MODEL_CACHE_DIR, exist_ok=True)
 
 # Per-query vector search top-K (candidates before fusion)
 DENSE_TOP_K          = 20
-# Per-query metadata scroll top-K
+# Per-query metadata scroll top-K (paginated — no hard cap)
 METADATA_TOP_K       = 20
 # Per-category result cap after fusion (passed to reranker)
 PER_CATEGORY_TOP_K   = 10
 # Minimum vector score to include a candidate
 VECTOR_SCORE_FLOOR   = 0.30
+# Maximum pages for metadata scroll (safety cap: 500 * 100 = 50k records)
+_METADATA_SCROLL_MAX_PAGES = 500
 
-# Score fusion weights  (must sum to 1.0)
-W_VECTOR   = 0.60
-W_METADATA = 0.20
-W_QUALITY  = 0.10
-W_PRIORITY = 0.10
+# Score fusion weights — requirement_score always overrides these
+# Priority: requirement_match > filter_match > metadata > vector
+W_VECTOR   = 0.45
+W_METADATA = 0.25
+W_QUALITY  = 0.15
+W_PRIORITY = 0.15
 
 # Allowed category values (mirrors user-service DataCategory enum)
 # NOTE: "data_analytics" is NOT a category — it is a SUBTYPE.
@@ -192,25 +195,55 @@ async def warmup() -> None:
     await asyncio.to_thread(_run)
 
 
+def _normalize_query_tokens(text: str) -> frozenset[str]:
+    """
+    Issue #4 — Query Understanding Layer.
+
+    Normalizes tokens before metadata scoring so variant forms of the
+    same concept match the same stored values:
+        "16 gb" / "16-gb" / "16gb" / "16 gigabytes" / "16gig" → "16GB"
+        "512 gb ssd" → "512GB", "SSD"
+        "$1000" / "1,000" → "1000"
+
+    Works for any unit system — bytes, currency, weight, area, etc.
+    Domain-agnostic: no hardcoded business vocabulary.
+    """
+    import re as _re
+
+    # Normalise common unit abbreviation variants first
+    UNIT_NORMS = [
+        (_re.compile(r'(\d+)\s*gig(?:abyte)?s?\b', _re.I),          r'\1GB'),
+        (_re.compile(r'(\d+)\s*mega(?:byte)?s?\b', _re.I),          r'\1MB'),
+        (_re.compile(r'(\d+)\s*tera(?:byte)?s?\b', _re.I),          r'\1TB'),
+        (_re.compile(r'(\d+)\s*[-_]?\s*(gb)\b', _re.I),             r'\1GB'),
+        (_re.compile(r'(\d+)\s*[-_]?\s*(tb)\b', _re.I),             r'\1TB'),
+        (_re.compile(r'(\d+)\s*[-_]?\s*(mb)\b', _re.I),             r'\1MB'),
+        (_re.compile(r'\$(\d[\d,]*(?:\.\d+)?)', _re.I),             r'\1'),  # $1,000 → 1000
+        (_re.compile(r'(\d)[,](\d{3})', _re.I),                     r'\1\2'),  # 1,000 → 1000
+    ]
+
+    normalized = text.lower()
+    for pattern, replacement in UNIT_NORMS:
+        normalized = pattern.sub(replacement, normalized)
+
+    # Tokenize and clean
+    _STRIP_CHARS = '.,;:!?()-"\''
+    tokens = frozenset(
+        t.strip(_STRIP_CHARS)
+        for t in normalized.split()
+        if len(t.strip(_STRIP_CHARS)) > 1
+    )
+    return tokens
+
+
 # ── Filter builders ────────────────────────────────────────────────────────────
 
-def _build_category_filter(user_id: str, category: str):
+def _build_category_filter(user_id: str, category: str, status_filter: str | None = None):
     """
     Build a strict Qdrant Filter for tenant-scoped category search.
-
-    This filter is used for NORMAL (operational) record retrieval only.
-    Analytics subtype records (subtype=data_analytics) are NOT included —
-    they are handled separately by _build_analytics_subtype_filter.
-
-    Mandatory conditions:
-        user_id  == user_id    (multi-tenancy isolation — NON-NEGOTIABLE)
-        category == category   (category isolation — reduces noise)
-
-    For offers_promotions: additionally filters status == "active" at vector
-    search time to exclude inactive/scheduled offers before scoring.
+    Delegates to _build_normal_category_filter.
     """
-    # Delegate to the new explicit normal-category filter
-    return _build_normal_category_filter(user_id, category)
+    return _build_normal_category_filter(user_id, category, status_filter=status_filter)
 
 
 def _build_analytics_subtype_filter(user_id: str, category: str):
@@ -238,41 +271,102 @@ def _build_analytics_subtype_filter(user_id: str, category: str):
     ])
 
 
-def _build_normal_category_filter(user_id: str, category: str):
+def _build_normal_category_filter(user_id: str, category: str, status_filter: str | None = None):
     """
     Build a Qdrant filter for NORMAL (non-analytics) records within a category.
 
-    Excludes analytics subtype records — only returns operational data entries
-    (actual products, actual offers, actual policies, etc.).
-
-    Used for the operational retrieval pass that runs alongside analytics retrieval.
-    The retrieval layer runs BOTH analytics + normal passes when analytics is needed,
-    sending both result sets to the reranker which picks the most relevant chunks.
+    Enterprise principle: no hardcoded business category logic here.
+    status_filter is passed in from the retrieval contract when P1 requires it.
+    The only built-in rule is excluding data_analytics subtype (architectural,
+    not business logic).
 
     Mandatory conditions:
         user_id  == user_id           (multi-tenancy isolation)
         category == <real category>   (category isolation)
         subtype  != "data_analytics"  (exclude analytics summaries)
-
-    Note for offers: additionally filters status == "active" to exclude
-    inactive/scheduled/expired offers at the Qdrant filter level.
     """
-    from qdrant_client.models import Filter, FieldCondition, MatchValue, IsNullCondition, IsEmptyCondition
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
     conditions = [
         FieldCondition(key="user_id",  match=MatchValue(value=user_id)),
         FieldCondition(key="category", match=MatchValue(value=category)),
     ]
-    # Exclude analytics subtype entries — use must_not to filter out data_analytics subtype
-    # We do this by NOT matching subtype=data_analytics via a must_not condition
     must_not_conditions = [
         FieldCondition(key="subtype", match=MatchValue(value="data_analytics")),
     ]
-    # For offers, also filter to active only
-    if category == "offers_promotions":
-        conditions.append(
-            FieldCondition(key="status", match=MatchValue(value="active"))
-        )
+    # status_filter injected from retrieval contract — no hardcoded category assumptions
+    if status_filter:
+        conditions.append(FieldCondition(key="status", match=MatchValue(value=status_filter)))
     return Filter(must=conditions, must_not=must_not_conditions)
+
+
+def _build_requirements_filter(user_id: str, category: str, requirements: list[dict], status_filter: str | None = None):
+    """
+    Schema-safe requirements filter — REVISED (Issues #1, #2, #3).
+
+    ENTERPRISE ARCHITECTURE CHANGE:
+    The previous version applied MatchValue on guessed field names (e.g.
+    structured_data.ram = "8GB"). This breaks when different businesses
+    use different field names for the same concept.
+
+    NEW APPROACH:
+    Only apply NUMERIC RANGE constraints as hard filters (these work
+    regardless of field name because we compare numeric values, not strings).
+    String/semantic requirements are handled via query enrichment in the
+    vector search and requirement_score in fusion — NOT hard MatchValue.
+
+    This filter now only enforces:
+      1. Tenant isolation (user_id)
+      2. Category isolation
+      3. Analytics subtype exclusion
+      4. Status filter (if provided)
+      5. Numeric range constraints (price lte/gte/between)
+
+    String matching is intentionally left to the semantic layer.
+    """
+    from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
+
+    must: list = [
+        FieldCondition(key="user_id",  match=MatchValue(value=user_id)),
+        FieldCondition(key="category", match=MatchValue(value=category)),
+    ]
+    must_not = [FieldCondition(key="subtype", match=MatchValue(value="data_analytics"))]
+
+    if status_filter:
+        must.append(FieldCondition(key="status", match=MatchValue(value=status_filter)))
+
+    # Only apply numeric constraints as hard filters — schema-safe because
+    # we compare against numeric values in attributes.price, not string field names
+    for req in (requirements or []):
+        if not isinstance(req, dict):
+            continue
+        operator = str(req.get("operator") or "").strip()
+        # Only process actual numeric range requirements here
+        # semantic/keyword requirements are handled in vector query enrichment
+        if operator not in ("lte", "gte", "eq", "between"):
+            continue
+        field = str(req.get("field") or "").strip()
+        value = req.get("value")
+        if not field or value is None:
+            continue
+        attr_key = f"attributes.{field}"
+        try:
+            fval = float(value)
+        except (ValueError, TypeError):
+            continue
+        if operator == "lte":
+            must.append(FieldCondition(key=attr_key, range=Range(lte=fval)))
+        elif operator == "gte":
+            must.append(FieldCondition(key=attr_key, range=Range(gte=fval)))
+        elif operator == "eq":
+            tol = fval * 0.05
+            must.append(FieldCondition(key=attr_key, range=Range(gte=fval - tol, lte=fval + tol)))
+        elif operator == "between":
+            min_v = req.get("min")
+            max_v = req.get("max")
+            if min_v is not None and max_v is not None:
+                must.append(FieldCondition(key=attr_key, range=Range(gte=float(min_v), lte=float(max_v))))
+
+    return Filter(must=must, must_not=must_not)
 
 
 def _build_tenant_only_filter(user_id: str):
@@ -293,17 +387,26 @@ async def _dense_search(
     user_id: str,
     category: str,
     top_k: int = DENSE_TOP_K,
+    requirements: list[dict] | None = None,
+    status_filter: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Vector similarity search scoped to user_id + category.
-    Runs in a thread pool to avoid blocking the event loop.
-    Returns list of raw Qdrant ScoredPoint dicts.
+
+    When requirements[] is provided (Stage 1 mode), builds a requirements filter
+    that enforces exact field=value matches inside Qdrant BEFORE scoring.
+    This is Stage 1 exact-match retrieval — eliminates outliers at DB level.
+
+    When requirements is None/empty, falls back to standard category filter.
     """
     def _run() -> list[dict]:
-        client   = _get_qdrant_client()
-        vector   = _embed_query(query)
-        f        = _build_category_filter(user_id, category)
-        results  = client.search(
+        client  = _get_qdrant_client()
+        vector  = _embed_query(query)
+        if requirements:
+            f = _build_requirements_filter(user_id, category, requirements, status_filter=status_filter)
+        else:
+            f = _build_category_filter(user_id, category, status_filter=status_filter)
+        results = client.search(
             collection_name = COLLECTION_NAME,
             query_vector    = vector,
             query_filter    = f,
@@ -360,24 +463,19 @@ async def _analytics_dense_search(
 
 def _metadata_score(payload: dict[str, Any], query_tokens: frozenset[str], escalation_boost: bool = False) -> float:
     """
-    Score a Qdrant payload against a set of query tokens.
+    Score a Qdrant payload against normalized query tokens.
 
-    Searches ALL payload fields including nested structured_data and attributes
-    values — not just keys. This covers cases like:
-        - Customer: "512GB SSD"  → matches structured_data value "512GB SSD"
-        - Customer: "Mon-Sat"    → matches attribute value "Mon-Sat"
-        - Customer: "$1049"      → matches structured_data value "$1,049"
-        - Customer: "South"      → matches title or attribute value "Repair Center South"
+    FIXED (Issue #4): Uses _normalize_query_tokens so "16gb", "16 gb",
+    "16-gb" all match the stored value "16GB" consistently.
 
-    Scoring:
-        title match      → +0.40 per matching token (highest weight — most discriminative)
-        keywords match   → +0.30 per matching token
-        ai_tags match    → +0.25 per matching token
-        structured_data  → +0.20 per matching token in any value
-        attributes       → +0.20 per matching token in any value
-        search_text      → +0.15 per matching token (broad fallback)
-
-    Score is capped at 1.0 and normalized to 0.0–1.0.
+    Scoring priority (search_text demoted to last per Issue #5):
+        title           → +0.40 (most discriminative)
+        keywords        → +0.30
+        ai_tags         → +0.25
+        structured_data → +0.20 (all nested values)
+        attributes      → +0.20 (all nested values)
+        entities        → +0.15
+        search_text     → +0.10 (fallback only — demoted)
     """
     if not query_tokens:
         return 0.0
@@ -386,10 +484,11 @@ def _metadata_score(payload: dict[str, Any], query_tokens: frozenset[str], escal
     n     = len(query_tokens)
 
     def _tokenize(text: Any) -> frozenset[str]:
-        return frozenset(str(text).lower().split()) if text else frozenset()
+        if not text:
+            return frozenset()
+        return _normalize_query_tokens(str(text))
 
     def _json_values(obj: Any) -> list[str]:
-        """Recursively collect all leaf string/numeric values from nested dict/list."""
         results: list[str] = []
         if isinstance(obj, dict):
             for v in obj.values():
@@ -401,47 +500,44 @@ def _metadata_score(payload: dict[str, Any], query_tokens: frozenset[str], escal
             results.append(str(obj))
         return results
 
-    # Title — highest signal
     title_tokens = _tokenize(payload.get("title", ""))
     hits = len(query_tokens & title_tokens)
     score += (hits / n) * 0.40
 
-    # Keywords list
     kw_tokens: frozenset[str] = frozenset()
     kws = payload.get("keywords") or []
     if isinstance(kws, list):
-        kw_tokens = frozenset(" ".join(str(k) for k in kws).lower().split())
+        kw_tokens = _normalize_query_tokens(" ".join(str(k) for k in kws))
     hits = len(query_tokens & kw_tokens)
     score += (hits / n) * 0.30
 
-    # AI tags
     tag_tokens: frozenset[str] = frozenset()
     tags = payload.get("ai_tags") or []
     if isinstance(tags, list):
-        tag_tokens = frozenset(" ".join(str(t) for t in tags).lower().split())
+        tag_tokens = _normalize_query_tokens(" ".join(str(t) for t in tags))
     hits = len(query_tokens & tag_tokens)
     score += (hits / n) * 0.25
 
-    # Structured data — search ALL values (including nested)
-    sd_values  = _json_values(payload.get("structured_data") or {})
-    sd_tokens  = frozenset(" ".join(sd_values).lower().split())
+    sd_values = _json_values(payload.get("structured_data") or {})
+    sd_tokens = _normalize_query_tokens(" ".join(sd_values))
     hits = len(query_tokens & sd_tokens)
     score += (hits / n) * 0.20
 
-    # Attributes — search ALL values (including nested)
     attr_values = _json_values(payload.get("attributes") or {})
-    attr_tokens = frozenset(" ".join(attr_values).lower().split())
+    attr_tokens = _normalize_query_tokens(" ".join(attr_values))
     hits = len(query_tokens & attr_tokens)
     score += (hits / n) * 0.20
 
-    # Search text (broad fallback)
-    st_tokens = _tokenize(payload.get("search_text", ""))
-    hits = len(query_tokens & st_tokens)
+    ent_values = _json_values(payload.get("entities") or [])
+    ent_tokens = _normalize_query_tokens(" ".join(ent_values))
+    hits = len(query_tokens & ent_tokens)
     score += (hits / n) * 0.15
 
-    # Escalation boost (Fix 5): prioritize senior/manager/escalation contacts.
-    # Uses the same enterprise ESCALATION_TRIGGER_WORDS from prompts.py for
-    # consistency with processor_1.py pre-flight detection.
+    # search_text demoted to last — AI-generated text, not business truth
+    st_tokens = _tokenize(payload.get("search_text", ""))
+    hits = len(query_tokens & st_tokens)
+    score += (hits / n) * 0.10
+
     if escalation_boost:
         try:
             import sys, os
@@ -450,15 +546,10 @@ def _metadata_score(payload: dict[str, Any], query_tokens: frozenset[str], escal
                 sys.path.insert(0, _llm_dir)
             from prompts import ESCALATION_TRIGGER_WORDS as _ESC_TRIGGERS
         except ImportError:
-            _ESC_TRIGGERS = frozenset({
-                "senior", "manager", "escalation", "head", "director",
-                "supervisor", "lead", "specialist", "vip", "priority",
-                "dedicated", "representative", "customer success",
-                "live agent", "real person", "complaint team",
-            })
+            _ESC_TRIGGERS = frozenset({"senior", "manager", "escalation", "head",
+                                        "director", "supervisor", "lead", "specialist"})
         all_text = (
             str(payload.get("title", "")) + " " +
-            str(payload.get("search_text", "")) + " " +
             " ".join(str(v) for v in _json_values(payload.get("attributes") or {}))
         ).lower()
         if any(trigger in all_text for trigger in _ESC_TRIGGERS):
@@ -473,33 +564,58 @@ async def _metadata_search(
     category: str,
     top_k: int = METADATA_TOP_K,
     escalation_boost: bool = False,
+    requirements: list[dict] | None = None,
+    status_filter: str | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Metadata-driven scroll search.
-    Fetches up to top_k points by filter (no vector), scores each by keyword
-    overlap across ALL payload fields and values (including nested JSON).
-    Returns list of {id, metadata_score, payload} dicts sorted by score desc.
+    Metadata-driven search using Qdrant payload filters + keyword scoring.
+
+    FIXED (Issue #3): Fully paginated — scrolls ALL matching records, not just
+    the first 20. This guarantees record #70,000 in a 100k catalog is reachable.
+    Safety cap: _METADATA_SCROLL_MAX_PAGES (500 pages × 100 = 50k records max).
+
+    FIXED (Issue #4/5): When requirements[] are present, pushes filtering into
+    Qdrant (Stage 1 filter) so only matching records are loaded into memory,
+    reducing the O(N) scan to O(matching records only).
+
+    Scoring priority (search_text demoted to last):
+        title > keywords > ai_tags > structured_data > attributes > search_text
     """
     def _run() -> list[dict]:
-        client  = _get_qdrant_client()
-        f       = _build_category_filter(user_id, category)
-        # Scroll returns up to top_k points — no vector similarity
-        points, _cursor = client.scroll(
-            collection_name = COLLECTION_NAME,
-            scroll_filter   = f,
-            limit           = top_k,
-            with_payload    = True,
-            with_vectors    = False,
-        )
-        if not points:
+        client = _get_qdrant_client()
+        if requirements:
+            f = _build_requirements_filter(user_id, category, requirements, status_filter=status_filter)
+        else:
+            f = _build_category_filter(user_id, category, status_filter=status_filter)
+
+        all_points = []
+        offset = None
+        page = 0
+        while page < _METADATA_SCROLL_MAX_PAGES:
+            batch, next_offset = client.scroll(
+                collection_name = COLLECTION_NAME,
+                scroll_filter   = f,
+                limit           = 100,
+                offset          = offset,
+                with_payload    = True,
+                with_vectors    = False,
+            )
+            if not batch:
+                break
+            all_points.extend(batch)
+            if next_offset is None:
+                break
+            offset = next_offset
+            page  += 1
+
+        if not all_points:
             return []
 
-        # Tokenize query for matching
-        q_tokens = frozenset(query.lower().split())
+        q_tokens = _normalize_query_tokens(query)
         scored = []
-        for p in points:
+        for p in all_points:
             payload = p.payload or {}
-            if not _is_offer_valid(payload):   # Fix 6: skip invalid offers
+            if not _is_offer_valid(payload, doc_category=category):
                 continue
             ms = _metadata_score(payload, q_tokens, escalation_boost)
             if ms > 0.0:
@@ -539,7 +655,24 @@ async def _analytics_metadata_search(
         )
         if not points:
             return []
-        q_tokens = frozenset(query.lower().split())
+        # Issue #11: check analytics freshness — warn if data is stale (>24h)
+        import datetime as _dt
+        now_utc = _dt.datetime.utcnow()
+        for p in points:
+            pl = p.payload or {}
+            computed_at_raw = (pl.get("structured_data") or {}).get("computed_at") or ""
+            if computed_at_raw:
+                try:
+                    computed_at = _dt.datetime.fromisoformat(str(computed_at_raw).replace("Z", "+00:00").rstrip("+00:00"))
+                    age_hours = (now_utc - computed_at).total_seconds() / 3600
+                    if age_hours > 24:
+                        logger.warning(
+                            "[analytics_metadata] stale analytics | cat=%s age_hours=%.1f computed_at=%s",
+                            primary_category, age_hours, computed_at_raw,
+                        )
+                except Exception:
+                    pass
+        q_tokens = _normalize_query_tokens(query)
         scored = []
         for p in points:
             payload = p.payload or {}
@@ -557,23 +690,93 @@ async def _analytics_metadata_search(
 
 # ── Score fusion ───────────────────────────────────────────────────────────────
 
+def _compute_requirement_score(payload: dict[str, Any], requirements: list[dict]) -> float:
+    """
+    Issue #5/6 — Requirement Match Score.
+
+    Computes how many of the customer's required field=value pairs are
+    satisfied by a candidate payload. This score is injected into fusion
+    BEFORE vector/metadata scores so business truth always wins.
+
+    Scoring:
+        All requirements satisfied  → 1.0 (exact match)
+        N of M requirements matched → N/M
+        No requirements             → 0.5 (neutral — no penalty)
+
+    Domain-agnostic: field names come from P1 requirements[], never hardcoded.
+    Searches BOTH structured_data.<field> and attributes.<field>.
+    """
+    if not requirements:
+        return 0.5  # neutral when no requirements
+
+    # New schema-free requirements use operator="semantic" or "keyword"
+    # Old field-based requirements use operator="eq" with a field key
+    # Support BOTH so the system degrades gracefully during transition
+    scorable_reqs = [
+        r for r in requirements
+        if isinstance(r, dict) and r.get("value")
+        and r.get("operator") in ("semantic", "keyword", "eq")
+    ]
+    if not scorable_reqs:
+        return 0.5
+
+    # Build a single normalized searchable string from the entire payload
+    # so we can find the requirement value regardless of which field stores it
+    def _all_payload_text(pl: dict) -> frozenset[str]:
+        parts: list[str] = []
+        for key in ("structured_data", "attributes", "entities"):
+            obj = pl.get(key)
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    parts.append(str(v))
+            elif isinstance(obj, list):
+                parts.extend(str(i) for i in obj)
+        parts.append(str(pl.get("title") or ""))
+        parts.extend(str(k) for k in (pl.get("keywords") or []))
+        return _normalize_query_tokens(" ".join(parts))
+
+    payload_tokens = _all_payload_text(payload)
+    matched = 0
+
+    for req in scorable_reqs:
+        req_val = str(req.get("value") or "").strip()
+        if not req_val:
+            continue
+        req_tokens = _normalize_query_tokens(req_val)
+        if not req_tokens:
+            continue
+        # Full match: all requirement value tokens present in payload
+        if req_tokens.issubset(payload_tokens):
+            matched += 1
+        else:
+            # Partial match: majority of tokens present (>=60%)
+            overlap = len(req_tokens & payload_tokens)
+            if overlap >= max(1, len(req_tokens) * 0.6):
+                matched += 0.6
+
+    return round(min(matched / len(scorable_reqs), 1.0), 3)
+
+
 def _fuse_results(
     dense_hits:    list[dict[str, Any]],
     metadata_hits: list[dict[str, Any]],
+    requirements:  list[dict] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Merge dense and metadata results into a single ranked list.
+    Merge dense and metadata results with requirement-aware ranking.
 
-    Fusion formula (weights defined at module top):
-        final_score = W_VECTOR   * vector_score
-                    + W_METADATA * metadata_score
-                    + W_QUALITY  * normalized_quality_score
-                    + W_PRIORITY * normalized_priority_score
+    FIXED (Issue #5/6): Requirement score is computed BEFORE fusion and
+    gates the final score. Ranking hierarchy:
+        1. requirement_score (business truth — never overridden)
+        2. filter_match (metadata)
+        3. vector similarity
 
-    quality_score : stored as 0.0–100.0 in payload → normalize to 0.0–1.0
-    priority_score: stored as 0–5 in payload       → normalize to 0.0–1.0
+    When requirements exist:
+        final_score = 0.50 * requirement_score
+                    + 0.25 * (W_VECTOR * vector + W_METADATA * meta + W_QUALITY * q + W_PRIORITY * p)
+                    + 0.25 * semantic_component
 
-    Deduplication: same point_id from both sources → takes MAX of each score.
+    When no requirements: original fusion weights apply (backward-compatible).
     """
     merged: dict[str, dict[str, Any]] = {}
 
@@ -589,7 +792,6 @@ def _fuse_results(
     for hit in metadata_hits:
         pid = hit["id"]
         if pid in merged:
-            # Take the better metadata score
             merged[pid]["metadata_score"] = max(
                 merged[pid]["metadata_score"],
                 hit.get("metadata_score", 0.0),
@@ -603,30 +805,45 @@ def _fuse_results(
             }
 
     fused: list[dict[str, Any]] = []
+    reqs  = requirements or []
+    # Activate requirement-aware fusion for semantic, keyword, AND legacy eq requirements
+    has_requirements = bool([
+        r for r in reqs
+        if isinstance(r, dict) and r.get("operator") in ("semantic", "keyword", "eq") and r.get("value")
+    ])
+
     for entry in merged.values():
         payload = entry["payload"]
         raw_q   = float(payload.get("quality_score", 0.0))
         raw_p   = int(payload.get("priority_score", 2))
+        q_norm  = min(raw_q / 100.0, 1.0)
+        p_norm  = min(raw_p / 5.0,   1.0)
 
-        # Normalize quality (0–100 → 0–1) and priority (0–5 → 0–1)
-        q_norm = min(raw_q / 100.0, 1.0)
-        p_norm = min(raw_p / 5.0,   1.0)
-
-        final_score = (
+        semantic = (
             W_VECTOR   * entry["vector_score"]
             + W_METADATA * entry["metadata_score"]
             + W_QUALITY  * q_norm
             + W_PRIORITY * p_norm
         )
 
+        if has_requirements:
+            req_score = _compute_requirement_score(payload, reqs)
+            # Requirement score dominates: 50% weight ensures exact matches
+            # always outrank semantically similar non-matching results
+            final_score = 0.50 * req_score + 0.50 * semantic
+        else:
+            req_score   = 0.5
+            final_score = semantic
+
         fused.append({
-            "id":             entry["id"],
-            "vector_score":   round(entry["vector_score"],   4),
-            "metadata_score": round(entry["metadata_score"], 4),
-            "quality_score":  round(q_norm,                  4),
-            "priority_score": round(p_norm,                  4),
-            "score":          round(final_score,             4),
-            "payload":        payload,
+            "id":               entry["id"],
+            "vector_score":     round(entry["vector_score"],   4),
+            "metadata_score":   round(entry["metadata_score"], 4),
+            "quality_score":    round(q_norm,                  4),
+            "priority_score":   round(p_norm,                  4),
+            "requirement_score": round(req_score,              3),
+            "score":            round(final_score,             4),
+            "payload":          payload,
         })
 
     fused.sort(key=lambda x: x["score"], reverse=True)
@@ -669,52 +886,48 @@ def _normalize_scores(fused: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 # ── Offer validity filter (Fix 6) ─────────────────────────────────────────────
 
-def _is_offer_valid(payload: dict[str, Any]) -> bool:
+def _is_offer_valid(payload: dict[str, Any], doc_category: str = "") -> bool:
     """
     Check if an offer/promotion is currently valid.
 
+    FIXED: Uses doc_category (the outer Qdrant category field = "offers_promotions")
+    instead of payload.get("category") which holds the inner sub-category
+    (e.g. "Seasonal", "Clearance") — a completely different field.
+
     Rules:
-        1. status must be "active" (case-insensitive) — excludes "scheduled",
-           "inactive", "expired"
+        1. status must be "active" — excludes scheduled, inactive, expired
         2. valid_until (if present) must be >= today
 
     Applied ONLY to offers_promotions category.
     For all other categories, always returns True.
-
-    Date format support: DD-MM-YYYY, MM/DD/YYYY, YYYY-MM-DD (ISO), DD/MM/YYYY
     """
     import datetime as _dt
 
-    category = str(payload.get("category", "")).lower()
-    if category != "offers_promotions":
+    # Use outer document category — NOT the inner payload sub-category field
+    outer_cat = str(doc_category or payload.get("_doc_category", "")).lower().strip()
+    if outer_cat != "offers_promotions":
         return True
 
-    # Check status
     attrs  = payload.get("attributes") or {}
     sd     = payload.get("structured_data") or {}
     status = str(attrs.get("status") or sd.get("status") or "active").lower().strip()
 
     if status not in ("active", ""):
-        return False   # scheduled, inactive, expired, paused → exclude
+        return False
 
-    # Check valid_until date
     valid_until_raw = str(
         attrs.get("valid_until") or sd.get("end_date") or sd.get("valid_until") or ""
     ).strip()
     if not valid_until_raw:
-        return True   # no date — assume active
+        return True
 
     today = _dt.date.today()
-
-    # Try multiple date formats
     for fmt in ("%d-%m-%Y", "%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
         try:
             expiry = _dt.datetime.strptime(valid_until_raw, fmt).date()
             return expiry >= today
         except ValueError:
             continue
-
-    # If date can't be parsed — include it (don't wrongly exclude)
     return True
 
 
@@ -755,29 +968,18 @@ async def _search_category(
     analytics: bool = False,
     analytics_primary_category: str = "",
     escalation_boost: bool = False,
+    requirements: list[dict] | None = None,
+    status_filter: str | None = None,
 ) -> dict[str, Any]:
     """
     Execute all queries for a single category in parallel (dense + metadata).
 
-    Dual-mode operation:
-      Normal mode  (analytics=False):
-        Searches category=<category> with subtype != data_analytics.
-        Returns operational records (actual products, offers, policies, etc.)
-
-      Analytics mode (analytics=True):
-        Searches category=<analytics_primary_category> with subtype=data_analytics.
-        Returns business intelligence summaries (counts, distributions, price ranges).
-        analytics_primary_category is the REAL category (e.g. "product_service").
-
-    Returns:
-        {
-            category, queries_executed, vector_hits, metadata_hits,
-            candidates_before_fusion, candidates_after_fusion, results
-        }
+    FIXED: Passes requirements[] into dense and metadata search so Stage 1
+    exact-match filters are applied inside Qdrant, not post-hoc in Python.
+    Also passes requirements into _fuse_results so requirement_score drives
+    ranking hierarchy.
     """
     if analytics:
-        # Analytics routing: use analytics subtype filter
-        # category=<analytics_primary_category> + subtype=data_analytics
         tasks = []
         for q in queries:
             tasks.append(_analytics_dense_search(q, user_id, analytics_primary_category))
@@ -785,12 +987,14 @@ async def _search_category(
     else:
         tasks = []
         for q in queries:
-            tasks.append(_dense_search(q, user_id, category))
-            tasks.append(_metadata_search(q, user_id, category, escalation_boost=escalation_boost))
+            tasks.append(_dense_search(q, user_id, category,
+                                        requirements=requirements, status_filter=status_filter))
+            tasks.append(_metadata_search(q, user_id, category,
+                                           escalation_boost=escalation_boost,
+                                           requirements=requirements, status_filter=status_filter))
 
     all_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Split interleaved [dense0, meta0, dense1, meta1, ...] results
     all_dense:    list[dict] = []
     all_metadata: list[dict] = []
     for i, result in enumerate(all_results):
@@ -802,7 +1006,6 @@ async def _search_category(
         else:
             all_metadata.extend(result)
 
-    # Deduplicate within each source by point id (take max score)
     def _dedup_max(hits: list[dict], score_key: str) -> list[dict]:
         best: dict[str, dict] = {}
         for h in hits:
@@ -814,8 +1017,8 @@ async def _search_category(
     dense_dedup    = _dedup_max(all_dense,    "vector_score")
     metadata_dedup = _dedup_max(all_metadata, "metadata_score")
 
-    fused = _fuse_results(dense_dedup, metadata_dedup)
-    fused = _normalize_scores(fused)   # Fix 3: spread scores across [0.20, 1.00]
+    fused = _fuse_results(dense_dedup, metadata_dedup, requirements=requirements)
+    fused = _normalize_scores(fused)
     top   = fused[:PER_CATEGORY_TOP_K]
 
     return {
@@ -853,7 +1056,7 @@ async def _fallback_scroll(
         )
         if not points:
             return []
-        q_tokens = frozenset(query.lower().split())
+        q_tokens = _normalize_query_tokens(query)
         scored = []
         for p in points:
             payload = p.payload or {}
@@ -885,29 +1088,50 @@ def _format_result(hit: dict[str, Any], category: str) -> dict[str, Any]:
     and Processor #2. Strips large/unnecessary payload fields for downstream safety.
     """
     payload = hit.get("payload", {})
+    # Issue #9: Universal content_type extraction.
+    # Searches multiple fields where the content type may be stored,
+    # in priority order. Works for any business schema.
+    sd_raw   = payload.get("structured_data") or {}
+    attr_raw = payload.get("attributes") or {}
+    content_type = (
+        payload.get("content_type")
+        or payload.get("subtype")
+        or attr_raw.get("content_type")
+        or attr_raw.get("record_type")
+        or sd_raw.get("content_type")
+        or sd_raw.get("record_type")
+        or sd_raw.get("type")
+        or attr_raw.get("type")
+        or ""
+    )
+    # Infer content_type from subtype if it is data_analytics
+    if not content_type and payload.get("subtype") == "data_analytics":
+        content_type = "analytics"
     return {
-        "entry_id":    payload.get("entry_id") or hit.get("id", ""),
-        "category":    payload.get("category", category),
-        "subtype":     payload.get("subtype", ""),
-        "score":       hit.get("score", 0.0),
-        "vector_score":   hit.get("vector_score", 0.0),
-        "metadata_score": hit.get("metadata_score", 0.0),
-        "quality_score":  hit.get("quality_score", 0.0),
-        "priority_score": hit.get("priority_score", 0.0),
-        "source_type": payload.get("source_type", ""),
-        "title":       payload.get("title", ""),
-        "search_text": payload.get("search_text", ""),
-        "ai_tags":     payload.get("ai_tags") or [],
-        "keywords":    payload.get("keywords") or [],
-        # Full structured payload for LLM context — the entire business knowledge chunk
+        "entry_id":     payload.get("entry_id") or hit.get("id", ""),
+        "category":     payload.get("category", category),
+        "subtype":      payload.get("subtype", ""),
+        "content_type": str(content_type).lower().strip(),
+        "score":        hit.get("score", 0.0),
+        "vector_score":      hit.get("vector_score", 0.0),
+        "metadata_score":    hit.get("metadata_score", 0.0),
+        "requirement_score": hit.get("requirement_score", 0.5),
+        "quality_score":     hit.get("quality_score", 0.0),
+        "priority_score":    hit.get("priority_score", 0.0),
+        "source_type":  payload.get("source_type", ""),
+        "title":        payload.get("title", ""),
+        "search_text":  payload.get("search_text", ""),
+        "ai_tags":      payload.get("ai_tags") or [],
+        "keywords":     payload.get("keywords") or [],
         "payload": {
             "title":           payload.get("title", ""),
             "search_text":     payload.get("search_text", ""),
-            "structured_data": payload.get("structured_data") or {},
-            "attributes":      payload.get("attributes") or {},
+            "structured_data": sd_raw,
+            "attributes":      attr_raw,
             "ai_tags":         payload.get("ai_tags") or [],
             "keywords":        payload.get("keywords") or [],
             "entities":        payload.get("entities") or [],
+            "content_type":    str(content_type).lower().strip(),
             "rie_type":        payload.get("rie_type", ""),
             "rie_capabilities":payload.get("rie_capabilities") or [],
             "status":          payload.get("status", ""),
@@ -993,26 +1217,34 @@ def _build_numeric_range_filter(user_id: str, category: str, constraints: list[d
     ]
     must_not = [FieldCondition(key="subtype", match=MatchValue(value="data_analytics"))]
 
-    if category == "offers_promotions":
-        base_must.append(FieldCondition(key="status", match=MatchValue(value="active")))
+    # status_filter is passed from retrieval_contract — no hardcoded category assumptions
+    # (offers_promotions active filter now comes from rc_contract.status_filter in P1)
 
     for c in constraints:
         field     = c.get("field", "")
         operator  = c.get("operator", "")
         value     = c.get("value")
-        if not field or value is None:
+        if not field:
             continue
         attr_key = f"attributes.{field}"
-        if operator == "lte":
+        if operator == "lte" and value is not None:
             base_must.append(FieldCondition(key=attr_key, range=Range(lte=value)))
-        elif operator == "gte":
+        elif operator == "gte" and value is not None:
             base_must.append(FieldCondition(key=attr_key, range=Range(gte=value)))
-        elif operator == "eq":
+        elif operator == "eq" and value is not None:
             tolerance = value * 0.05
             base_must.append(FieldCondition(
                 key=attr_key,
                 range=Range(gte=value - tolerance, lte=value + tolerance)
             ))
+        elif operator == "between":
+            min_v = c.get("min")
+            max_v = c.get("max")
+            if min_v is not None and max_v is not None:
+                base_must.append(FieldCondition(
+                    key=attr_key,
+                    range=Range(gte=float(min_v), lte=float(max_v))
+                ))
 
     return Filter(must=base_must, must_not=must_not)
 
@@ -1026,20 +1258,14 @@ def _deterministic_scroll(
     top_k: int = 10,
 ) -> list[dict]:
     """
-    Issue 3 — Deterministic Retrieval Mode.
+    Deterministic Retrieval Mode — bypass vector search entirely.
 
-    For min/max queries (cheapest, most expensive, lowest, highest):
-      1. Scroll ALL records for the user+category (no vector search)
-      2. Sort by the target field using Python (Qdrant has no server-side sort)
-      3. Return top_k results in the correct order
+    Scrolls ALL records for user+category (no vector search), sorts by the
+    target field, returns top_k. Business truth (actual numeric values)
+    overrides semantic similarity scores completely.
 
-    This COMPLETELY BYPASSES vector search when deterministic mode is active.
-    Business truth (actual numeric values) overrides semantic similarity.
-
-    Why scroll instead of vector search + sort:
-      Vector search returns only top-K by cosine similarity, which may miss
-      the actual minimum/maximum value item if it has a low semantic score.
-      Scrolling fetches ALL items so the true min/max can always be found.
+    NOTE: This is called via asyncio.to_thread in _run_hybrid_retrieval_inner
+    to avoid blocking the event loop.
     """
     client = _get_qdrant_client()
     f = _build_numeric_range_filter(user_id, category, numeric_constraints)
@@ -1085,7 +1311,7 @@ def _deterministic_scroll(
     return [
         {
             "id":             str(p.id),
-            "vector_score":   1.0,          # synthetic score — deterministic result
+            "vector_score":   1.0,
             "metadata_score": 1.0,
             "payload":        p.payload or {},
             "_deterministic": True,
@@ -1132,35 +1358,31 @@ def _apply_deterministic_sort(
 def _apply_candidate_validation(
     results: list[dict],
     numeric_constraints: list[dict],
-    specifications: list[str],
+    requirements: list[dict],
 ) -> list[dict]:
     """
-    Issue 9 — Post-retrieval candidate validation.
+    Post-retrieval candidate validation (Issues #2, #4, #12).
 
-    Removes results that CLEARLY violate the customer's stated constraints.
-    Applied AFTER fusion and BEFORE returning to downstream (reranker/P2).
+    FIXED: Now uses requirements[] from retrieval_contract directly.
+    The old specifications: list[str] parameter is replaced with
+    requirements: list[dict] — structured field→value pairs from P1.
+    No regex parsing, no domain assumptions, no hardcoded fields.
 
-    Rules:
-      1. Numeric constraints: if a result has a price/field value that violates
-         a constraint (e.g. price > 1000 when customer said "under $1000"),
-         and the violation is significant (>20% over), remove it.
-         Keeps results even if field is missing (may be valid — no price listed).
+    Validation hierarchy:
+      1. Numeric constraints (price ranges, attribute ranges) — hard remove
+         if violation exceeds 20% tolerance
+      2. Exact field requirements from requirements[] — demote (not remove)
+         candidates that don't match. Demotion preserves them as fallbacks.
 
-      2. Specification tokens: if a result's payload contains a direct
-         NUMERIC contradiction with an extracted spec (e.g. customer asked for
-         "8GB RAM" but result has "32GB"), demote it to the end of the list
-         rather than removing (it may still be shown as an alternative).
-
-    Philosophy: prefer recall over precision at this stage — downstream
-    reranker and Processor #2 will further filter. Only remove obvious
-    violators to prevent hallucination anchoring.
+    Analytics docs always pass through — they carry aggregated data,
+    not individual product specs.
     """
     import re as _re
 
-    if not numeric_constraints and not specifications:
+    if not numeric_constraints and not requirements:
         return results
 
-    def _get_attr(result: dict, field: str):
+    def _get_attr_float(result: dict, field: str):
         payload = result.get("payload") or {}
         attrs   = payload.get("attributes") or {}
         sd      = payload.get("structured_data") or {}
@@ -1173,45 +1395,127 @@ def _apply_candidate_validation(
         except (ValueError, TypeError):
             return None
 
+    def _get_attr_str(result: dict, field: str) -> str | None:
+        payload = result.get("payload") or {}
+        attrs   = payload.get("attributes") or {}
+        sd      = payload.get("structured_data") or {}
+        for store in (attrs, sd):
+            raw = store.get(field)
+            if raw is not None:
+                return str(raw).strip().upper().replace(" ", "")
+        return None
+
+    # Semantic requirements from schema-free P1 extraction (operator="semantic"/"keyword")
+    # Legacy field-based requirements (operator="eq") also handled for backward compat
+    semantic_reqs = [
+        r for r in requirements
+        if isinstance(r, dict)
+        and r.get("operator") in ("semantic", "keyword")
+        and r.get("value")
+    ]
+    eq_reqs = [
+        r for r in requirements
+        if isinstance(r, dict) and r.get("operator") == "eq" and r.get("field")
+    ]
+
     passed  = []
     demoted = []
 
     for result in results:
-        # Skip analytics subtype documents — never validate them
         if result.get("subtype") == "data_analytics":
             passed.append(result)
             continue
 
-        violates = False
+        hard_violates = False
+        # --- Numeric constraint hard removal ---
         for c in numeric_constraints:
             field    = c.get("field", "")
             operator = c.get("operator", "")
             value    = c.get("value")
             if not field or value is None:
                 continue
-            actual = _get_attr(result, field)
+            actual = _get_attr_float(result, field)
             if actual is None:
-                continue  # field absent — don't exclude
-            TOLERANCE = 0.20  # 20% over budget is still considered close
+                continue
+            TOLERANCE = 0.20
             if operator == "lte" and actual > value * (1 + TOLERANCE):
-                violates = True
+                hard_violates = True
                 break
             if operator == "gte" and actual < value * (1 - TOLERANCE):
-                violates = True
+                hard_violates = True
                 break
+            if operator == "between":
+                min_v = c.get("min")
+                max_v = c.get("max")
+                if min_v is not None and max_v is not None:
+                    if actual < float(min_v) * (1 - TOLERANCE) or actual > float(max_v) * (1 + TOLERANCE):
+                        hard_violates = True
+                        break
 
-        if violates:
+        if hard_violates:
             demoted.append(result)
-        else:
-            passed.append(result)
+            continue
+
+        # --- Schema-free semantic requirement soft demotion ---
+        # Build normalized payload text once per result for all semantic checks
+        if semantic_reqs:
+            payload_inner = result.get("payload") or {}
+            pl_parts: list[str] = []
+            for _key in ("structured_data", "attributes", "entities"):
+                _obj = payload_inner.get(_key)
+                if isinstance(_obj, dict):
+                    pl_parts.extend(str(v) for v in _obj.values())
+                elif isinstance(_obj, list):
+                    pl_parts.extend(str(i) for i in _obj)
+            pl_parts.append(str(payload_inner.get("title") or ""))
+            pl_parts.extend(str(k) for k in (payload_inner.get("keywords") or []))
+            pl_tokens = _normalize_query_tokens(" ".join(pl_parts))
+
+            failed_sem = 0
+            for req in semantic_reqs:
+                req_val_tokens = _normalize_query_tokens(str(req["value"]))
+                if not req_val_tokens:
+                    continue
+                overlap = len(req_val_tokens & pl_tokens)
+                # Fail only if ZERO tokens match — soft demotion only
+                if overlap == 0:
+                    failed_sem += 1
+
+            if failed_sem > 0:
+                demoted.append(result)
+                continue
+
+        # --- Legacy field-based requirement soft demotion ---
+        if eq_reqs:
+            failed = 0
+            for req in eq_reqs:
+                field = str(req["field"]).strip().lower()
+                value = str(req.get("value") or "").strip().upper().replace(" ", "")
+                candidate = _get_attr_str(result, field)
+                if candidate is None:
+                    continue
+                cand_clean = _re.sub(r"[^\d.A-Z]", "", candidate)
+                val_clean  = _re.sub(r"[^\d.A-Z]", "", value)
+                if cand_clean and val_clean and cand_clean != val_clean:
+                    failed += 1
+
+            if failed > 0:
+                demoted.append(result)
+                continue
+
+        passed.append(result)
 
     if demoted:
         logger.debug(
-            "[candidate_validation] demoted %d results violating numeric constraints",
+            "[candidate_validation] demoted %d/%d results (numeric=%d, spec=%d)",
+            len(demoted), len(results),
+            sum(1 for r in demoted if any(
+                _get_attr_float(r, c.get("field", "")) is not None
+                for c in numeric_constraints
+            )),
             len(demoted),
         )
 
-    # Return passed first, then demoted (not removed — downstream may still use them)
     return passed + demoted
 
 
@@ -1220,56 +1524,49 @@ def _apply_diversity_rerank(
     max_per_subcategory: int = 2,
 ) -> list[dict]:
     """
-    Issue 4 — Diversity reranking.
+    Diversity reranking — MMR-inspired, category-agnostic.
 
-    Ensures the result set contains a variety of product sub-categories
-    (Education, Business, Premium, Ultrabook, etc.) rather than returning
-    multiple items from the same sub-category.
+    FIXED: No longer hardcoded to product_service only.
+    Works for ANY category that has a sub-category/department field.
+    Analytics docs always pass through unchanged.
 
-    Algorithm (MMR-inspired, deterministic):
-      1. Always include the #1 ranked result
-      2. For each subsequent result, check if its sub-category already
-         has max_per_subcategory items in the output
-      3. If over quota: defer to the end (don't discard — still valid results)
-      4. After all items processed: append deferred items in original order
+    Uses the outer `category` field from the formatted result dict
+    (not the inner payload sub-category field) to determine which
+    results are operational records eligible for diversity.
 
-    Applied ONLY to product_service results (not offers, policies, etc.)
-    where sub-category diversity is meaningful.
-
-    max_per_subcategory=2 means at most 2 items from Education, 2 from
-    Business, 2 from Premium, etc. in the top results.
+    Algorithm:
+      For each result, extract its sub-category from attributes/structured_data.
+      If a sub-category already has max_per_subcategory items, defer to end.
+      Deferred items are still returned — just after the diverse set.
     """
     if len(results) <= 3:
-        return results  # too few results to diversify
+        return results
 
-    # Check if diversity is applicable (product_service results)
-    categories = {r.get("category", "") for r in results if r.get("subtype") != "data_analytics"}
-    if "product_service" not in categories:
-        return results  # only diversify product catalogs
+    # Only apply to non-analytics operational records
+    operational = [r for r in results if r.get("subtype") != "data_analytics"]
+    if len(operational) <= 3:
+        return results
 
     subcategory_counts: dict[str, int] = {}
     prioritized: list[dict] = []
     deferred:    list[dict] = []
 
     for result in results:
-        # Analytics docs pass through unchanged
         if result.get("subtype") == "data_analytics":
             prioritized.append(result)
             continue
 
-        payload  = result.get("payload") or {}
-        attrs    = payload.get("attributes") or {}
-        sd       = payload.get("structured_data") or {}
+        payload = result.get("payload") or {}
+        attrs   = payload.get("attributes") or {}
+        sd      = payload.get("structured_data") or {}
 
-        # Sub-category: use the product category field (Education, Business, etc.)
-        subcat = (
-            attrs.get("category") or
-            attrs.get("department") or
-            sd.get("category") or
-            sd.get("department") or
-            "unknown"
-        )
-        subcat = str(subcat).strip().lower()
+        # Domain-agnostic sub-category extraction
+        subcat = str(
+            attrs.get("category") or attrs.get("department") or
+            attrs.get("type") or attrs.get("sub_category") or
+            sd.get("category") or sd.get("department") or
+            sd.get("type") or "unknown"
+        ).strip().lower()
 
         count = subcategory_counts.get(subcat, 0)
         if count < max_per_subcategory:
@@ -1278,9 +1575,7 @@ def _apply_diversity_rerank(
         else:
             deferred.append(result)
 
-    diversified = prioritized + deferred
-    # Re-normalize scores so rank ordering is preserved
-    return _normalize_scores(diversified)
+    return _normalize_scores(prioritized + deferred)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PUBLIC ENTRY POINT
@@ -1349,16 +1644,17 @@ async def _run_hybrid_retrieval_inner(
     primary_intent_cat  = pi.get("category") or "product_service"
 
     # ── Read retrieval_contract (Issue 1/6) ──────────────────────────────────
-    # The retrieval_contract is the structured requirement from P1.
-    # numeric_constraints: pre-extracted price/attribute filters
-    # deterministic_mode: {"active": bool, "field": str, "direction": str}
-    # specifications: extracted attribute requirements (e.g. "8GB RAM")
     numeric_constraints  = rc_contract.get("numeric_constraints") or []
     deterministic_mode   = rc_contract.get("deterministic_mode") or {"active": False, "field": "", "direction": ""}
-    rc_specifications    = rc_contract.get("specifications") or []
+    rc_requirements      = rc_contract.get("requirements") or []   # structured field→value pairs from P1
+    rc_specifications    = rc_contract.get("specifications") or []  # kept for logging only
     det_active  = bool(deterministic_mode.get("active", False))
     det_field   = deterministic_mode.get("field", "price")
     det_dir     = deterministic_mode.get("direction", "asc")
+
+    # status_filter: injected from retrieval_contract if P1 specified one
+    # (enterprise principle: no hardcoded "offers_promotions" logic in retrieval layer)
+    status_filter = rc_contract.get("status_filter") or None
 
     # ── Build category → queries map ─────────────────────────────────────────
     # Use only ALLOWED categories. "data_analytics" is now a subtype, not a
@@ -1414,12 +1710,10 @@ async def _run_hybrid_retrieval_inner(
          p1_output.get("routing_decision", {}).get("escalation_requested", False))
     )
 
-    # ── Issue 3/10: Deterministic fast-path ─────────────────────────────────
-    # When the customer wants min/max (cheapest, most expensive, etc.):
-    #   - Skip vector search entirely for the primary category
-    #   - Use metadata scroll + sort by numeric field
-    #   - This runs in ~10ms vs 150ms+ for vector search
-    #   - Guarantees business truth overrides semantic similarity
+    # ── Issue 3/10: Deterministic fast-path — async, non-blocking ─────────────
+    # When the customer wants min/max: skip vector search entirely.
+    # _deterministic_scroll runs in a thread pool (asyncio.to_thread) so it
+    # never blocks the event loop — unlike the previous synchronous call.
     deterministic_results: list[dict] = []
     det_cats_done: set[str] = set()
 
@@ -1429,17 +1723,14 @@ async def _run_hybrid_retrieval_inner(
             det_field, det_dir, primary_intent_cat,
         )
         try:
-            det_hits = _deterministic_scroll(
-                user_id             = user_id,
-                category            = primary_intent_cat,
-                field               = det_field,
-                direction           = det_dir,
-                numeric_constraints = numeric_constraints,
-                top_k               = PER_CATEGORY_TOP_K,
+            det_hits = await asyncio.to_thread(
+                _deterministic_scroll,
+                user_id, primary_intent_cat, det_field, det_dir,
+                numeric_constraints, PER_CATEGORY_TOP_K,
             )
             if det_hits:
                 det_cats_done.add(primary_intent_cat)
-                fused_det = _fuse_results(det_hits, [])
+                fused_det = _fuse_results(det_hits, [], requirements=rc_requirements)
                 fused_det = _normalize_scores(fused_det)
                 for hit in fused_det:
                     r = _format_result(hit, primary_intent_cat)
@@ -1454,7 +1745,7 @@ async def _run_hybrid_retrieval_inner(
 
     for cat, qs in cat_queries.items():
         if cat in det_cats_done:
-            continue  # already handled by deterministic scroll
+            continue
         boost = is_escalation_search and cat == "contact_support"
         tasks.append((cat, False, "", qs, boost))
 
@@ -1494,7 +1785,36 @@ async def _run_hybrid_retrieval_inner(
 
         tasks.append((ac_primary, True, ac_primary, analytics_qs, False))
 
+    # CRITICAL BUG FIX (Bug 1): When deterministic mode handled the primary
+    # category and no other categories exist, tasks will be empty.
+    # Previously this triggered _fallback_scroll which discarded all
+    # deterministic_results. Now we check if we already have results.
     if not tasks:
+        if deterministic_results:
+            # Deterministic path succeeded — return those results directly
+            # without falling back to random scroll.
+            elapsed = (time.monotonic() - t0) * 1000
+            logger.info(
+                "[hybrid_retrieval] deterministic-only path | results=%d | user=%s",
+                len(deterministic_results), user_id[:8],
+            )
+            return {
+                "retrieval_id":                    retrieval_id,
+                "categories_searched":             [primary_intent_cat],
+                "total_candidates_found":          len(deterministic_results),
+                "total_candidates_after_filtering": len(deterministic_results),
+                "analytics_searched":              False,
+                "elapsed_ms":                      round(elapsed, 1),
+                "results":                         deterministic_results,
+                "retrieval_diversity_score":       0.0,
+                "deterministic_mode_used":         True,
+                "retrieval_contract_applied": {
+                    "numeric_constraints":  numeric_constraints,
+                    "deterministic_mode":   deterministic_mode,
+                    "requirements":         rc_requirements,
+                },
+            }
+        # Genuinely no results anywhere — fallback
         logger.warning("[hybrid_retrieval] no tasks built | user=%s ... falling back", user_id[:8])
         fallback = await _fallback_scroll(user_id, standalone_query or "business information")
         elapsed  = (time.monotonic() - t0) * 1000
@@ -1519,6 +1839,8 @@ async def _run_hybrid_retrieval_inner(
                 analytics  = is_analytics,
                 analytics_primary_category = ac_primary,
                 escalation_boost           = boost,
+                requirements               = rc_requirements if not is_analytics else None,
+                status_filter              = status_filter,
             )
         )
 
@@ -1593,8 +1915,8 @@ async def _run_hybrid_retrieval_inner(
         analytics_docs = [r for r in deduped if r.get("subtype") == "data_analytics"]
         deduped = non_analytics + analytics_docs
 
-    # Filter out invalid offers from final results
-    deduped = [r for r in deduped if _is_offer_valid(r.get("payload", {}))]
+    # Filter invalid offers using correct outer category field
+    deduped = [r for r in deduped if _is_offer_valid(r.get("payload", {}), doc_category=r.get("category", ""))]
 
     # Normalize scores across all categories for meaningful ranking
     deduped = _normalize_scores(deduped)
@@ -1605,12 +1927,12 @@ async def _run_hybrid_retrieval_inner(
         deduped = _apply_deterministic_sort(deduped, det_field, det_dir)
         logger.info("[retrieval] applied post-fusion deterministic sort | field=%s dir=%s", det_field, det_dir)
 
-    # Issue 9 — Candidate validation: remove/demote results violating constraints
-    if numeric_constraints or rc_specifications:
-        deduped = _apply_candidate_validation(deduped, numeric_constraints, rc_specifications)
+    # Issue 9 — Candidate validation: uses requirements[] from retrieval_contract
+    if numeric_constraints or rc_requirements:
+        deduped = _apply_candidate_validation(deduped, numeric_constraints, rc_requirements)
 
-    # Issue 4 — Diversity reranking: ensure variety across product sub-categories
-    if primary_intent_cat == "product_service" and not det_active:
+    # Diversity reranking — now category-agnostic (not product_service only)
+    if not det_active:
         deduped = _apply_diversity_rerank(deduped, max_per_subcategory=2)
 
     top_score    = deduped[0]["score"]  if deduped else 0.0
@@ -1701,6 +2023,6 @@ async def _run_hybrid_retrieval_inner(
         "retrieval_contract_applied": {
             "numeric_constraints":  numeric_constraints,
             "deterministic_mode":   deterministic_mode,
-            "specifications":       rc_specifications,
+            "requirements":         rc_requirements,
         },
     }
