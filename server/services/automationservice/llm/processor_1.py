@@ -1006,76 +1006,101 @@ def _deduplicate_queries(queries: list[str]) -> list[str]:
 
 # ── Requirement extraction engine — SCHEMA-FREE (Issues #1, #2, #3) ────────────
 
+# ── Semantic type → candidate field name aliases ──────────────────────────────
+# Maps a semantic requirement type to the most common field name aliases
+# businesses use to store that concept. The retrieval layer searches ALL aliases
+# in the payload (attributes + structured_data) and takes the first hit.
+# This is what makes the system work across ANY business schema without
+# hardcoding field names per business.
+_SEMANTIC_TYPE_FIELD_ALIASES: dict[str, list[str]] = {
+    "capacity":           ["ram", "memory", "storage", "capacity", "disk", "drive",
+                           "hdd", "ssd", "nvme", "space", "size"],
+    "performance":        ["processor", "cpu", "speed", "frequency", "clock",
+                           "bandwidth", "throughput", "performance"],
+    "screen_size":        ["screen", "display", "screen_size", "display_size",
+                           "size", "diagonal"],
+    "display_resolution": ["resolution", "display", "screen", "panel"],
+    "area":               ["area", "size", "sq_ft", "sqft", "sqm", "floor_area"],
+    "duration":           ["duration", "tenure", "period", "term", "validity",
+                           "expiry", "length"],
+    "count":              ["count", "quantity", "users", "seats", "rooms",
+                           "bedrooms", "floors", "units", "licenses"],
+    "weight":             ["weight", "mass", "payload", "load"],
+    "dosage":             ["dosage", "dose", "strength", "concentration",
+                           "volume", "quantity"],
+    "color":              ["color", "colour", "finish", "shade", "hue"],
+    "size":               ["size", "fit", "dimension", "variant"],
+    "quality_level":      ["tier", "grade", "level", "plan", "category",
+                           "class", "type"],
+    "audience":           ["audience", "target", "level", "tier", "plan_type",
+                           "user_type"],
+    "billing_cycle":      ["billing", "cycle", "plan", "subscription",
+                           "period", "frequency"],
+    "storage_type":       ["storage", "drive", "disk", "type", "storage_type"],
+    "connectivity":       ["connectivity", "network", "wireless", "connection",
+                           "interface"],
+    "keyword":            [],
+}
+
+
 def _extract_requirements(specifications: list[str]) -> list[dict]:
     """
-    Extract semantic requirements from raw specification strings.
+    Extract structured requirements from raw specification strings.
 
-    ENTERPRISE ARCHITECTURE (Issues #1, #2, #3):
-    This extractor is SCHEMA-FREE — it NEVER guesses field names like
-    "ram", "memory", "storage". Different businesses store the same
-    concept under completely different field names:
-        Laptop company  : {"ram": "16GB"}
-        Hospital system : {"memory_capacity": "16GB"}
-        IoT platform    : {"technical_specs": {"primary_memory": "16GB"}}
+    ENTERPRISE ARCHITECTURE — FIELD-MAPPED (Issues #1, #2, #3, #4):
+    Each requirement now carries:
+        type      : semantic category (capacity, storage_type, color, etc.)
+        field     : primary field alias to search in payload (e.g. "ram", "storage")
+        fields    : ALL field aliases to try (schema-resilient multi-key search)
+        value     : normalized value string (e.g. "8GB", "SSD", "RED")
+        raw_value : original value text
+        raw_spec  : original specification string
+        operator  : "eq" for exact, "keyword" for free-text
 
-    Instead, we extract SEMANTIC INTENT:
-        type  : what KIND of requirement (memory, storage, capacity, quality_level, etc.)
-        value : the ACTUAL VALUE the customer wants ("16GB", "premium", "512GB SSD")
-        raw   : original text for downstream use
+    The retrieval layer uses fields[] to search across ALL possible payload
+    field names — so "8GB RAM" works whether the business stores it as
+    {"ram": "8GB"}, {"memory": "8GB"}, {"capacity": "8GB"}, etc.
 
-    The retrieval layer uses these to:
-      1. Enrich vector queries ("16GB" becomes part of the search text)
-      2. Score candidates by full-text value presence anywhere in payload
-      3. NOT by hard MatchValue on a specific field key
-
-    This makes the system work identically for:
-      E-commerce, Hospitals, Hotels, Law Firms, Schools, SaaS, Insurance,
-      Manufacturing, Real Estate — ANY future business.
-
-    Works for qualitative requirements too:
-        "beginner course"   → {type: "skill_level",    value: "beginner"}
-        "affordable option" → {type: "budget_level",   value: "affordable"}
-        "premium package"   → {type: "quality_level",  value: "premium"}
-        "student plan"      → {type: "audience",       value: "student"}
+    Works for any business: E-commerce, Hospitals, Hotels, SaaS, Finance,
+    Manufacturing, Real Estate — field aliases cover universal vocabulary.
     """
     import re as _re
     requirements: list[dict] = []
     seen: set[str] = set()
 
-    # Semantic type patterns — ordered by specificity
     # (regex, semantic_type, value_group)
-    # Value group 1 always contains the primary value to extract
     SEMANTIC_PATTERNS: list[tuple] = [
-        # Memory/capacity values: "16GB", "8 GB", "16-GB", "16 gigabytes"
+        # Memory/storage capacity: "16GB", "8 GB", "512GB SSD", "1TB"
         (_re.compile(r'(\d+\s*(?:gb|tb|mb|pb|gigabyte|terabyte|megabyte)s?)', _re.I), "capacity", 1),
         # Speed/frequency: "3.2GHz", "100Mbps"
         (_re.compile(r'(\d+(?:\.\d+)?\s*(?:ghz|mhz|mbps|gbps|fps|hz))', _re.I), "performance", 1),
-        # Screen/display: "15 inch", '15"', "4K", "1080p", "FHD", "UHD"
-        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:inch|in|"|\'))', _re.I), "screen_size", 1),
-        (_re.compile(r'(4k|2k|1080p|720p|fhd|uhd|qhd|retina)', _re.I), "display_resolution", 1),
-        # Dimensions/area: "1200 sq ft", "200 sqm"
+        # Screen size: "15 inch", '15.6"'
+        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:inch|in|"))', _re.I), "screen_size", 1),
+        # Display resolution: "4K", "1080p", "FHD"
+        (_re.compile(r'\b(4k|2k|1080p|720p|fhd|uhd|qhd|retina)\b', _re.I), "display_resolution", 1),
+        # Area: "1200 sq ft"
         (_re.compile(r'(\d+(?:\.\d+)?\s*(?:sq\s*ft|sqft|sq\s*m|sqm|m2|ft2))', _re.I), "area", 1),
-        # Duration: "2 year", "30 day", "6 month"
+        # Duration: "2 year", "30 day"
         (_re.compile(r'(\d+\s*(?:year|month|week|day|hour|yr|mo)s?)', _re.I), "duration", 1),
-        # Quantity/count: "3 bedrooms", "2 bathrooms", "50 users"
-        (_re.compile(r'(\d+)\s*(bedroom|bathroom|floor|seat|door|wheel|room|unit|user|person|people|seat|license)', _re.I), "count", 1),
+        # Quantity/count: "3 bedrooms", "50 users"
+        (_re.compile(r'(\d+)\s*(bedroom|bathroom|floor|seat|door|wheel|room|unit|user|person|people|license)', _re.I), "count", 1),
         # Weight: "5kg", "10 lbs"
         (_re.compile(r'(\d+(?:\.\d+)?\s*(?:kg|lb|lbs|gram|g|oz|ton)s?)', _re.I), "weight", 1),
-        # Dosage/medical: "500mg", "10ml"
+        # Dosage: "500mg", "10ml"
         (_re.compile(r'(\d+(?:\.\d+)?\s*(?:mg|ml|mcg|ug|iu|units?))', _re.I), "dosage", 1),
-        # Color: "red", "colour red", "color blue"
+        # Color
         (_re.compile(r'\b(?:colou?r\s+)?(red|blue|green|black|white|silver|gold|grey|gray|pink|purple|yellow|orange|brown|navy)\b', _re.I), "color", 1),
-        # Size labels: "XL", "large", "small", "medium", "king", "queen"
+        # Size labels
         (_re.compile(r'\b(xs|small|medium|large|xl|xxl|xxxl|king|queen|twin|full|double|single)\b', _re.I), "size", 1),
-        # Quality level: "premium", "basic", "standard", "enterprise", "professional"
+        # Quality level
         (_re.compile(r'\b(premium|luxury|deluxe|elite|pro|professional|enterprise|advanced|basic|standard|entry.?level|budget|affordable|economy)\b', _re.I), "quality_level", 1),
-        # Audience/persona: "student", "beginner", "expert"
+        # Audience/persona
         (_re.compile(r'\b(student|beginner|intermediate|advanced|expert|senior|junior|professional|business|personal|family|corporate)\b', _re.I), "audience", 1),
-        # Billing cycle: "annual", "monthly", "quarterly"
+        # Billing cycle
         (_re.compile(r'\b(annual|monthly|quarterly|weekly|yearly|one.?time|lifetime)\b', _re.I), "billing_cycle", 1),
-        # Storage media type: "SSD", "HDD", "NVMe" — value only, no field guess
+        # Storage media type — MUST come AFTER capacity to avoid double-counting "512GB SSD"
         (_re.compile(r'\b(ssd|hdd|nvme|flash|emmc|optical)\b', _re.I), "storage_type", 1),
-        # Connectivity: "5G", "4G", "WiFi 6", "Bluetooth"
+        # Connectivity
         (_re.compile(r'\b(5g|4g|lte|wifi\s*6?|bluetooth\s*\d*\.?\d*|ethernet|usb.?c|thunderbolt\s*\d*)\b', _re.I), "connectivity", 1),
     ]
 
@@ -1086,28 +1111,32 @@ def _extract_requirements(specifications: list[str]) -> list[dict]:
             m = pattern.search(s)
             if m:
                 val = m.group(val_group).strip()
-                # Normalize whitespace and uppercase for consistent matching
                 val_norm = _re.sub(r'\s+', '', val).upper()
                 key = f"{sem_type}:{val_norm}"
                 if key not in seen:
                     seen.add(key)
+                    # Get field aliases for this semantic type
+                    field_aliases = _SEMANTIC_TYPE_FIELD_ALIASES.get(sem_type, [])
+                    primary_field = field_aliases[0] if field_aliases else sem_type
                     requirements.append({
                         "type":      sem_type,
+                        "field":     primary_field,   # primary field to search
+                        "fields":    field_aliases,    # ALL aliases to try in payload
                         "value":     val_norm,
                         "raw_value": val,
                         "raw_spec":  spec,
-                        "operator":  "semantic",  # signals: use semantic matching, not hard filter
+                        "operator":  "eq",             # exact value match in payload
                     })
                 matched = True
-                # Don't break — one spec may have multiple semantic types (e.g. "512GB SSD")
-                # Continue to extract both capacity AND storage_type
+                # Continue — "512GB SSD" should produce both capacity AND storage_type
         if not matched:
-            # Unrecognized spec — store as keyword for full-text enrichment
             key = f"keyword:{s.lower()}"
             if key not in seen:
                 seen.add(key)
                 requirements.append({
                     "type":      "keyword",
+                    "field":     None,
+                    "fields":    [],
                     "value":     s,
                     "raw_value": s,
                     "raw_spec":  spec,
@@ -1292,23 +1321,65 @@ def _extract_reference_entity(latest_body: str, conversation_entities: list[dict
 
 def _extract_deterministic_mode(text: str) -> dict:
     """
-    Detect whether the customer wants a deterministic (min/max) result.
+    Detect whether the customer wants a deterministic (min/max/sort) result.
+
+    ISSUE 6 FIX: Expanded beyond price-only to support any sortable field.
+    Now covers: count, sum, avg/mean/median, max, min, highest, lowest,
+    latest, oldest, top N, bottom N queries.
 
     Returns:
-        {"active": bool, "field": str, "direction": str}
-        direction: "asc" (cheapest/min) or "desc" (most expensive/max)
-
-    When active=True, the retrieval layer bypasses vector ranking for the
-    primary sort and uses metadata ordering instead.
-    This ensures business facts (actual price values) override semantic
-    similarity scores — the cheapest item must rank #1, not the most
-    semantically similar one.
+        {"active": bool, "field": str, "direction": str, "aggregation": str}
+        direction: "asc" (cheapest/min/oldest) or "desc" (most expensive/max/newest)
+        aggregation: "sort" | "count" | "avg" | "sum" | "latest" | "oldest"
     """
     from llm.prompts import DETERMINISTIC_RETRIEVAL_KEYWORDS
+    import re as _re
+
+    # Extended deterministic triggers beyond price (Issue 6)
+    EXTENDED_DET_KEYWORDS: list[tuple[str, str, str, str]] = [
+        # (phrase, field, direction, aggregation)
+        # Latest / newest / most recent
+        ("latest",        "updated_at",  "desc", "latest"),
+        ("newest",        "updated_at",  "desc", "latest"),
+        ("most recent",   "updated_at",  "desc", "latest"),
+        ("recent",        "updated_at",  "desc", "latest"),
+        # Oldest / first
+        ("oldest",        "updated_at",  "asc",  "oldest"),
+        ("earliest",      "updated_at",  "asc",  "oldest"),
+        # Highest rated / best rated
+        ("highest rated", "quality_score", "desc", "sort"),
+        ("best rated",    "quality_score", "desc", "sort"),
+        ("top rated",     "quality_score", "desc", "sort"),
+        # Highest priority
+        ("highest priority", "priority_score", "desc", "sort"),
+        # Top N / Bottom N patterns handled below via regex
+    ]
+
+    # Check extended keywords first (more specific)
+    for phrase, field, direction, aggregation in EXTENDED_DET_KEYWORDS:
+        if phrase in text:
+            return {"active": True, "field": field, "direction": direction,
+                    "aggregation": aggregation}
+
+    # Top N pattern: "top 5 products", "top 10"
+    m = _re.search(r'\btop\s+(\d+)', text)
+    if m:
+        return {"active": True, "field": "quality_score", "direction": "desc",
+                "aggregation": "sort", "limit": int(m.group(1))}
+
+    # Bottom N pattern: "bottom 5", "lowest 10"
+    m = _re.search(r'\bbottom\s+(\d+)', text)
+    if m:
+        return {"active": True, "field": "price", "direction": "asc",
+                "aggregation": "sort", "limit": int(m.group(1))}
+
+    # Original price-based deterministic keywords from prompts.py
     for phrase, field, direction in DETERMINISTIC_RETRIEVAL_KEYWORDS:
         if phrase in text:
-            return {"active": True, "field": field, "direction": direction}
-    return {"active": False, "field": "", "direction": ""}
+            return {"active": True, "field": field, "direction": direction,
+                    "aggregation": "sort"}
+
+    return {"active": False, "field": "", "direction": "", "aggregation": ""}
 
 
 def _detect_analytics_intent(
