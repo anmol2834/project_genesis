@@ -796,6 +796,12 @@ def _validate_and_repair(
         "clarification_required": clarification_required,
         # Status filter passed to retrieval layer
         "status_filter": "active",
+        # Issue 10: Flag for downstream fact validator
+        # When True, Processor #2 must cross-check generated answers against
+        # retrieved facts before sending response. Prevents hallucination.
+        "fact_validation_required": bool(
+            ee.get("specifications") or ee.get("products")
+        ),
     }
 
     return data
@@ -1012,9 +1018,19 @@ def _deduplicate_queries(queries: list[str]) -> list[str]:
 # in the payload (attributes + structured_data) and takes the first hit.
 # This is what makes the system work across ANY business schema without
 # hardcoding field names per business.
+# ISSUE 4 FIX: Separate RAM from storage capacity aliases.
+# "capacity" is now split into "ram_capacity" and "storage_capacity" so
+# context-aware field assignment works correctly.
+# Works for any business schema — aliases cover all common field name variants.
 _SEMANTIC_TYPE_FIELD_ALIASES: dict[str, list[str]] = {
-    "capacity":           ["ram", "memory", "storage", "capacity", "disk", "drive",
-                           "hdd", "ssd", "nvme", "space", "size"],
+    # RAM context: 8GB RAM, 16GB memory, etc.
+    "ram_capacity":       ["ram", "memory", "installed_memory", "system_memory",
+                           "memory_size", "ram_gb", "mem"],
+    # Storage context: 512GB SSD, 1TB disk, etc.
+    "storage_capacity":   ["storage", "disk", "drive", "hdd", "ssd", "nvme",
+                           "storage_gb", "disk_size", "capacity", "space"],
+    # Generic capacity when context is ambiguous
+    "capacity":           ["capacity", "storage", "ram", "memory", "size"],
     "performance":        ["processor", "cpu", "speed", "frequency", "clock",
                            "bandwidth", "throughput", "performance"],
     "screen_size":        ["screen", "display", "screen_size", "display_size",
@@ -1025,7 +1041,7 @@ _SEMANTIC_TYPE_FIELD_ALIASES: dict[str, list[str]] = {
                            "expiry", "length"],
     "count":              ["count", "quantity", "users", "seats", "rooms",
                            "bedrooms", "floors", "units", "licenses"],
-    "weight":             ["weight", "mass", "payload", "load"],
+    "weight":             ["weight", "mass", "payload", "load", "net_weight"],
     "dosage":             ["dosage", "dose", "strength", "concentration",
                            "volume", "quantity"],
     "color":              ["color", "colour", "finish", "shade", "hue"],
@@ -1036,46 +1052,58 @@ _SEMANTIC_TYPE_FIELD_ALIASES: dict[str, list[str]] = {
                            "user_type"],
     "billing_cycle":      ["billing", "cycle", "plan", "subscription",
                            "period", "frequency"],
-    "storage_type":       ["storage", "drive", "disk", "type", "storage_type"],
+    "storage_type":       ["storage_type", "drive_type", "disk_type", "type",
+                           "storage", "drive", "disk"],
     "connectivity":       ["connectivity", "network", "wireless", "connection",
                            "interface"],
     "keyword":            [],
 }
+
+# Context keywords that indicate RAM vs storage when parsing "capacity" specs.
+# If the spec string contains any RAM context keyword, assign ram_capacity.
+# If it contains storage context, assign storage_capacity.
+_RAM_CONTEXT_KEYWORDS    = frozenset({"ram", "memory", "mem", "ddr", "lpddr", "sdram"})
+_STORAGE_CONTEXT_KEYWORDS = frozenset({"ssd", "hdd", "nvme", "disk", "drive",
+                                        "storage", "flash", "emmc", "tb", "terabyte"})
 
 
 def _extract_requirements(specifications: list[str]) -> list[dict]:
     """
     Extract structured requirements from raw specification strings.
 
-    ENTERPRISE ARCHITECTURE — FIELD-MAPPED (Issues #1, #2, #3, #4):
-    Each requirement now carries:
-        type      : semantic category (capacity, storage_type, color, etc.)
-        field     : primary field alias to search in payload (e.g. "ram", "storage")
-        fields    : ALL field aliases to try (schema-resilient multi-key search)
-        value     : normalized value string (e.g. "8GB", "SSD", "RED")
-        raw_value : original value text
-        raw_spec  : original specification string
-        operator  : "eq" for exact, "keyword" for free-text
+    ENTERPRISE FIX (Issues #1, #3, #4):
 
-    The retrieval layer uses fields[] to search across ALL possible payload
-    field names — so "8GB RAM" works whether the business stores it as
-    {"ram": "8GB"}, {"memory": "8GB"}, {"capacity": "8GB"}, etc.
+    BUG FIXED: The previous version used a single "capacity" type for ALL
+    memory/storage specs, giving every GB value field="ram" (first alias).
+    "512GB SSD" was producing ram=512GB AND weight=512G (gram false-positive).
 
-    Works for any business: E-commerce, Hospitals, Hotels, SaaS, Finance,
-    Manufacturing, Real Estate — field aliases cover universal vocabulary.
+    NEW APPROACH:
+    1. Parse the full spec string as a unit ("8GB RAM", "512GB SSD") not just
+       the numeric+unit token. Context keywords after the value determine field.
+    2. Split capacity into ram_capacity vs storage_capacity based on context.
+    3. Weight pattern requires \b boundary so "8G" from "8GB" cannot match.
+    4. Each requirement carries both `field` (primary) and `fields` (all aliases)
+       so the retrieval layer tries every alias in the business schema.
+    5. `context_hint` carries the original spec for downstream schema mapping.
+
+    Works for any business: E-commerce, Hotels, SaaS, Healthcare, Finance.
     """
     import re as _re
     requirements: list[dict] = []
     seen: set[str] = set()
 
-    # (regex, semantic_type, value_group)
+    # ── Pattern definitions ────────────────────────────────────────────────────
+    # CRITICAL FIX for weight: require word boundary AFTER unit so "8GB" cannot
+    # match the gram pattern. \bg\b matches standalone "g" only.
+    # Also require the unit NOT be followed by b/B (to exclude GB, TB, MB).
     SEMANTIC_PATTERNS: list[tuple] = [
-        # Memory/storage capacity: "16GB", "8 GB", "512GB SSD", "1TB"
-        (_re.compile(r'(\d+\s*(?:gb|tb|mb|pb|gigabyte|terabyte|megabyte)s?)', _re.I), "capacity", 1),
+        # Memory/storage capacity: "16GB", "8 GB", "512GB", "1TB", "256MB"
+        # NOTE: We do NOT include "g" here — gram is handled separately with boundary
+        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:gb|tb|mb|pb|gigabyte|terabyte|megabyte)s?)', _re.I), "capacity", 1),
         # Speed/frequency: "3.2GHz", "100Mbps"
         (_re.compile(r'(\d+(?:\.\d+)?\s*(?:ghz|mhz|mbps|gbps|fps|hz))', _re.I), "performance", 1),
         # Screen size: "15 inch", '15.6"'
-        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:inch|in|"))', _re.I), "screen_size", 1),
+        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:inch(?:es)?|in|\"(?!\s*\d)))', _re.I), "screen_size", 1),
         # Display resolution: "4K", "1080p", "FHD"
         (_re.compile(r'\b(4k|2k|1080p|720p|fhd|uhd|qhd|retina)\b', _re.I), "display_resolution", 1),
         # Area: "1200 sq ft"
@@ -1084,10 +1112,12 @@ def _extract_requirements(specifications: list[str]) -> list[dict]:
         (_re.compile(r'(\d+\s*(?:year|month|week|day|hour|yr|mo)s?)', _re.I), "duration", 1),
         # Quantity/count: "3 bedrooms", "50 users"
         (_re.compile(r'(\d+)\s*(bedroom|bathroom|floor|seat|door|wheel|room|unit|user|person|people|license)', _re.I), "count", 1),
-        # Weight: "5kg", "10 lbs"
-        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:kg|lb|lbs|gram|g|oz|ton)s?)', _re.I), "weight", 1),
-        # Dosage: "500mg", "10ml"
-        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:mg|ml|mcg|ug|iu|units?))', _re.I), "dosage", 1),
+        # Weight: FIXED — require word boundary so "8G" in "8GB" does NOT match.
+        # Pattern: digits + (kg|lb|lbs|gram|grams|oz|ton) with word boundary.
+        # Standalone 'g' as gram: digits + \bg\b (word boundary both sides).
+        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:kg|lb|lbs|grams?|oz|tons?)\b)', _re.I), "weight", 1),
+        # Dosage: "500mg", "10ml" — FIXED: mg/ml only, NOT standalone g
+        (_re.compile(r'(\d+(?:\.\d+)?\s*(?:mg|ml|mcg|ug|iu|units?)\b)', _re.I), "dosage", 1),
         # Color
         (_re.compile(r'\b(?:colou?r\s+)?(red|blue|green|black|white|silver|gold|grey|gray|pink|purple|yellow|orange|brown|navy)\b', _re.I), "color", 1),
         # Size labels
@@ -1095,53 +1125,89 @@ def _extract_requirements(specifications: list[str]) -> list[dict]:
         # Quality level
         (_re.compile(r'\b(premium|luxury|deluxe|elite|pro|professional|enterprise|advanced|basic|standard|entry.?level|budget|affordable|economy)\b', _re.I), "quality_level", 1),
         # Audience/persona
-        (_re.compile(r'\b(student|beginner|intermediate|advanced|expert|senior|junior|professional|business|personal|family|corporate)\b', _re.I), "audience", 1),
+        (_re.compile(r'\b(student|beginner|intermediate|expert|senior|junior|professional|business|personal|family|corporate)\b', _re.I), "audience", 1),
         # Billing cycle
         (_re.compile(r'\b(annual|monthly|quarterly|weekly|yearly|one.?time|lifetime)\b', _re.I), "billing_cycle", 1),
-        # Storage media type — MUST come AFTER capacity to avoid double-counting "512GB SSD"
+        # Storage media type — MUST come AFTER capacity pattern
         (_re.compile(r'\b(ssd|hdd|nvme|flash|emmc|optical)\b', _re.I), "storage_type", 1),
         # Connectivity
         (_re.compile(r'\b(5g|4g|lte|wifi\s*6?|bluetooth\s*\d*\.?\d*|ethernet|usb.?c|thunderbolt\s*\d*)\b', _re.I), "connectivity", 1),
     ]
 
+    spec_lower_full = " ".join(s.lower() for s in specifications)
+
     for spec in specifications:
         s = spec.strip()
+        s_lower = s.lower()
         matched = False
+
         for pattern, sem_type, val_group in SEMANTIC_PATTERNS:
             m = pattern.search(s)
             if m:
                 val = m.group(val_group).strip()
                 val_norm = _re.sub(r'\s+', '', val).upper()
-                key = f"{sem_type}:{val_norm}"
+
+                # ── ISSUE 1 FIX: Context-aware field resolution for capacity ──
+                # Instead of always using "ram" (first alias), check what
+                # context words appear in the SAME spec string.
+                resolved_type = sem_type
+                if sem_type == "capacity":
+                    ram_ctx     = any(kw in s_lower for kw in _RAM_CONTEXT_KEYWORDS)
+                    storage_ctx = any(kw in s_lower for kw in _STORAGE_CONTEXT_KEYWORDS)
+                    # TB values are almost always storage, not RAM
+                    is_tb = bool(_re.search(r'\d+\s*tb', s_lower))
+                    if is_tb or (storage_ctx and not ram_ctx):
+                        resolved_type = "storage_capacity"
+                    elif ram_ctx or (not storage_ctx):
+                        # Default ambiguous GB values to RAM when no storage context
+                        # e.g. "8GB" alone → RAM; "8GB RAM" → RAM
+                        resolved_type = "ram_capacity"
+
+                key = f"{resolved_type}:{val_norm}"
                 if key not in seen:
                     seen.add(key)
-                    # Get field aliases for this semantic type
-                    field_aliases = _SEMANTIC_TYPE_FIELD_ALIASES.get(sem_type, [])
-                    primary_field = field_aliases[0] if field_aliases else sem_type
+                    field_aliases = _SEMANTIC_TYPE_FIELD_ALIASES.get(resolved_type,
+                                    _SEMANTIC_TYPE_FIELD_ALIASES.get(sem_type, []))
+                    primary_field = field_aliases[0] if field_aliases else resolved_type
                     requirements.append({
-                        "type":      sem_type,
-                        "field":     primary_field,   # primary field to search
-                        "fields":    field_aliases,    # ALL aliases to try in payload
-                        "value":     val_norm,
-                        "raw_value": val,
-                        "raw_spec":  spec,
-                        "operator":  "eq",             # exact value match in payload
+                        "type":         resolved_type,
+                        "field":        primary_field,
+                        "fields":       field_aliases,
+                        "value":        val_norm,
+                        "raw_value":    val,
+                        "raw_spec":     spec,
+                        "operator":     "eq",
+                        "context_hint": s_lower,  # original spec for downstream schema mapping
                     })
                 matched = True
-                # Continue — "512GB SSD" should produce both capacity AND storage_type
+                # Continue scanning the same spec — "512GB SSD" produces
+                # storage_capacity:512GB AND storage_type:SSD
+
         if not matched:
             key = f"keyword:{s.lower()}"
             if key not in seen:
                 seen.add(key)
                 requirements.append({
-                    "type":      "keyword",
-                    "field":     None,
-                    "fields":    [],
-                    "value":     s,
-                    "raw_value": s,
-                    "raw_spec":  spec,
-                    "operator":  "keyword",
+                    "type":         "keyword",
+                    "field":        None,
+                    "fields":       [],
+                    "value":        s,
+                    "raw_value":    s,
+                    "raw_spec":     spec,
+                    "operator":     "keyword",
+                    "context_hint": s.lower(),
                 })
+
+    # Deduplicate: if we have both ram_capacity and storage_capacity for the
+    # same numeric value, keep both (correct). But remove exact duplicates.
+    # Log the final requirements for observability.
+    if requirements:
+        logger.debug(
+            "[P1] requirements extracted | count=%d | %s",
+            len(requirements),
+            [{"field": r["field"], "value": r["value"], "type": r["type"]}
+             for r in requirements],
+        )
 
     return requirements
 

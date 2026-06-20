@@ -77,7 +77,7 @@ PER_CATEGORY_TOP_K   = 10
 # Minimum vector score to include a candidate
 VECTOR_SCORE_FLOOR   = 0.30
 # Maximum pages for metadata scroll (safety cap: 500 * 100 = 50k records)
-_METADATA_SCROLL_MAX_PAGES = 500
+_METADATA_SCROLL_MAX_PAGES = 100  # Issue 5: capped at 10k records. For 500k+ tenants, payload indexes on user_id+category+status are REQUIRED at collection creation.
 
 # Score fusion weights — used only when NO requirements present
 # When requirements exist, requirement_score is 70% dominant (Issue 3)
@@ -304,23 +304,19 @@ def _build_normal_category_filter(user_id: str, category: str, status_filter: st
 
 def _build_requirements_filter(user_id: str, category: str, requirements: list[dict], status_filter: str | None = None):
     """
-    ISSUE 1 FIX — Full Requirements Filter.
+    ISSUE 3 FIX - Hard Filter Enforcement for Requirements at Qdrant Level.
 
-    Now enforces BOTH numeric range constraints AND string/eq requirements:
-      1. Tenant isolation (user_id)
-      2. Category isolation
-      3. Analytics subtype exclusion
-      4. Status filter (if provided)
-      5. Numeric range constraints (price lte/gte/between) as Qdrant Range filters
-      6. String eq requirements — NOT as hard MatchValue (field names vary per business)
-         Instead: numeric part is extracted and checked as a Range on ALL known field aliases.
-         "8GB RAM" → check attributes.ram, attributes.memory, structured_data.ram etc.
-         as Range(gte=7.6, lte=8.4) so "8GB" stored as 8 matches.
+    Enterprise architecture: Qdrant MUST be the first gate, not scoring.
+    Pipeline: Qdrant hard filter -> candidates -> scoring/rerank
+    NOT: All docs -> scoring -> maybe filtered
 
-    String matching approach is schema-resilient:
-      - Businesses may store RAM as attributes.ram, attributes.memory, structured_data.ram_gb etc.
-      - We try the primary alias only at Qdrant filter level (best effort)
-      - Retrieval guarantee layer and _compute_requirement_score enforce full validation post-retrieval
+    For eq requirements with numeric component (e.g. "8GB", "512GB"):
+      - Extract numeric part: 8 or 512
+      - Apply Range(gte=N*0.9, lte=N*1.1) with 10% tolerance
+      - Try ALL field aliases via should[] (OR logic)
+      - This is hard DB-level filtering, not soft scoring
+
+    String-only eq (SSD, color=red) -> candidate validation post-retrieval.
     """
     import re as _re
     from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
@@ -343,11 +339,13 @@ def _build_requirements_filter(user_id: str, category: str, requirements: list[d
         if not field or value is None:
             continue
 
-        # ── Numeric range constraints (price, area, etc.) ──────────────────
+        val_str = str(value).strip()
+
+        # Numeric range constraints (price lte/gte/between)
         if operator in ("lte", "gte", "between"):
             attr_key = f"attributes.{field}"
             try:
-                fval = float(str(value).replace(",", ""))
+                fval = float(val_str.replace(",", ""))
             except (ValueError, TypeError):
                 continue
             if operator == "lte":
@@ -355,35 +353,42 @@ def _build_requirements_filter(user_id: str, category: str, requirements: list[d
             elif operator == "gte":
                 must.append(FieldCondition(key=attr_key, range=Range(gte=fval)))
             elif operator == "between":
-                min_v = req.get("min")
-                max_v = req.get("max")
+                min_v, max_v = req.get("min"), req.get("max")
                 if min_v is not None and max_v is not None:
-                    must.append(FieldCondition(key=attr_key, range=Range(gte=float(min_v), lte=float(max_v))))
+                    must.append(FieldCondition(key=attr_key,
+                                               range=Range(gte=float(min_v), lte=float(max_v))))
 
-        # ── Eq requirements: try numeric part on primary field alias ───────
-        # "8GB" → numeric = 8.0, check attributes.ram as Range(gte=7.6, lte=8.4)
-        # This is best-effort at Qdrant level — full enforcement in post-retrieval validation.
-        # We do NOT hard-filter here to avoid missing records that store value differently.
-        # The scoring layer (_compute_requirement_score) provides the authoritative gate.
+        # ISSUE 3 FIX: Eq requirements with numeric component -> hard Range filter
+        # on ALL field aliases using OR (should). This is DB-level filtering.
+        # "8GB" -> extract 8.0, apply Range(gte=7.2, lte=8.8) on ram, memory, etc.
         elif operator == "eq":
-            val_str = str(value).strip()
-            numeric_match = _re.search(r'(\d+(?:\.\d+)?)', val_str)
-            if numeric_match and field:
+            numeric_m = _re.search(r'(\d+(?:\.\d+)?)', val_str)
+            if numeric_m:
                 try:
-                    fval = float(numeric_match.group(1))
-                    # Only apply as filter if the value is purely numeric (e.g. price=1000)
-                    # Do NOT apply for composite values like "8GB" — too schema-specific
-                    # (stored as 8, 8.0, "8GB", "8 GB" etc across different businesses)
-                    # Let scoring layer handle composite string+unit requirements
-                    if val_str == numeric_match.group(1):  # purely numeric value
-                        attr_key = f"attributes.{field}"
-                        tol = fval * 0.05
-                        must.append(FieldCondition(key=attr_key, range=Range(gte=fval - tol, lte=fval + tol)))
+                    fval = float(numeric_m.group(1))
+                    tol  = max(fval * 0.10, 0.5)  # 10% tolerance, min 0.5
+                    field_aliases: list = req.get("fields") or [field]
+                    # Build Range conditions for every alias in both attributes and structured_data
+                    alias_conditions = []
+                    for alias in field_aliases[:6]:  # cap at 6 aliases
+                        for prefix in ("attributes", "structured_data"):
+                            alias_conditions.append(
+                                FieldCondition(
+                                    key=f"{prefix}.{alias}",
+                                    range=Range(gte=fval - tol, lte=fval + tol)
+                                )
+                            )
+                    if alias_conditions:
+                        # OR logic: at least ONE alias field must be in range
+                        must.append(
+                            Filter(should=alias_conditions, min_should=1)
+                        )
                 except (ValueError, TypeError):
                     pass
+            # String-only values (SSD, RED, etc.) -> handled by candidate_validation
+            # We skip Qdrant MatchValue because field names vary per business schema
 
     return Filter(must=must, must_not=must_not)
-
 
 def _build_tenant_only_filter(user_id: str):
     """
