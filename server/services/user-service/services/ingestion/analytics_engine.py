@@ -1576,7 +1576,7 @@ def upsert_analytics_to_qdrant(
                 "category":        analytics_payload.get("category", ""),
                 "subtype":         _ANALYTICS_SUBTYPE,
                 "title":           analytics_payload.get("title", ""),
-                "search_text":     search_text[:500],
+                "search_text":     search_text[:4000],
                 "ai_tags":         analytics_payload.get("ai_tags", []),
                 "keywords":        analytics_payload.get("keywords", []),
                 "attributes":      analytics_payload.get("attributes", {}),

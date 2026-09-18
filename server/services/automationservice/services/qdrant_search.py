@@ -341,8 +341,8 @@ def _build_requirements_filter(user_id: str, category: str, requirements: list[d
 
         val_str = str(value).strip()
 
-        # Numeric range constraints (price lte/gte/between)
-        if operator in ("lte", "gte", "between"):
+        # Numeric range constraints for actual numeric fields (price lte/gte/between)
+        if operator in ("lte", "gte", "between") and field in ("price", "original_price", "discount", "stock", "quantity", "rating", "weight"):
             attr_key = f"attributes.{field}"
             try:
                 fval = float(val_str.replace(",", ""))
@@ -358,35 +358,9 @@ def _build_requirements_filter(user_id: str, category: str, requirements: list[d
                     must.append(FieldCondition(key=attr_key,
                                                range=Range(gte=float(min_v), lte=float(max_v))))
 
-        # ISSUE 3 FIX: Eq requirements with numeric component -> hard Range filter
-        # on ALL field aliases using OR (should). This is DB-level filtering.
-        # "8GB" -> extract 8.0, apply Range(gte=7.2, lte=8.8) on ram, memory, etc.
-        elif operator == "eq":
-            numeric_m = _re.search(r'(\d+(?:\.\d+)?)', val_str)
-            if numeric_m:
-                try:
-                    fval = float(numeric_m.group(1))
-                    tol  = max(fval * 0.10, 0.5)  # 10% tolerance, min 0.5
-                    field_aliases: list = req.get("fields") or [field]
-                    # Build Range conditions for every alias in both attributes and structured_data
-                    alias_conditions = []
-                    for alias in field_aliases[:6]:  # cap at 6 aliases
-                        for prefix in ("attributes", "structured_data"):
-                            alias_conditions.append(
-                                FieldCondition(
-                                    key=f"{prefix}.{alias}",
-                                    range=Range(gte=fval - tol, lte=fval + tol)
-                                )
-                            )
-                    if alias_conditions:
-                        # OR logic: at least ONE alias field must be in range
-                        must.append(
-                            Filter(should=alias_conditions, min_should=1)
-                        )
-                except (ValueError, TypeError):
-                    pass
-            # String-only values (SSD, RED, etc.) -> handled by candidate_validation
-            # We skip Qdrant MatchValue because field names vary per business schema
+        # Note: 'eq' operators (specs like 16GB, SSD, color, model) are stored as rich strings
+        # in structured_data and attributes. They are retrieved with high recall via dense vector
+        # embeddings + metadata token matching, and precisely verified in candidate validation & reranking.
 
     return Filter(must=must, must_not=must_not)
 
@@ -436,6 +410,18 @@ async def _dense_search(
             with_payload    = True,
             with_vectors    = False,
         )
+        if not results and requirements:
+            # Fallback to category filter so semantic vector match can still find matching items
+            f_fallback = _build_category_filter(user_id, category, status_filter=status_filter)
+            results = client.search(
+                collection_name = COLLECTION_NAME,
+                query_vector    = vector,
+                query_filter    = f_fallback,
+                limit           = top_k,
+                score_threshold = VECTOR_SCORE_FLOOR,
+                with_payload    = True,
+                with_vectors    = False,
+            )
         return [{"id": str(r.id), "vector_score": r.score, "payload": r.payload or {}} for r in results]
 
     try:
@@ -628,6 +614,28 @@ async def _metadata_search(
                 break
             offset = next_offset
             page  += 1
+
+        if not all_points and requirements:
+            # Fallback to category filter for metadata scroll
+            f_fallback = _build_category_filter(user_id, category, status_filter=status_filter)
+            offset = None
+            page = 0
+            while page < _METADATA_SCROLL_MAX_PAGES:
+                batch, next_offset = client.scroll(
+                    collection_name = COLLECTION_NAME,
+                    scroll_filter   = f_fallback,
+                    limit           = 100,
+                    offset          = offset,
+                    with_payload    = True,
+                    with_vectors    = False,
+                )
+                if not batch:
+                    break
+                all_points.extend(batch)
+                if next_offset is None:
+                    break
+                offset = next_offset
+                page  += 1
 
         if not all_points:
             return []
@@ -1925,13 +1933,7 @@ async def _run_hybrid_retrieval_inner(
     # category — it will never appear in cat_queries from P1 output since it
     # was removed from ALLOWED_CATEGORIES.
     #
-    # ISSUE 9 FIX: primary_intent confidence >= 0.90 means the LLM is certain
-    # — restrict to primary category only, suppress secondary expansion noise.
-    primary_intent_conf = float(pi.get("confidence", 0.0))
-    allow_secondary_categories = primary_intent_conf < 0.90
-
-    # ISSUE 7 FIX: Pull business domain hint from p1_output.business_understanding
-    # so retrieval queries are enriched with business-specific vocabulary.
+    # Extract business domain vocabulary for operational query enrichment
     biz_understanding = p1_output.get("business_understanding") or {}
     biz_domain_hint = " ".join(filter(None, [
         biz_understanding.get("business_type", ""),
@@ -1944,13 +1946,6 @@ async def _run_hybrid_retrieval_inner(
             continue
         cat = str(cat_entry.get("category", "")).strip()
         if cat not in ALLOWED_CATEGORIES:
-            continue
-        # ISSUE 9: suppress secondary categories for high-confidence single-intent queries
-        if not allow_secondary_categories and cat != primary_intent_cat:
-            logger.debug(
-                "[retrieval] Issue9: suppressed secondary cat=%s primary_conf=%.2f",
-                cat, primary_intent_conf,
-            )
             continue
         raw_qs = cat_entry.get("search_queries") or []
         qs = [str(q).strip() for q in raw_qs if str(q).strip()]

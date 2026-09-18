@@ -154,7 +154,7 @@ def upsert_entries(entries: List[Dict[str, Any]], user_id: str) -> List[str]:
 
                 # Search + display
                 "title":          entry.get("title") or "",
-                "search_text":    (entry.get("search_text") or "")[:500],
+                "search_text":    (entry.get("search_text") or "")[:4000],
 
                 # AI routing tags (dynamic, contextual)
                 "ai_tags":        entry.get("ai_tags") or entry.get("ai_relevance") or [],

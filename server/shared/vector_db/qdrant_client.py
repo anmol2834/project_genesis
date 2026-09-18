@@ -31,7 +31,7 @@ def get_qdrant_client() -> QdrantClient:
                 try:
                     _qdrant_client = QdrantClient(
                         url=config.QDRANT_URL,
-                        timeout=3,   # 3s — matches automationservice 3.5s asyncio timeout
+                        timeout=10,  # 10s enterprise resilience for parallel multi-category searches
                         prefer_grpc=False,
                     )
                     logger.info(f"Qdrant client created: {config.QDRANT_URL}")

@@ -22,17 +22,58 @@ for _p in (_SERVER_DIR, _SVC_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import json
+import redis.asyncio as aioredis
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from shared.config import get_config
+from core.config import AUTOMATION_RESPONSES, AUTOMATION_RESPONSES_NOTIFY
 from services.email_context import fetch_thread_messages
 from services.business_context import get_business_context
 from llm.processor_1 import run_processor_1
 from services.qdrant_search import run_hybrid_retrieval
+from services.reranker import rerank_candidates
+from llm.processor_2 import run_processor_2
 
 logger = logging.getLogger("automationservice.router")
 
 router = APIRouter(tags=["automation"])
+
+_router_redis: aioredis.Redis | None = None
+
+async def _get_router_redis() -> aioredis.Redis:
+    global _router_redis
+    if _router_redis is None:
+        cfg = get_config()
+        _router_redis = aioredis.from_url(
+            cfg.REDIS_URL,
+            encoding="utf-8",
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_keepalive=True,
+            socket_timeout=15,
+            max_connections=10,
+        )
+    return _router_redis
+
+async def _dispatch_automation_response(response_payload: dict) -> bool:
+    try:
+        r = await _get_router_redis()
+        pipe = r.pipeline(transaction=True)
+        pipe.xadd(AUTOMATION_RESPONSES, {"data": json.dumps(response_payload)})
+        pipe.lpush(AUTOMATION_RESPONSES_NOTIFY, "1")
+        await pipe.execute()
+        logger.info(
+            "[DISPATCH] automation response published | conv=%s action=%s send_email=%s",
+            response_payload.get("conversation_id", "")[:8],
+            response_payload.get("action"),
+            response_payload.get("send_email"),
+        )
+        return True
+    except Exception as exc:
+        logger.error("[DISPATCH] failed to publish automation response: %s", exc)
+        return False
 
 # ── Persistent escalation state (Fix 1) ───────────────────────────────────────
 # key = conversation_id, value = {"open": bool, "level": str, "reason": str,
@@ -255,7 +296,7 @@ async def process_event(event: dict) -> dict:
             "open":          True,
             "level":         rd.get("routing_priority", "high"),
             "reason":        p1_output.get("intent_analysis", {}).get("primary_intent", {}).get("reason", ""),
-            "created_at":    datetime.datetime.utcnow().isoformat(),
+            "created_at":    datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "message_count": context["fetch_count"],
         }
         esc_state = _conversation_escalation_state[conversation_id]
@@ -320,20 +361,69 @@ async def process_event(event: dict) -> dict:
         len((retrieval_output.get("retrieval_contract_applied") or {}).get("requirements", [])),
     )
 
-    return {
-        "status":            "pipeline_steps_1_4_complete",
-        "user_id":           user_id,
-        "message_id":        message_id,
+    # ── Step 5: Cross-Encoder Reranking ────────────────────────────────────────
+    standalone_query = (
+        ca.get("standalone_query")
+        or (latest_message.get("content") or "")[:200]
+        or pi.get("category", "inquiry")
+    )
+    reranked_chunks = await rerank_candidates(
+        query=standalone_query,
+        candidates=retrieval_output.get("results", []),
+        top_k=7,
+    )
+
+    # ── Step 6: Processor #2 — Validation & Response Generation ───────────────
+    p2_output = await run_processor_2(
+        messages=messages,
+        latest_message=latest_message,
+        conversation_meta=conv_meta,
+        business_context=biz_ctx,
+        p1_output=p1_output,
+        retrieved_chunks=reranked_chunks,
+    )
+
+    # ── Step 7: Dispatch to emailservice via Redis ────────────────────────────
+    response_payload = {
+        "action":            p2_output.get("action", "reply"),
         "conversation_id":   conversation_id,
+        "message_id":        message_id,
         "thread_id":         conv_meta.get("thread_id", thread_id),
-        "fetch_count":       context["fetch_count"],
-        "fetch_reason":      context["fetch_reason"],
-        "conversation":      conv_meta,
-        "latest_message":    latest_message,
-        "business_context":  biz_ctx,          # pipeline state — Processor #2 will read this
+        "user_id":           user_id,
+        "response_text":     p2_output.get("email_body", ""),
+        "confidence":        p2_output.get("confidence", 0.0),
+        "send_email":        p2_output.get("send_email", False),
+        "trace_id":          event.get("trace_id", ""),
+        "escalation_reason": p2_output.get("escalation_reason"),
+        "email_subject":     p2_output.get("email_subject"),
+    }
+    dispatched = await _dispatch_automation_response(response_payload)
+
+    elapsed_ms = (time.monotonic() - t_start) * 1000
+
+    logger.info(
+        "Pipeline 1-7 complete | user=%s conv=%s action=%s conf=%.2f send_email=%s dispatched=%s total_ms=%.0f",
+        user_id, conversation_id[:8], p2_output.get("action"),
+        p2_output.get("confidence", 0.0), p2_output.get("send_email"), dispatched, elapsed_ms,
+    )
+
+    return {
+        "status":             "pipeline_complete",
+        "user_id":            user_id,
+        "message_id":         message_id,
+        "conversation_id":    conversation_id,
+        "thread_id":          conv_meta.get("thread_id", thread_id),
+        "fetch_count":        context["fetch_count"],
+        "fetch_reason":       context["fetch_reason"],
+        "conversation":       conv_meta,
+        "latest_message":     latest_message,
+        "business_context":   biz_ctx,
         "processor_1_output": p1_output,
-        "retrieval_output":  retrieval_output,
-        "elapsed_ms":        elapsed_ms,
+        "retrieval_output":   retrieval_output,
+        "reranked_chunks":    reranked_chunks,
+        "processor_2_output": p2_output,
+        "dispatched":         dispatched,
+        "elapsed_ms":         elapsed_ms,
     }
 
 

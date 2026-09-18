@@ -27,9 +27,10 @@ SERVICE_PORT = 8009
 SERVICE_NAME = "automationservice"
 
 # ── Redis keys — MUST match emailservice/workers/ai_handoff_worker.py exactly ──
-AUTOMATION_STREAM    = "automation_events"   # emailservice XADD here
-AUTOMATION_NOTIFY    = "automation_notify"   # emailservice LPUSH here (wake signal)
-AUTOMATION_RESPONSES = "automation_responses"  # we XADD here → emailservice AutomationResponseWorker
+AUTOMATION_STREAM           = "automation_events"   # emailservice XADD here
+AUTOMATION_NOTIFY           = "automation_notify"   # emailservice LPUSH here (wake signal)
+AUTOMATION_RESPONSES        = "automation_responses"  # we XADD here → emailservice AutomationResponseWorker
+AUTOMATION_RESPONSES_NOTIFY = "automation_responses_notify"  # we LPUSH here to wake AutomationResponseWorker
 
 NOTIFY_BLPOP_TIMEOUT = 8     # seconds — BLPOP wait interval (< Upstash 10s idle timeout)
 MAX_EVENTS_PER_CYCLE = 100   # max automation_events drained per wake cycle
