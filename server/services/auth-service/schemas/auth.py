@@ -33,11 +33,17 @@ class SendOtpResponse(BaseModel):
 
 class VerifyOtpRequest(BaseModel):
     email: EmailStr
-    code: str = Field(..., min_length=6, max_length=6)
+    code: Optional[str] = Field(default="000000", max_length=10)
 
     @validator("email")
     def normalize_email(cls, v):
         return v.lower().strip()
+
+    @validator("code", pre=True, always=True)
+    def default_dev_code(cls, v):
+        if not v or str(v).strip() == "":
+            return "000000"
+        return str(v).strip()
 
 
 class VerifyOtpResponse(BaseModel):
@@ -51,25 +57,27 @@ class SignupRequest(BaseModel):
     full_name: str = Field(..., min_length=2, max_length=255)
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
-    business_name: str = Field(..., min_length=2, max_length=255)
-    business_type: str = Field(..., max_length=100)
+    business_name: str = Field(..., min_length=1, max_length=255)
+    business_type: str = Field(default="General", max_length=100)
     industries: Optional[List[str]] = Field(default=[])
-    country: str = Field(..., max_length=100)
-    timezone: str = Field(..., max_length=100)
-    business_description: str = Field(..., min_length=10, max_length=500)
+    country: str = Field(default="India", max_length=100)
+    timezone: str = Field(default="UTC", max_length=100)
+    business_description: str = Field(default="AI Email Automation", max_length=500)
     target_audience: Optional[str] = Field(default="", max_length=300)
-    communication_tone: str = Field(..., max_length=50)
-    use_cases: List[str] = Field(..., min_items=1)
+    communication_tone: Optional[str] = Field(default="professional", max_length=50)
+    use_cases: Optional[List[str]] = Field(default=["support"])
 
     @validator("email")
     def normalize_email(cls, v):
         return v.lower().strip()
 
-    @validator("use_cases")
-    def require_use_cases(cls, v):
-        if not v:
-            raise ValueError("At least one use case is required")
-        return v
+    @validator("communication_tone", pre=True, always=True)
+    def default_tone(cls, v):
+        return v if v else "professional"
+
+    @validator("use_cases", pre=True, always=True)
+    def default_use_cases(cls, v):
+        return v if (v and len(v) > 0) else ["support"]
 
 
 class SignupResponse(BaseModel):
