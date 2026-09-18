@@ -4,6 +4,10 @@ echo STARTING ALL MICROSERVICES
 echo ================================================================================
 echo.
 
+REM Configure Python environment and PATH (bypasses Windows App Execution Aliases)
+set PATH=C:\Users\anmol\AppData\Local\Python\bin;C:\Users\anmol\AppData\Local\Python\pythoncore-3.14-64;C:\Users\anmol\AppData\Local\Python\pythoncore-3.14-64\Scripts;%PATH%
+set PYTHONPATH=%~dp0;%PYTHONPATH%
+
 REM Check if .env exists
 if not exist .env (
     echo ERROR: .env file not found
@@ -11,8 +15,8 @@ if not exist .env (
     exit /b 1
 )
 
-echo Installing global dependencies...
-pip install -r requirements.txt
+echo Installing / verifying dependencies...
+python -m pip install -r requirements.txt
 echo.
 
 echo ================================================================================
@@ -25,59 +29,59 @@ if not exist logs mkdir logs
 
 REM Start each service in a new window
 echo Starting Gateway Service (Port 8000)...
-start "Gateway Service" cmd /k "cd services\gateway-service && run.bat"
+start "Gateway Service" cmd /k "cd /d "%~dp0services\gateway-service" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Auth Service (Port 8001)...
-start "Auth Service" cmd /k "cd services\auth-service && run.bat"
+start "Auth Service" cmd /k "cd /d "%~dp0services\auth-service" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Auth Celery Worker...
-start "Auth Celery Worker" cmd /k "cd /d %~dp0services\auth-service && set PYTHONPATH=%~dp0 && celery -A celery_worker worker --loglevel=info --concurrency=2 --pool=solo -n auth-worker@%%h"
+start "Auth Celery Worker" cmd /k "cd /d "%~dp0services\auth-service" && start-worker.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting User Service (Port 8002)...
-start "User Service" cmd /k "cd services\user-service && run.bat"
+start "User Service" cmd /k "cd /d "%~dp0services\user-service" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting User Celery Worker...
-start "User Celery Worker" cmd /k "cd /d %~dp0services\user-service && set PYTHONPATH=%~dp0 && celery -A celery_worker worker --loglevel=info --concurrency=2 --pool=solo -n user-worker@%%h"
+start "User Celery Worker" cmd /k "cd /d "%~dp0services\user-service" && start-worker.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Business Service (Port 8003)...
-start "Business Service" cmd /k "cd services\business-service && run.bat"
+start "Business Service" cmd /k "cd /d "%~dp0services\business-service" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Email Service (Port 8004)...
-start "Email Service" cmd /k "cd services\email-service && run.bat"
+start "Email Service" cmd /k "cd /d "%~dp0services\emailservice" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Inbox Service (Port 8005)...
-start "Inbox Service" cmd /k "cd services\inbox-service && run.bat"
+start "Inbox Service" cmd /k "cd /d "%~dp0services\inbox-service" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Campaign Service (Port 8006)...
-start "Campaign Service" cmd /k "cd services\campaign-service && run.bat"
+start "Campaign Service" cmd /k "cd /d "%~dp0services\campaign-service" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Leads Service (Port 8007)...
-start "Leads Service" cmd /k "cd services\leads-service && run.bat"
+start "Leads Service" cmd /k "cd /d "%~dp0services\leads-service" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Analytics Service (Port 8008)...
-start "Analytics Service" cmd /k "cd services\analytics-service && run.bat"
+start "Analytics Service" cmd /k "cd /d "%~dp0services\analytics-service" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Automation Service (Port 8009)...
-start "Automation Service" cmd /k "cd services\automation-service && run.bat"
+start "Automation Service" cmd /k "cd /d "%~dp0services\automationservice" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Research Service (Port 8010)...
-start "Research Service" cmd /k "cd services\research-service && run.bat"
+start "Research Service" cmd /k "cd /d "%~dp0services\research-service" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo Starting Notification Service (Port 8011)...
-start "Notification Service" cmd /k "cd services\notification-service && run.bat"
+start "Notification Service" cmd /k "cd /d "%~dp0services\notification-service" && run.bat"
 timeout /t 2 /nobreak >nul
 
 echo.

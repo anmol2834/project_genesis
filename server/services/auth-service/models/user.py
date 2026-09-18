@@ -10,6 +10,8 @@ import uuid
 
 from shared.database.postgres import Base
 
+__all__ = ["Base", "User"]
+
 
 class User(Base):
     __tablename__ = "users"

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import { AppThemeProvider } from '@/providers/AppThemeProvider';
+import NextAppDirEmotionCacheProvider from '@/lib/emotion/registry';
 import { QueryProvider } from '@/lib/react-query/provider';
 import { AuthProvider } from '@/contexts/AuthContext';
 import JsonLd from '@/components/shared/JsonLd';
@@ -93,14 +94,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" suppressHydrationWarning data-scroll-behavior="smooth">
       <body>
-        <JsonLd data={[organizationSchema(), websiteSchema()]} />
-        <QueryProvider>
-          <AppThemeProvider>
-            <AuthProvider>
-              {children}
-            </AuthProvider>
-          </AppThemeProvider>
-        </QueryProvider>
+        <NextAppDirEmotionCacheProvider options={{ key: 'css' }}>
+          <JsonLd data={[organizationSchema(), websiteSchema()]} />
+          <QueryProvider>
+            <AppThemeProvider>
+              <AuthProvider>
+                {children}
+              </AuthProvider>
+            </AppThemeProvider>
+          </QueryProvider>
+        </NextAppDirEmotionCacheProvider>
       </body>
     </html>
   );

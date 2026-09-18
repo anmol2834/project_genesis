@@ -5,7 +5,7 @@ Uses Pydantic Settings for type-safe configuration management
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, validator
+from pydantic import Field, field_validator
 from typing import List, Optional
 import os
 
@@ -53,7 +53,7 @@ class GlobalConfig(BaseSettings):
     LEADS_SERVICE_URL: str = Field(default="http://leads-service:8000")
     ANALYTICS_SERVICE_URL: str = Field(default="http://analytics-service:8000")
     AUTOMATION_SERVICE_URL: str = Field(default="http://automation-service:8009")
-    AUTOMATIONSERVICE_URL: str = Field(default="http://localhost:8010")
+    AUTOMATIONSERVICE_URL: str = Field(default="http://localhost:8009")
     RESEARCH_SERVICE_URL: str = Field(default="http://research-service:8000")
     NOTIFICATION_SERVICE_URL: str = Field(default="http://notification-service:8000")
     
@@ -101,6 +101,10 @@ class GlobalConfig(BaseSettings):
         default="http://localhost:8004",
         description="Publicly reachable URL for this service (used for webhook registration)"
     )
+    USER_SERVICE_PUBLIC_URL: str = Field(
+        default="http://localhost:8002",
+        description="Publicly reachable URL for user-service (used for webhook registration)"
+    )
     
     # ── Celery Configuration ────────────────────────────────────────────────
     CELERY_BROKER_URL: str = Field(..., description="Celery broker URL (Redis)")
@@ -145,14 +149,28 @@ class GlobalConfig(BaseSettings):
     HEALTH_CHECK_INTERVAL: int = Field(default=30)
     HEALTH_CHECK_TIMEOUT: int = Field(default=5)
     
-    @validator("DATABASE_URL", pre=True)
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
     def convert_database_url(cls, v):
-        """Convert postgresql:// to postgresql+asyncpg://"""
-        if isinstance(v, str) and v.startswith("postgresql://"):
-            return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        """Convert postgresql:// to postgresql+asyncpg:// and strip asyncpg-incompatible query params"""
+        if isinstance(v, str):
+            if v.startswith("postgresql://"):
+                v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
+            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+            try:
+                parsed = urlparse(v)
+                if parsed.query:
+                    qs = parse_qs(parsed.query)
+                    for param in ["sslmode", "channel_binding"]:
+                        qs.pop(param, None)
+                    new_query = urlencode(qs, doseq=True)
+                    v = urlunparse(parsed._replace(query=new_query))
+            except Exception:
+                pass
         return v
     
-    @validator("CELERY_BROKER_URL", "CELERY_RESULT_BACKEND", pre=True)
+    @field_validator("CELERY_BROKER_URL", "CELERY_RESULT_BACKEND", mode="before")
+    @classmethod
     def convert_redis_url(cls, v):
         """Ensure Redis URL is properly formatted"""
         if isinstance(v, str) and v.startswith("redis://localhost"):
@@ -160,7 +178,8 @@ class GlobalConfig(BaseSettings):
             return v
         return v
     
-    @validator("CORS_ORIGINS", pre=True)
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
     def parse_cors_origins(cls, v):
         """Parse CORS origins from JSON array string or comma-separated string."""
         if isinstance(v, str):
@@ -176,7 +195,8 @@ class GlobalConfig(BaseSettings):
             return [origin.strip().strip('"').strip("'") for origin in v.split(",") if origin.strip()]
         return v
 
-    @validator("CELERY_ACCEPT_CONTENT", pre=True)
+    @field_validator("CELERY_ACCEPT_CONTENT", mode="before")
+    @classmethod
     def parse_celery_accept_content(cls, v):
         """Parse CELERY_ACCEPT_CONTENT from JSON array string."""
         if isinstance(v, str):
@@ -255,7 +275,7 @@ def _load_env_file_with_priority(env_file: str) -> None:
 _load_env_file_with_priority(_ENV_FILE)
 
 # Global configuration instance
-config = GlobalConfig()
+config = GlobalConfig()  # pyright: ignore[reportCallIssue]
 
 
 def get_config() -> GlobalConfig:

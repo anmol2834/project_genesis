@@ -1,3 +1,0 @@
-from app.handoff.ownership.ownership_manager import OwnershipManager
-
-__all__ = ['OwnershipManager']

@@ -31,7 +31,7 @@ def get_sync_engine():
         config = get_config()
         sync_url = config.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
         connect_args = {}
-        if "rds.amazonaws.com" in sync_url:
+        if any(h in sync_url for h in ("rds.amazonaws.com", "neon.tech", "supabase.co")) or ("localhost" not in sync_url and "127.0.0.1" not in sync_url and "@postgres:" not in sync_url):
             connect_args["sslmode"] = "require"
         _engine = create_engine(sync_url, connect_args=connect_args, poolclass=NullPool)
     return _engine

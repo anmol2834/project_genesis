@@ -1,6 +1,6 @@
 """
 automationservice — Main Entry Point & Redis Notify Loop
-Port: 8010
+Port: 8009
 """
 from __future__ import annotations
 import asyncio
@@ -10,7 +10,7 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
@@ -52,6 +52,7 @@ async def _get_redis() -> aioredis.Redis:
             decode_responses=True,
             socket_connect_timeout=5,
             socket_keepalive=True,
+            socket_timeout=15,
             max_connections=10,
         )
     return _redis
@@ -72,13 +73,21 @@ async def _notify_loop() -> None:
         try:
             redis = await _get_redis()
 
-            result = await redis.blpop(AUTOMATION_NOTIFY, timeout=NOTIFY_BLPOP_TIMEOUT)
+            try:
+                result = await redis.blpop(AUTOMATION_NOTIFY, timeout=NOTIFY_BLPOP_TIMEOUT)
+            except (aioredis.TimeoutError, aioredis.ConnectionError, asyncio.TimeoutError):
+                await _close_redis()
+                result = None
 
             if result is None:
-                backlog = await redis.xlen(AUTOMATION_STREAM)
-                if backlog > 0:
-                    logger.info("[notify_loop] BLPOP timeout — draining backlog=%d", backlog)
-                    await _drain_and_process(redis)
+                try:
+                    fresh_redis = await _get_redis()
+                    backlog = await fresh_redis.xlen(AUTOMATION_STREAM)
+                    if backlog > 0:
+                        logger.info("[notify_loop] idle tick — draining backlog=%d", backlog)
+                        await _drain_and_process(fresh_redis)
+                except Exception:
+                    pass
                 continue
 
             _, notify_value = result
@@ -131,7 +140,8 @@ async def _drain_and_process(redis: aioredis.Redis, pull_count: int = MAX_EVENTS
     # XDEL all before processing (at-most-once delivery)
     pipe = redis.pipeline(transaction=False)
     for mid, _ in messages:
-        pipe.xdel(AUTOMATION_STREAM, mid)
+        if mid is not None:
+            pipe.xdel(AUTOMATION_STREAM, str(mid))
     try:
         await pipe.execute(raise_on_error=False)
     except Exception as e:
@@ -141,6 +151,8 @@ async def _drain_and_process(redis: aioredis.Redis, pull_count: int = MAX_EVENTS
     skipped   = 0
 
     for idx, (stream_id, fields) in enumerate(messages, start=1):
+        if not isinstance(fields, dict):
+            continue
         raw = fields.get("data", "{}")
         try:
             event = json.loads(raw)
@@ -267,7 +279,7 @@ async def stats():
         notify_len = await redis.llen(AUTOMATION_NOTIFY)
         return {
             "service":               SERVICE_NAME,
-            "timestamp":             datetime.utcnow().isoformat(),
+            "timestamp":             datetime.now(timezone.utc).isoformat(),
             "automation_stream_len": stream_len,
             "notify_queue_depth":    notify_len,
             "notify_loop_alive":     _notify_task is not None and not _notify_task.done(),

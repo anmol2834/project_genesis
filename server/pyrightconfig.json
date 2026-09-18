@@ -1,0 +1,60 @@
+{
+  "venvPath": "..",
+  "venv": ".venv",
+  "extraPaths": [
+    ".",
+    "C:\\Users\\anmol\\AppData\\Local\\Python\\pythoncore-3.14-64\\Lib\\site-packages"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "services/auth-service",
+      "extraPaths": [".", "services/auth-service"]
+    },
+    {
+      "root": "services/automationservice",
+      "extraPaths": [".", "services/automationservice"]
+    },
+    {
+      "root": "services/emailservice",
+      "extraPaths": [".", "services/emailservice"]
+    },
+    {
+      "root": "services/user-service",
+      "extraPaths": [".", "services/user-service"]
+    },
+    {
+      "root": "services/gateway-service",
+      "extraPaths": [".", "services/gateway-service"]
+    },
+    {
+      "root": "services/business-service",
+      "extraPaths": [".", "services/business-service"]
+    },
+    {
+      "root": "services/campaign-service",
+      "extraPaths": [".", "services/campaign-service"]
+    },
+    {
+      "root": "services/inbox-service",
+      "extraPaths": [".", "services/inbox-service"]
+    },
+    {
+      "root": "services/leads-service",
+      "extraPaths": [".", "services/leads-service"]
+    },
+    {
+      "root": "services/notification-service",
+      "extraPaths": [".", "services/notification-service"]
+    },
+    {
+      "root": "services/research-service",
+      "extraPaths": [".", "services/research-service"]
+    },
+    {
+      "root": "services/analytics-service",
+      "extraPaths": [".", "services/analytics-service"]
+    }
+  ],
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": false
+}

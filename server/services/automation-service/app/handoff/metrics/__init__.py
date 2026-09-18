@@ -1,3 +1,0 @@
-from app.handoff.metrics.metrics_collector import HandoffMetrics
-
-__all__ = ["HandoffMetrics"]

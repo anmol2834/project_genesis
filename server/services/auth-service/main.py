@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import sys
 import os
 
@@ -53,11 +53,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("auth_store init failed: %s", e)
 
-    print("[STARTUP] ✓ Auth Service Ready\n")
+    logger.info("[STARTUP] Auth Service Ready")
     yield
-    print("\n[SHUTDOWN] Closing connections...")
+    logger.info("[SHUTDOWN] Closing connections...")
     await close_database()
-    print("[SHUTDOWN] ✓ Auth Service Stopped")
+    logger.info("[SHUTDOWN] Auth Service Stopped")
 
 
 app = FastAPI(
@@ -95,7 +95,7 @@ async def health_check():
         content={
             "status": "healthy" if db_healthy else "unhealthy",
             "service": "auth-service",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "checks": {
                 "database": "healthy" if db_healthy else "unhealthy",
             },

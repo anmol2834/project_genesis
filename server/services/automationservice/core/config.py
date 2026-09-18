@@ -23,7 +23,7 @@ if _SERVER_DIR not in sys.path:
 from shared.config import get_config  # noqa — re-exported for convenience
 
 # ── Service identity ───────────────────────────────────────────────────────────
-SERVICE_PORT = 8010
+SERVICE_PORT = 8009
 SERVICE_NAME = "automationservice"
 
 # ── Redis keys — MUST match emailservice/workers/ai_handoff_worker.py exactly ──
@@ -31,8 +31,7 @@ AUTOMATION_STREAM    = "automation_events"   # emailservice XADD here
 AUTOMATION_NOTIFY    = "automation_notify"   # emailservice LPUSH here (wake signal)
 AUTOMATION_RESPONSES = "automation_responses"  # we XADD here → emailservice AutomationResponseWorker
 
-# ── Notify loop tuning ─────────────────────────────────────────────────────────
-NOTIFY_BLPOP_TIMEOUT = 30    # seconds — BLPOP max wait before timeout-backlog-check
+NOTIFY_BLPOP_TIMEOUT = 8     # seconds — BLPOP wait interval (< Upstash 10s idle timeout)
 MAX_EVENTS_PER_CYCLE = 100   # max automation_events drained per wake cycle
 
 # ── Dynamic fetch thresholds (implementation_plan.md spec) ────────────────────

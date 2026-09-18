@@ -38,7 +38,7 @@ def get_engine():
         config = get_config()
 
         connect_args = {}
-        if "rds.amazonaws.com" in config.DATABASE_URL:
+        if any(h in config.DATABASE_URL for h in ("rds.amazonaws.com", "neon.tech", "supabase.co")) or ("localhost" not in config.DATABASE_URL and "127.0.0.1" not in config.DATABASE_URL and "@postgres:" not in config.DATABASE_URL):
             connect_args["ssl"] = "require"
 
         # asyncpg-specific: set statement_timeout and command_timeout

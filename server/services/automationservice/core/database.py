@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import sys
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 # Resolve server/ root regardless of cwd or how the module was imported
 _CORE_DIR     = os.path.dirname(os.path.abspath(__file__))          # .../core
@@ -33,7 +33,7 @@ from shared.config import get_config
 logger = logging.getLogger("automationservice.database")
 
 _engine  = None
-_Session = None
+_Session: Optional[async_sessionmaker[AsyncSession]] = None
 
 
 def _get_engine():
@@ -44,7 +44,7 @@ def _get_engine():
         # Mirror shared/database/postgres.py connect_args exactly —
         # same RDS instance requires SSL + timeouts
         connect_args: dict = {}
-        if "rds.amazonaws.com" in cfg.DATABASE_URL:
+        if any(h in cfg.DATABASE_URL for h in ("rds.amazonaws.com", "neon.tech", "supabase.co")) or ("localhost" not in cfg.DATABASE_URL and "127.0.0.1" not in cfg.DATABASE_URL and "@postgres:" not in cfg.DATABASE_URL):
             connect_args["ssl"] = "require"
         connect_args["command_timeout"] = 30
         connect_args["server_settings"] = {
@@ -81,6 +81,7 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     Commit on success, rollback on error, always close.
     """
     _get_engine()
+    assert _Session is not None, "automationservice DB _Session not initialized"
     session: AsyncSession = _Session()
     try:
         yield session

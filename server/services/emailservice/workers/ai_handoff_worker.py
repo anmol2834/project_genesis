@@ -176,7 +176,7 @@ class AIHandoffWorker(BaseWorker):
         """HTTP POST fallback — calls automationservice /process directly."""
         async with sem:
             cfg_obj = cfg.get_config()
-            url = getattr(cfg_obj, "AUTOMATIONSERVICE_URL", "http://localhost:8010")
+            url = getattr(cfg_obj, "AUTOMATIONSERVICE_URL", "http://localhost:8009")
             payload = {
                 "conversation_id":    rec.get("conversation_id", ""),
                 "user_id":            rec.get("user_id", ""),

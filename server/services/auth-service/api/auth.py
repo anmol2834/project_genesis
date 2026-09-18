@@ -137,7 +137,7 @@ def _run_embedding_sync(user_id: str) -> None:
 
         cfg = _cfg()
         sync_url = cfg.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-        connect_args = {"sslmode": "require"} if "rds.amazonaws.com" in sync_url else {}
+        connect_args = {"sslmode": "require"} if any(h in sync_url for h in ("rds.amazonaws.com", "neon.tech", "supabase.co")) else {}
         engine = create_engine(sync_url, connect_args=connect_args, poolclass=NullPool)
 
         with engine.connect() as conn:
@@ -275,8 +275,10 @@ async def signup(request: SignupRequest):
             user_id = str(new_user.id)
 
             # Pass the UUID object directly — avoids asyncpg type mismatch
-            default_settings = UserSettings.create_default_settings(new_user.id)
-            default_settings.workspace_name = request.business_name
+            default_settings = UserSettings.create_default_settings(
+                new_user.id,
+                workspace_name=request.business_name
+            )
             session.add(default_settings)
 
             await session.commit()

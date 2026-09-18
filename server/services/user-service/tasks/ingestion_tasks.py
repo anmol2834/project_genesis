@@ -11,7 +11,7 @@ Tasks:
 import sys
 import os
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
@@ -239,8 +239,8 @@ async def _delete_source_async(source_id: str, user_id: str) -> Dict[str, Any]:
 def _update_source_status(
     source_id: str,
     status: str,
-    last_error: str = None,
-    ingestion_log: Dict = None,
+    last_error: Optional[str] = None,
+    ingestion_log: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Update source status synchronously (used inside Celery tasks)."""
     from sqlalchemy import create_engine, text
@@ -248,7 +248,7 @@ def _update_source_status(
 
     sync_url = config.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
     connect_args = {}
-    if "rds.amazonaws.com" in sync_url:
+    if any(h in sync_url for h in ("rds.amazonaws.com", "neon.tech", "supabase.co")) or ("localhost" not in sync_url and "127.0.0.1" not in sync_url and "@postgres:" not in sync_url):
         connect_args["sslmode"] = "require"
 
     engine = create_engine(sync_url, connect_args=connect_args, poolclass=NullPool)

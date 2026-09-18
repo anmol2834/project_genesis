@@ -10,6 +10,7 @@ from datetime import datetime
 from sqlalchemy import DateTime
 import uuid
 
+from typing import Optional, Any
 from shared.database.postgres import Base
 
 
@@ -82,11 +83,11 @@ class UserSettings(Base):
         return f"<UserSettings user_id={self.user_id}>"
     
     @classmethod
-    def create_default_settings(cls, user_id: str):
+    def create_default_settings(cls, user_id: Any, workspace_name: Optional[str] = None):
         """
         Factory method to create default settings for a new user.
         Accepts user_id as str or UUID — always stores as uuid.UUID.
         """
         import uuid as _uuid
         uid = user_id if isinstance(user_id, _uuid.UUID) else _uuid.UUID(str(user_id))
-        return cls(user_id=uid)
+        return cls(user_id=uid, workspace_name=workspace_name)

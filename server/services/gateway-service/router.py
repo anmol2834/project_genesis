@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import json
 from typing import Dict, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import sys
 import os
 
@@ -82,7 +82,7 @@ SERVICE_REGISTRY = {
         "retry": 2,
     },
     "automationservice": {
-        "url": "http://localhost:8010",
+        "url": "http://localhost:8009",
         "prefix": "/automationservice",
         "timeout": 120.0,
         "retry": 1,
@@ -142,7 +142,7 @@ class CircuitBreaker:
     def _get_threshold(self, service_name: str) -> int:
         """Get per-service failure threshold (falls back to default)."""
         svc = SERVICE_REGISTRY.get(service_name, {})
-        return svc.get("circuit_breaker_threshold", self.failure_threshold)
+        return int(svc.get("circuit_breaker_threshold", self.failure_threshold))
 
     async def is_open(self, service_name: str) -> bool:
         """Check if circuit is open for a service"""
@@ -151,7 +151,7 @@ class CircuitBreaker:
         
         # Check if timeout has passed — auto-reset
         last = self.last_failure_time.get(service_name)
-        if last and datetime.utcnow() - last > timedelta(seconds=self.timeout):
+        if last and datetime.now(timezone.utc) - last > timedelta(seconds=self.timeout):
             self.open_circuits[service_name] = False
             self.failures[service_name] = 0
             logger.info(f"Circuit breaker reset for {service_name}")
@@ -167,7 +167,7 @@ class CircuitBreaker:
     async def record_failure(self, service_name: str):
         """Record failed request"""
         self.failures[service_name] = self.failures.get(service_name, 0) + 1
-        self.last_failure_time[service_name] = datetime.utcnow()
+        self.last_failure_time[service_name] = datetime.now(timezone.utc)
         
         threshold = self._get_threshold(service_name)
         if self.failures[service_name] >= threshold:
