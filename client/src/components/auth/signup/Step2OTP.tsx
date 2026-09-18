@@ -21,7 +21,7 @@ export default function Step2OTP({ email, onNext, onBack }: Props) {
   const isDark = theme.palette.mode === 'dark';
   const grad = isDark ? darkGradients : lightGradients;
 
-  const [digits, setDigits] = useState<string[]>(Array(OTP_LEN).fill(''));
+  const [digits, setDigits] = useState<string[]>(Array(OTP_LEN).fill('0'));
   const [errorMsg, setErrorMsg] = useState('');
   const [countdown, setCountdown] = useState(RESEND_SECS);
   const [canResend, setCanResend] = useState(false);
@@ -80,7 +80,7 @@ export default function Step2OTP({ email, onNext, onBack }: Props) {
   }, []);
 
   const handleVerify = useCallback(() => {
-    const code = digits.join('');
+    const code = digits.join('') || '000000';
     if (code.length < OTP_LEN) return;
     setErrorMsg('');
     verifyOtp.mutate(
@@ -92,7 +92,7 @@ export default function Step2OTP({ email, onNext, onBack }: Props) {
         },
         onError: (err) => {
           setErrorMsg(err.message ?? 'Invalid or expired code. Please try again.');
-          setDigits(Array(OTP_LEN).fill(''));
+          setDigits(Array(OTP_LEN).fill('0'));
           setTimeout(() => inputRefs.current[0]?.focus(), 50);
         },
       },
@@ -100,7 +100,7 @@ export default function Step2OTP({ email, onNext, onBack }: Props) {
   }, [digits, email, verifyOtp, onNext]);
 
   const handleResend = useCallback(() => {
-    setDigits(Array(OTP_LEN).fill(''));
+    setDigits(Array(OTP_LEN).fill('0'));
     setErrorMsg('');
     setCountdown(RESEND_SECS);
     setCanResend(false);
@@ -174,6 +174,13 @@ export default function Step2OTP({ email, onNext, onBack }: Props) {
             }}
           />
         ))}
+      </Box>
+
+      {/* Dev OTP notice */}
+      <Box sx={{ textAlign: 'center', mb: 1.5 }}>
+        <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', fontWeight: 500 }}>
+          Default code: <Box component="span" sx={{ color: 'primary.main', fontWeight: 700, letterSpacing: '0.05em' }}>000000</Box>
+        </Typography>
       </Box>
 
       {/* Error message */}
