@@ -337,7 +337,7 @@ class WatchManager:
                     last_error = f"HTTP 429 (rate limited)"
                     continue
 
-                last_error = f"HTTP {resp.status_code}: {resp.text[:100]}"
+                last_error = f"HTTP {resp.status_code}: {resp.text[:500]}"
                 logger.warning("watch_api_error | email=%s attempt=%d status=%d",
                                email, attempt, resp.status_code)
 

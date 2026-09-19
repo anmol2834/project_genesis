@@ -252,7 +252,9 @@ def _load_env_file_with_priority(env_file: str) -> None:
     _PRIORITY_KEYS = {
         'REDIS_URL', 'CELERY_BROKER_URL', 'CELERY_RESULT_BACKEND',
         'DATABASE_URL', 'MONGODB_URL', 'JWT_SECRET_KEY', 'ENCRYPTION_KEY',
-        'OPENAI_API_KEY',
+        'OPENAI_API_KEY', 'GMAIL_PUBSUB_TOPIC', 'GMAIL_PUBSUB_SUBSCRIPTION',
+        'GOOGLE_CLIENT_ID_EMAIL', 'GOOGLE_CLIENT_SECRET_EMAIL',
+        'MICROSOFT_CLIENT_ID_EMAIL', 'MICROSOFT_CLIENT_SECRET_EMAIL',
     }
     try:
         with open(env_file, encoding="utf-8") as f:

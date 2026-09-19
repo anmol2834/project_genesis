@@ -212,20 +212,21 @@ async def get_fresh_token(snap: dict) -> str:
     email    = snap.get("email_address", "")
 
     try:
+        cfg_obj = cfg.get_config()
         if provider == "gmail":
             url  = "https://oauth2.googleapis.com/token"
             data = {
-                "client_id":     cfg.GOOGLE_CLIENT_ID_EMAIL,
-                "client_secret": cfg.GOOGLE_CLIENT_SECRET_EMAIL,
+                "client_id":     cfg_obj.GOOGLE_CLIENT_ID_EMAIL,
+                "client_secret": cfg_obj.GOOGLE_CLIENT_SECRET_EMAIL,
                 "refresh_token": decrypt_token(refresh_enc),
                 "grant_type":    "refresh_token",
             }
         else:
-            tenant = cfg.MICROSOFT_TENANT_ID_EMAIL or "common"
+            tenant = cfg_obj.MICROSOFT_TENANT_ID_EMAIL or "common"
             url  = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
             data = {
-                "client_id":     cfg.MICROSOFT_CLIENT_ID_EMAIL,
-                "client_secret": cfg.MICROSOFT_CLIENT_SECRET_EMAIL,
+                "client_id":     cfg_obj.MICROSOFT_CLIENT_ID_EMAIL,
+                "client_secret": cfg_obj.MICROSOFT_CLIENT_SECRET_EMAIL,
                 "refresh_token": decrypt_token(refresh_enc),
                 "grant_type":    "refresh_token",
                 "scope":         "https://graph.microsoft.com/.default offline_access",

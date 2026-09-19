@@ -10,6 +10,13 @@ from shared.config import get_config as _shared_cfg
 def get_config():
     return _shared_cfg()
 
+def __getattr__(name: str):
+    """Proxy module attributes to shared GlobalConfig if not defined locally."""
+    cfg = get_config()
+    if hasattr(cfg, name):
+        return getattr(cfg, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 # ═════════════════════════════════════════════════════════════════════════════
 # KAFKA TOPICS
 # ═════════════════════════════════════════════════════════════════════════════
