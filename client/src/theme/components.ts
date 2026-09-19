@@ -9,8 +9,20 @@ export const components = (theme: Theme): Components<Theme> => {
     MuiCssBaseline: {
       styleOverrides: {
         '*, *::before, *::after': { boxSizing: 'border-box' },
-        html: { scrollBehavior: 'smooth', WebkitFontSmoothing: 'antialiased', MozOsxFontSmoothing: 'grayscale' },
-        body: { transition: 'background-color 0.25s ease, color 0.25s ease' },
+        html: {
+          scrollBehavior: 'smooth',
+          WebkitFontSmoothing: 'antialiased',
+          MozOsxFontSmoothing: 'grayscale',
+          backgroundColor: theme.palette.background.default,
+          color: theme.palette.text.primary,
+          colorScheme: theme.palette.mode,
+        },
+        body: {
+          backgroundColor: theme.palette.background.default,
+          color: theme.palette.text.primary,
+          transition: 'background-color 0.25s ease, color 0.25s ease',
+          minHeight: '100vh',
+        },
         '::-webkit-scrollbar': { width: '6px', height: '6px' },
         '::-webkit-scrollbar-track': { background: 'transparent' },
         '::-webkit-scrollbar-thumb': { background: theme.palette.divider, borderRadius: '9999px' },
@@ -31,9 +43,18 @@ export const components = (theme: Theme): Components<Theme> => {
           background: grad.primary,
           '&:hover': { background: grad.primary, filter: 'brightness(1.08)', boxShadow: theme.shadows[8] },
         },
+        outlined: {
+          borderColor: isDark ? 'rgba(203, 213, 225, 0.25)' : 'rgba(15, 23, 42, 0.20)',
+          color: theme.palette.text.primary,
+          '&:hover': {
+            borderColor: theme.palette.primary.main,
+            background: theme.palette.action.hover,
+          },
+        },
         outlinedPrimary: {
           borderColor: theme.palette.primary.main,
-          '&:hover': { background: theme.palette.action.hover },
+          color: theme.palette.primary.main,
+          '&:hover': { background: theme.palette.action.hover, borderColor: theme.palette.primary.dark },
         },
         sizeLarge: { padding: '12px 28px', fontSize: '1rem' },
         sizeSmall: { padding: '5px 14px', fontSize: '0.8125rem' },

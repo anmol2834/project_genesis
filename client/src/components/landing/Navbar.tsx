@@ -92,31 +92,32 @@ export default function Navbar() {
           }}
         >
           {/* Logo */}
+          {/* Logo */}
           <motion.div initial={{ opacity: 0, x: -16 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.4 }}>
             <Box
               component="button"
               onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-              sx={{ display: 'flex', alignItems: 'center', gap: 0, background: 'none', border: 'none', cursor: 'pointer', p: 0 }}
+              sx={{ display: 'flex', alignItems: 'center', gap: 0.5, background: 'none', border: 'none', cursor: 'pointer', p: 0 }}
             >
               <Box
                 component="img"
                 src="/Proxipilot logo.svg"
                 alt="Proxipilot Logo"
                 sx={{
-                  width: { xs: 72, sm: 84, md: 96 }, 
-                  height: { xs: 72, sm: 84, md: 96 },
+                  width: { xs: 44, sm: 50, md: 54 },
+                  height: { xs: 44, sm: 50, md: 54 },
                   flexShrink: 0,
-                  my: { xs: -1.5, sm: -2, md: -2.5 },
+                  objectFit: 'contain',
                 }}
               />
               <Box
                 component="span"
                 sx={{ 
-                  fontWeight: 700, 
-                  fontSize: { xs: '0.95rem', sm: '1.05rem' }, 
+                  fontWeight: 800, 
+                  fontSize: { xs: '1.05rem', sm: '1.15rem' }, 
                   letterSpacing: '-0.02em', 
                   color: 'text.primary',
-                  ml: { xs: -3, sm: -3.5, md: -4 },
+                  ml: { xs: -0.5, sm: -0.75 },
                 }}
               >
                 Proxipilot
@@ -165,15 +166,28 @@ export default function Navbar() {
 
           {/* Actions */}
           <motion.div initial={{ opacity: 0, x: 16 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.4, delay: 0.15 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: { xs: 0.5, sm: 1 } }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: { xs: 0.75, sm: 1.25 } }}>
               <IconButton
                 onClick={toggleTheme}
                 size="small"
-                sx={{ color: 'text.secondary', width: 44, height: 44 }}
+                aria-label={mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                sx={{
+                  color: 'text.primary',
+                  width: 38,
+                  height: 38,
+                  borderRadius: '10px',
+                  border: `1px solid ${theme.palette.divider}`,
+                  background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
+                  transition: 'all 0.2s ease',
+                  '&:hover': {
+                    borderColor: 'primary.main',
+                    background: alpha(theme.palette.primary.main, isDark ? 0.16 : 0.08),
+                  },
+                }}
               >
                 {mode === 'dark'
-                  ? <LightModeRoundedIcon sx={{ fontSize: 18 }} />
-                  : <DarkModeRoundedIcon sx={{ fontSize: 18 }} />
+                  ? <LightModeRoundedIcon sx={{ fontSize: 19, color: '#fbbf24' }} />
+                  : <DarkModeRoundedIcon sx={{ fontSize: 19, color: 'text.primary' }} />
                 }
               </IconButton>
 
@@ -182,7 +196,16 @@ export default function Navbar() {
                 href="/sign-in"
                 variant="outlined"
                 size="small"
-                sx={{ display: { xs: 'none', sm: 'flex' }, minHeight: 36 }}
+                sx={{
+                  display: { xs: 'none', sm: 'flex' },
+                  minHeight: 36,
+                  color: 'text.primary',
+                  borderColor: isDark ? 'rgba(203, 213, 225, 0.28)' : 'rgba(15, 23, 42, 0.22)',
+                  '&:hover': {
+                    borderColor: 'primary.main',
+                    background: alpha(theme.palette.primary.main, isDark ? 0.12 : 0.06),
+                  },
+                }}
               >
                 Sign in
               </Button>
@@ -208,7 +231,7 @@ export default function Navbar() {
               <IconButton
                 onClick={() => setDrawerOpen(true)}
                 size="small"
-                sx={{ display: { xs: 'flex', md: 'none' }, color: 'text.secondary', width: 44, height: 44 }}
+                sx={{ display: { xs: 'flex', md: 'none' }, color: 'text.primary', width: 40, height: 40 }}
                 aria-label="Open menu"
               >
                 <MenuRoundedIcon sx={{ fontSize: 22 }} />
@@ -234,13 +257,13 @@ export default function Navbar() {
       >
         {/* Drawer header */}
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 2.5, py: 1.5 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0 }}>
-            <Box component="img" src="/Proxipilot logo.svg" alt="Proxipilot Logo" sx={{ width: 64, height: 64, flexShrink: 0 }} />
-            <Box component="span" sx={{ fontWeight: 700, fontSize: '0.95rem', letterSpacing: '-0.02em', color: 'text.primary', ml: -2.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <Box component="img" src="/Proxipilot logo.svg" alt="Proxipilot Logo" sx={{ width: 44, height: 44, flexShrink: 0, objectFit: 'contain' }} />
+            <Box component="span" sx={{ fontWeight: 800, fontSize: '1.05rem', letterSpacing: '-0.02em', color: 'text.primary' }}>
               Proxipilot
             </Box>
           </Box>
-          <IconButton onClick={() => setDrawerOpen(false)} size="small" sx={{ color: 'text.secondary', width: 40, height: 40 }}>
+          <IconButton onClick={() => setDrawerOpen(false)} size="small" sx={{ color: 'text.primary', width: 40, height: 40 }}>
             <CloseRoundedIcon sx={{ fontSize: 20 }} />
           </IconButton>
         </Box>

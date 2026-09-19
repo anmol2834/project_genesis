@@ -67,6 +67,8 @@ export default function WaitlistClient() {
         position: 'relative',
         display: 'flex',
         flexDirection: 'column',
+        background: theme.palette.background.default,
+        color: theme.palette.text.primary,
         overflowX: 'hidden',
         // On desktop keep fixed/no-scroll; on mobile allow scroll
         overflowY: { xs: 'auto', md: 'hidden' },
@@ -145,7 +147,7 @@ export default function WaitlistClient() {
                     <stat.icon sx={{ fontSize: 14, color: 'primary.main' }} />
                     <Typography sx={{ fontSize: { xs: '1rem', md: '1.25rem' }, fontWeight: 800, color: 'text.primary' }}>{stat.value}</Typography>
                   </Box>
-                  <Typography sx={{ fontSize: '0.7rem', color: 'text.disabled' }}>{stat.label}</Typography>
+                  <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', fontWeight: 500 }}>{stat.label}</Typography>
                 </MotionBox>
               ))}
             </Box>
@@ -177,7 +179,7 @@ export default function WaitlistClient() {
                     sx={{
                       p: { xs: 2.5, sm: 3 },
                       borderRadius: '20px',
-                      background: isDark ? alpha(theme.palette.background.paper, 0.6) : alpha('#fff', 0.8),
+                      background: isDark ? alpha(theme.palette.background.paper, 0.8) : alpha('#fff', 0.9),
                       backdropFilter: 'blur(20px)',
                       border: `1px solid ${alpha(theme.palette.primary.main, isDark ? 0.2 : 0.15)}`,
                       boxShadow: isDark ? '0 20px 60px rgba(0,0,0,0.4)' : '0 20px 60px rgba(0,0,0,0.08)',
@@ -190,8 +192,8 @@ export default function WaitlistClient() {
                         <RocketLaunchRoundedIcon sx={{ color: '#fff', fontSize: 22 }} />
                       </Box>
                       <Box>
-                        <Typography variant="h6" sx={{ fontWeight: 700, fontSize: '1.1rem' }}>Join Waitlist</Typography>
-                        <Typography sx={{ fontSize: '0.75rem', color: 'text.disabled' }}>Secure your early access</Typography>
+                        <Typography variant="h6" sx={{ fontWeight: 700, fontSize: '1.1rem', color: 'text.primary' }}>Join Waitlist</Typography>
+                        <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', fontWeight: 500 }}>Secure your early access</Typography>
                       </Box>
                     </Box>
 
@@ -209,7 +211,7 @@ export default function WaitlistClient() {
                       {loading ? <CircularProgress size={22} sx={{ color: '#fff' }} /> : 'Join the Waitlist →'}
                     </Button>
 
-                    <Typography sx={{ fontSize: '0.65rem', color: 'text.disabled', textAlign: 'center', mt: 1.5 }}>
+                    <Typography sx={{ fontSize: '0.7rem', color: 'text.secondary', textAlign: 'center', mt: 1.5 }}>
                       By joining, you agree to receive updates about Proxipilot
                     </Typography>
                   </Box>
@@ -229,7 +231,7 @@ export default function WaitlistClient() {
                           <stat.icon sx={{ fontSize: 14, color: 'primary.main' }} />
                           <Typography sx={{ fontSize: '1rem', fontWeight: 800, color: 'text.primary' }}>{stat.value}</Typography>
                         </Box>
-                        <Typography sx={{ fontSize: '0.7rem', color: 'text.disabled' }}>{stat.label}</Typography>
+                        <Typography sx={{ fontSize: '0.75rem', color: 'text.secondary', fontWeight: 500 }}>{stat.label}</Typography>
                       </MotionBox>
                     ))}
                   </Box>

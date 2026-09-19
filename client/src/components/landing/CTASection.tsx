@@ -63,17 +63,26 @@ export default function CTASection() {
               sx={{
                 mb: { xs: 1.5, sm: 2.5 },
                 fontSize: { xs: 'clamp(1.4rem, 6vw, 1.9rem)', sm: 'clamp(1.6rem, 4vw, 2.5rem)' },
-                background: isDark
-                  ? 'linear-gradient(135deg, #f8fafc 0%, #c7d2fe 100%)'
-                  : 'linear-gradient(135deg, #0f172a 0%, #3730a3 100%)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                backgroundClip: 'text',
+                color: 'text.primary',
+                fontWeight: 800,
+                letterSpacing: '-0.02em',
+                lineHeight: 1.2,
               }}
             >
               Stop replying manually.
               <br />
-              Let AI handle it.
+              <Box
+                component="span"
+                sx={{
+                  background: grad.primary,
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text',
+                  display: 'inline-block',
+                }}
+              >
+                Let AI handle it.
+              </Box>
             </Typography>
 
             <Typography
@@ -136,8 +145,12 @@ export default function CTASection() {
                   minHeight: 48,
                   px: { xs: 3, sm: 3.5 },
                   fontSize: { xs: '0.9rem', sm: '1rem' },
-                  borderColor: alpha(theme.palette.primary.main, isDark ? 0.40 : 0.35),
-                  '&:hover': { borderColor: 'primary.main' },
+                  color: 'text.primary',
+                  borderColor: isDark ? 'rgba(203, 213, 225, 0.28)' : 'rgba(15, 23, 42, 0.22)',
+                  '&:hover': {
+                    borderColor: 'primary.main',
+                    background: alpha(theme.palette.primary.main, isDark ? 0.12 : 0.06),
+                  },
                 }}
               >
                 Join Waitlist
@@ -146,10 +159,11 @@ export default function CTASection() {
 
             <Typography
               sx={{
-                color: 'text.disabled',
+                color: 'text.secondary',
                 mt: { xs: 2, sm: 3 },
                 display: 'block',
-                fontSize: { xs: '0.72rem', sm: '0.75rem' },
+                fontSize: { xs: '0.75rem', sm: '0.78rem' },
+                fontWeight: 500,
               }}
             >
               Free plan · No setup fees · Cancel anytime

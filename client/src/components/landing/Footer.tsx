@@ -32,10 +32,10 @@ export default function Footer() {
         <Box
           component={NextLink}
           href="/"
-          sx={{ display: 'flex', alignItems: 'center', gap: 0, justifyContent: { xs: 'center', sm: 'flex-start' }, textDecoration: 'none', overflow: 'hidden' }}
+          sx={{ display: 'flex', alignItems: 'center', gap: 0.5, justifyContent: { xs: 'center', sm: 'flex-start' }, textDecoration: 'none' }}
         >
-          <Box component="img" src="/Proxipilot logo.svg" alt="Proxipilot Logo" sx={{ width: 64, height: 64, flexShrink: 0 }} />
-          <Typography sx={{ fontWeight: 700, letterSpacing: '-0.02em', color: 'text.primary', fontSize: '0.9rem', ml: -2.5 }}>
+          <Box component="img" src="/Proxipilot logo.svg" alt="Proxipilot Logo" sx={{ width: 44, height: 44, flexShrink: 0, objectFit: 'contain' }} />
+          <Typography sx={{ fontWeight: 800, letterSpacing: '-0.02em', color: 'text.primary', fontSize: '1.05rem', ml: -0.5 }}>
             Proxipilot
           </Typography>
         </Box>
@@ -55,13 +55,14 @@ export default function Footer() {
               component={NextLink}
               href={link.href}
               sx={{
-                color: 'text.disabled',
+                color: 'text.secondary',
                 cursor: 'pointer',
-                fontSize: { xs: '0.78rem', sm: '0.8rem' },
+                fontSize: { xs: '0.8rem', sm: '0.85rem' },
+                fontWeight: 500,
                 transition: 'color 0.15s',
                 textDecoration: 'none',
                 lineHeight: '44px',
-                '&:hover': { color: 'text.secondary' },
+                '&:hover': { color: 'primary.main' },
               }}
             >
               {link.label}
@@ -72,8 +73,8 @@ export default function Footer() {
         {/* Copyright */}
         <Typography
           sx={{
-            color: 'text.disabled',
-            fontSize: { xs: '0.72rem', sm: '0.75rem' },
+            color: 'text.secondary',
+            fontSize: { xs: '0.75rem', sm: '0.8rem' },
             whiteSpace: 'nowrap',
           }}
         >

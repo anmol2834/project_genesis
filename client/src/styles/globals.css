@@ -4,15 +4,31 @@
 @import '@fontsource/inter/600.css';
 @import '@fontsource/inter/700.css';
 
-/* Prevent horizontal overflow on all devices */
-html, body {
+/* Prevent horizontal overflow on all devices & establish theme backgrounds */
+html {
   overflow-x: hidden;
   max-width: 100vw;
+  color-scheme: light dark;
 }
 
-/* Use dynamic viewport height for mobile browsers */
-#__next {
-  min-height: 100svh;
+html[data-theme='dark'] {
+  color-scheme: dark;
+  background-color: #080d18;
+  color: #f8fafc;
+}
+
+html[data-theme='light'] {
+  color-scheme: light;
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+
+body {
+  overflow-x: hidden;
+  max-width: 100vw;
+  min-height: 100vh;
+  background-color: inherit;
+  color: inherit;
 }
 
 /* ── Design tokens as CSS custom properties ─────────────────────────── */
@@ -56,8 +72,14 @@ html, body {
   border: 1px solid var(--glass-border);
 }
 
+[data-theme='dark'] .glass,
 [data-mui-color-scheme='dark'] .glass {
   background: var(--glass-bg-dark);
+}
+
+[data-theme='light'] .glass,
+[data-mui-color-scheme='light'] .glass {
+  background: var(--glass-bg-light);
 }
 
 /* Gradient background */

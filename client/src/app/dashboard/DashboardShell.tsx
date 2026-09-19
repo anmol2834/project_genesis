@@ -43,8 +43,8 @@ export default function DashboardShell({ children }: { children: React.ReactNode
             <Box onClick={() => router.push('/dashboard/settings')} sx={{ width: 34, height: 34, borderRadius: '8px', background: grad.primary, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontWeight: 700, fontSize: '0.75rem', color: '#fff', border: `1px solid ${theme.palette.divider}`, transition: 'transform 0.2s ease', '&:hover': { transform: 'scale(1.05)' } }}>
               {getInitials(user?.full_name)}
             </Box>
-            <IconButton onClick={toggleTheme} size="small" sx={{ width: 34, height: 34, color: 'text.secondary', borderRadius: '8px', border: `1px solid ${theme.palette.divider}`, '&:hover': { borderColor: theme.palette.primary.main } }}>
-              {mode === 'dark' ? <LightModeRoundedIcon sx={{ fontSize: 15 }} /> : <DarkModeRoundedIcon sx={{ fontSize: 15 }} />}
+            <IconButton onClick={toggleTheme} size="small" sx={{ width: 34, height: 34, color: 'text.primary', borderRadius: '8px', border: `1px solid ${theme.palette.divider}`, background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)', '&:hover': { borderColor: theme.palette.primary.main } }}>
+              {mode === 'dark' ? <LightModeRoundedIcon sx={{ fontSize: 16, color: '#fbbf24' }} /> : <DarkModeRoundedIcon sx={{ fontSize: 16, color: 'text.primary' }} />}
             </IconButton>
           </Box>
           <Box sx={{ flex: 1, overflow: 'hidden', minHeight: 0, display: 'flex', flexDirection: 'column' }}>

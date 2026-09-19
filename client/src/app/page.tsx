@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import dynamic from 'next/dynamic';
+import { Box } from '@mui/material';
 import Navbar from '@/components/landing/Navbar';
 import HeroSection from '@/components/landing/HeroSection';
 import Footer from '@/components/landing/Footer';
@@ -36,7 +37,14 @@ export const metadata: Metadata = buildMetadata({
 
 export default function LandingPage() {
   return (
-    <>
+    <Box
+      sx={{
+        minHeight: '100vh',
+        background: 'background.default',
+        color: 'text.primary',
+        transition: 'background-color 0.25s ease, color 0.25s ease',
+      }}
+    >
       <JsonLd
         data={[
           softwareApplicationSchema(),
@@ -56,6 +64,6 @@ export default function LandingPage() {
       </main>
       <Footer />
       <FloatingWaitlistButton />
-    </>
+    </Box>
   );
 }

@@ -90,9 +90,28 @@ export const viewport: Viewport = {
   ],
 };
 
+const themeInitScript = `
+(function() {
+  try {
+    var stored = localStorage.getItem('pg-theme-mode');
+    var dark = stored === 'dark' || (!stored && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    var mode = dark ? 'dark' : 'light';
+    var bg = dark ? '#080d18' : '#f8fafc';
+    var doc = document.documentElement;
+    doc.setAttribute('data-theme', mode);
+    doc.setAttribute('data-mui-color-scheme', mode);
+    doc.style.colorScheme = mode;
+    doc.style.backgroundColor = bg;
+  } catch (e) {}
+})();
+`;
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning data-scroll-behavior="smooth">
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+      </head>
       <body>
         <NextAppDirEmotionCacheProvider options={{ key: 'css' }}>
           <JsonLd data={[organizationSchema(), websiteSchema()]} />

@@ -101,8 +101,8 @@ export const lightPalette = {
 
   text: {
     primary:   neutralScale[900],    // #0f172a  — 19.6:1 on white ✓
-    secondary: neutralScale[600],    // #475569  —  7.0:1 on white ✓
-    disabled:  neutralScale[400],    // #94a3b8  —  3.5:1 on white ✓
+    secondary: neutralScale[700],    // #334155  —  9.6:1 on white ✓ (crisp, high contrast)
+    disabled:  neutralScale[500],    // #64748b  —  4.6:1 on white ✓ (accessible hints/labels)
   },
 
   divider: neutralScale[200],        // #e2e8f0
@@ -115,12 +115,12 @@ export const lightPalette = {
 } as const;
 
 // ─── DARK MODE palette ────────────────────────────────────────────────────────
-// Background: deep navy #0f172a / paper #1e293b  →  text must be light
+// Background: deep #080d18 / paper #0f172a & #1e293b  →  text must be light
 // Primary: lighter indigo so it pops on dark bg
-// text.primary   neutral[50]  #f8fafc  on #1e293b → 15.8:1  ✓
-// text.secondary neutral[300] #cbd5e1  on #1e293b →  8.9:1  ✓
-// text.disabled  neutral[500] #64748b  on #1e293b →  3.1:1  ✓ (decorative/hint)
-// divider        rgba(203,213,225, 0.10)
+// text.primary   neutral[50]  #f8fafc  on #080d18 → 18.0:1  ✓
+// text.secondary neutral[300] #cbd5e1  on #080d18 → 10.0:1  ✓
+// text.disabled  neutral[400] #94a3b8  on #080d18 →  6.0:1  ✓
+// divider        rgba(203,213,225, 0.12)
 
 export const darkPalette = {
   mode: 'dark' as const,
@@ -165,22 +165,22 @@ export const darkPalette = {
   },
 
   background: {
-    default: neutralScale[900],      // #0f172a — deep navy, not pure black
-    paper:   neutralScale[800],      // #1e293b
+    default: neutralScale[950],      // #080d18 — true deep luxury dark
+    paper:   neutralScale[900],      // #0f172a
   },
 
   text: {
-    primary:   neutralScale[50],     // #f8fafc  — 15.8:1 on #1e293b ✓
-    secondary: neutralScale[300],    // #cbd5e1  —  8.9:1 on #1e293b ✓
-    disabled:  neutralScale[500],    // #64748b  —  3.1:1 on #1e293b ✓
+    primary:   neutralScale[50],     // #f8fafc  — 18.0:1 on #080d18 ✓
+    secondary: neutralScale[300],    // #cbd5e1  — 10.0:1 on #080d18 ✓
+    disabled:  neutralScale[400],    // #94a3b8  —  6.0:1 on #080d18, 4.5:1 on #1e293b ✓
   },
 
-  divider: 'rgba(203, 213, 225, 0.10)',
+  divider: 'rgba(203, 213, 225, 0.12)',
 
   action: {
     hover:              'rgba(129, 140, 248, 0.08)',  // brand[400] tint
     selected:           'rgba(129, 140, 248, 0.14)',
-    disabledBackground: neutralScale[800],
+    disabledBackground: neutralScale[850],
   },
 } as const;
 

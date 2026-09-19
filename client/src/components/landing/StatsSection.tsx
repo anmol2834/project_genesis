@@ -96,7 +96,7 @@ export default function StatsSection() {
                 <Typography sx={{ mb: 0.4, fontWeight: 600, fontSize: { xs: '0.75rem', sm: '0.875rem' }, color: 'text.primary' }}>
                   {stat.label}
                 </Typography>
-                <Typography sx={{ color: 'text.disabled', fontSize: { xs: '0.68rem', sm: '0.75rem' } }}>
+                <Typography sx={{ color: 'text.secondary', fontSize: { xs: '0.72rem', sm: '0.78rem' } }}>
                   {stat.desc}
                 </Typography>
               </Box>

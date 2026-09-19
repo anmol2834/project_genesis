@@ -27,6 +27,8 @@ const STORAGE_KEY = 'pg-theme-mode';
 
 function getInitialMode(): ThemeMode {
   if (typeof window === 'undefined') return 'light';
+  const attr = document.documentElement.getAttribute('data-theme') as ThemeMode | null;
+  if (attr === 'light' || attr === 'dark') return attr;
   const stored = localStorage.getItem(STORAGE_KEY) as ThemeMode | null;
   if (stored === 'light' || stored === 'dark') return stored;
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -41,6 +43,22 @@ export function AppThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setModeState(getInitialMode());
   }, []);
+
+  // Sync mode to DOM attributes, color-scheme, and document body styles
+  useEffect(() => {
+    const root = document.documentElement;
+    const body = document.body;
+    root.setAttribute('data-theme', mode);
+    root.setAttribute('data-mui-color-scheme', mode);
+    root.style.colorScheme = mode;
+    const bg = mode === 'dark' ? '#080d18' : '#f8fafc';
+    const fg = mode === 'dark' ? '#f8fafc' : '#0f172a';
+    root.style.backgroundColor = bg;
+    if (body) {
+      body.style.backgroundColor = bg;
+      body.style.color = fg;
+    }
+  }, [mode]);
 
   // Sync system preference changes
   useEffect(() => {

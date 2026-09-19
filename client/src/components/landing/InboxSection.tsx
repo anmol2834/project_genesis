@@ -206,7 +206,7 @@ export default function InboxSection() {
                             >
                               <Typography sx={{ fontSize: { xs: '0.76rem', sm: '0.8rem' }, color: 'text.primary', lineHeight: 1.6 }}>{msg.text}</Typography>
                             </Box>
-                            <Typography sx={{ color: 'text.disabled', fontSize: '0.65rem', mt: 0.4, display: 'block', textAlign: msg.isMe ? 'right' : 'left' }}>
+                            <Typography sx={{ color: 'text.secondary', fontSize: '0.68rem', mt: 0.4, display: 'block', textAlign: msg.isMe ? 'right' : 'left' }}>
                               {msg.isMe && <AutoAwesomeRoundedIcon sx={{ fontSize: 9, mr: 0.4, verticalAlign: 'middle', color: 'primary.main' }} />}
                               {msg.from} · {msg.time}
                             </Typography>
@@ -218,7 +218,7 @@ export default function InboxSection() {
                 ) : (
                   // Desktop empty state
                   <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <Typography sx={{ color: 'text.disabled', fontSize: '0.85rem' }}>Select a conversation</Typography>
+                    <Typography sx={{ color: 'text.secondary', fontSize: '0.85rem' }}>Select a conversation</Typography>
                   </motion.div>
                 )}
               </AnimatePresence>

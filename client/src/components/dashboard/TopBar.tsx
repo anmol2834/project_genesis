@@ -123,8 +123,8 @@ export default function TopBar() {
           </Box>
 
           {/* Theme Toggle */}
-          <IconButton onClick={toggleTheme} size="small" sx={{ width: 34, height: 34, color: 'text.secondary', borderRadius: '8px', border: `1px solid ${theme.palette.divider}` }}>
-            {mode === 'dark' ? <LightModeRoundedIcon sx={{ fontSize: 15 }} /> : <DarkModeRoundedIcon sx={{ fontSize: 15 }} />}
+          <IconButton onClick={toggleTheme} size="small" sx={{ width: 34, height: 34, color: 'text.primary', borderRadius: '8px', border: `1px solid ${theme.palette.divider}`, background: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)' }}>
+            {mode === 'dark' ? <LightModeRoundedIcon sx={{ fontSize: 16, color: '#fbbf24' }} /> : <DarkModeRoundedIcon sx={{ fontSize: 16, color: 'text.primary' }} />}
           </IconButton>
         </Box>
       </Box>

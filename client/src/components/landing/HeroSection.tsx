@@ -80,7 +80,7 @@ function LiveInboxDemo() {
           <Box key={c} sx={{ width: { xs: 8, sm: 10 }, height: { xs: 8, sm: 10 }, borderRadius: '50%', background: c, flexShrink: 0 }} />
         ))}
         <Box sx={{ flex: 1, mx: { xs: 1, sm: 2 }, height: 20, borderRadius: '6px', background: alpha(theme.palette.text.primary, 0.05), display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <Typography sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>inbox.proxipilot.ai</Typography>
+          <Typography sx={{ color: 'text.secondary', fontSize: '0.68rem', fontWeight: 500 }}>inbox.proxipilot.ai</Typography>
         </Box>
       </Box>
 
@@ -106,7 +106,7 @@ function LiveInboxDemo() {
                 {e.subject}
               </Typography>
             </Box>
-            <Typography sx={{ color: 'text.disabled', fontSize: '0.65rem', flexShrink: 0 }}>{e.time}</Typography>
+            <Typography sx={{ color: 'text.secondary', fontSize: '0.68rem', flexShrink: 0 }}>{e.time}</Typography>
           </Box>
         ))}
       </Box>
@@ -152,7 +152,7 @@ function LiveInboxDemo() {
 
           {phase === 'email' && (
             <motion.div key="email" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-              <Typography sx={{ color: 'text.disabled', fontSize: '0.72rem' }}>Waiting for new email…</Typography>
+              <Typography sx={{ color: 'text.secondary', fontSize: '0.72rem' }}>Waiting for new email…</Typography>
             </motion.div>
           )}
         </AnimatePresence>
@@ -161,7 +161,7 @@ function LiveInboxDemo() {
       {/* Status bar */}
       <Box sx={{ px: { xs: 1.5, sm: 2 }, py: 0.875, borderTop: `1px solid ${theme.palette.divider}`, display: 'flex', alignItems: 'center', gap: 1 }}>
         <Box sx={{ width: 6, height: 6, borderRadius: '50%', background: theme.palette.success.main, boxShadow: `0 0 5px ${theme.palette.success.main}`, flexShrink: 0 }} />
-        <Typography sx={{ color: 'text.disabled', fontSize: '0.65rem' }}>Live · 1,247 emails/min</Typography>
+        <Typography sx={{ color: 'text.secondary', fontSize: '0.68rem', fontWeight: 500 }}>Live · 1,247 emails/min</Typography>
         <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 0.5 }}>
           <BoltRoundedIcon sx={{ fontSize: 11, color: 'warning.main' }} />
           <Typography sx={{ color: 'warning.main', fontSize: '0.65rem', fontWeight: 600 }}>{"< "}15s</Typography>
@@ -183,6 +183,8 @@ export default function HeroSection() {
         minHeight: '100svh',
         display: 'flex',
         alignItems: 'center',
+        background: theme.palette.background.default,
+        color: theme.palette.text.primary,
         // Mobile: less top padding (navbar is 56px), desktop: more breathing room
         pt: { xs: '72px', sm: '80px', md: '88px' },
         pb: { xs: 6, sm: 8, md: 10 },
@@ -238,14 +240,11 @@ export default function HeroSection() {
               variant="h1"
               sx={{
                 mb: { xs: 2, sm: 2.5 },
-                // Tighter clamp on mobile — no oversized heading
                 fontSize: { xs: 'clamp(1.75rem, 7vw, 2.25rem)', sm: 'clamp(2rem, 5vw, 3rem)', lg: 'clamp(2.5rem, 4vw, 3.5rem)' },
-                background: isDark
-                  ? 'linear-gradient(135deg, #f8fafc 0%, #cbd5e1 100%)'
-                  : 'linear-gradient(135deg, #0f172a 0%, #334155 100%)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                backgroundClip: 'text',
+                color: 'text.primary',
+                fontWeight: 800,
+                letterSpacing: '-0.03em',
+                lineHeight: 1.15,
               }}
             >
               {/* Visually hidden brand name for SEO — screen readers and crawlers see it */}
@@ -263,7 +262,16 @@ export default function HeroSection() {
                 Proxipilot —{' '}
               </Box>
               Email replies on{' '}
-              <Box component="span" sx={{ background: grad.primary, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text' }}>
+              <Box
+                component="span"
+                sx={{
+                  background: grad.primary,
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text',
+                  display: 'inline-block',
+                }}
+              >
                 autopilot.
               </Box>
             </Typography>
@@ -327,6 +335,12 @@ export default function HeroSection() {
                   minHeight: 48,
                   fontSize: { xs: '0.9rem', sm: '1rem' },
                   px: { xs: 2.5, sm: 3 },
+                  color: 'text.primary',
+                  borderColor: isDark ? 'rgba(203, 213, 225, 0.28)' : 'rgba(15, 23, 42, 0.22)',
+                  '&:hover': {
+                    borderColor: 'primary.main',
+                    background: alpha(theme.palette.primary.main, isDark ? 0.12 : 0.06),
+                  },
                 }}
               >
                 Join Waitlist
@@ -345,7 +359,7 @@ export default function HeroSection() {
                   <Typography sx={{ fontWeight: 700, fontSize: { xs: '1rem', sm: '1.1rem' }, color: 'primary.main', lineHeight: 1 }}>
                     {stat.value}
                   </Typography>
-                  <Typography sx={{ color: 'text.disabled', fontSize: '0.72rem', mt: 0.25 }}>
+                  <Typography sx={{ color: 'text.secondary', fontSize: '0.75rem', fontWeight: 500, mt: 0.35 }}>
                     {stat.label}
                   </Typography>
                 </Box>
