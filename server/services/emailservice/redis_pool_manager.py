@@ -82,8 +82,9 @@ async def get_redis_pool() -> ConnectionPool:
         cfg = get_config()
         redis_url = cfg.REDIS_URL
         
+        from shared.utils.security import mask_url_credentials
         logger.info("Creating Redis connection pool | max_connections=%d url=%s",
-                   MAX_CONNECTIONS, redis_url[:50] + "...")
+                   MAX_CONNECTIONS, mask_url_credentials(redis_url))
         
         _redis_pool = ConnectionPool.from_url(
             redis_url,

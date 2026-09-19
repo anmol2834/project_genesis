@@ -771,8 +771,12 @@ function SourcesView({ isDark, theme }: { isDark: boolean; theme: Theme }) {
 // ── Add data modal ────────────────────────────────────────────────────────────
 // Flow: category (mandatory) → method (csv/manual/sheets/api) → form
 // REDESIGNED: no right column, guide appears as smooth hover tooltip on each card
-function AddDataModal({ open, onClose, isDark, theme }: {
-  open: boolean; onClose: () => void; isDark: boolean; theme: Theme;
+function AddDataModal({ open, onClose, onToast, isDark, theme }: {
+  open: boolean;
+  onClose: () => void;
+  onToast?: (msg: string, severity: 'success' | 'error') => void;
+  isDark: boolean;
+  theme: Theme;
 }) {
   type Step = 'category' | 'method' | 'csv' | 'manual' | 'sheets' | 'api';
   const [step, setStep] = useState<Step>('category');
@@ -817,6 +821,9 @@ function AddDataModal({ open, onClose, isDark, theme }: {
   };
 
   const handleClose = () => {
+    uploadFile.reset();
+    createManual.reset();
+    connectSheet.reset();
     onClose();
     setStep('category');
     setSelectedCategory(null);
@@ -832,6 +839,9 @@ function AddDataModal({ open, onClose, isDark, theme }: {
   };
 
   const handleBack = () => {
+    uploadFile.reset();
+    createManual.reset();
+    connectSheet.reset();
     if (step === 'method') { setStep('category'); setSelectedCategory(null); }
     else if (['csv', 'manual', 'sheets', 'api'].includes(step)) setStep('method');
   };
@@ -1234,6 +1244,11 @@ function AddDataModal({ open, onClose, isDark, theme }: {
                 {CATEGORY_CONFIG[selectedCategory].exampleColumns.join(' · ')}
               </Typography>
             </Box>
+            {uploadFile.isError && (
+              <Alert severity="error" sx={{ borderRadius: '10px', fontSize: '0.72rem', py: 0.5 }}>
+                {(uploadFile.error as any)?.message || 'Failed to upload file'}
+              </Alert>
+            )}
             <Box
               component="button"
               disabled={!csvFile || isSubmitting}
@@ -1241,7 +1256,15 @@ function AddDataModal({ open, onClose, isDark, theme }: {
                 if (!csvFile || !selectedCategory) return;
                 uploadFile.mutate(
                   { file: csvFile, sourceName: sourceName || csvFile.name, category: selectedCategory },
-                  { onSuccess: handleClose },
+                  {
+                    onSuccess: () => {
+                      onToast?.('File uploaded successfully. Processing data in background...', 'success');
+                      handleClose();
+                    },
+                    onError: (err: any) => {
+                      onToast?.(err?.message || 'Failed to upload file', 'error');
+                    },
+                  },
                 );
               }}
               sx={{ width: '100%', border: 'none', cursor: csvFile ? 'pointer' : 'not-allowed', py: 1.1, borderRadius: '12px', background: csvFile ? 'linear-gradient(135deg, #34d399, #22d3ee)' : isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', color: csvFile ? '#fff' : 'text.disabled', fontSize: '0.82rem', fontWeight: 700, transition: 'all 0.18s ease', boxShadow: csvFile ? '0 4px 16px rgba(52,211,153,0.3)' : 'none', '&:hover': { opacity: csvFile ? 0.9 : 1 }, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}
@@ -1277,6 +1300,11 @@ function AddDataModal({ open, onClose, isDark, theme }: {
                 {CATEGORY_CONFIG[selectedCategory].exampleColumns.join(' · ')}
               </Typography>
             </Box>
+            {createManual.isError && (
+              <Alert severity="error" sx={{ borderRadius: '10px', fontSize: '0.72rem', py: 0.5 }}>
+                {(createManual.error as any)?.message || 'Failed to create entry'}
+              </Alert>
+            )}
             <Box
               component="button"
               disabled={!manualTitle.trim() || !manualContent.trim() || isSubmitting}
@@ -1288,7 +1316,15 @@ function AddDataModal({ open, onClose, isDark, theme }: {
                     category: selectedCategory,
                     fields:   [{ key: 'content', label: 'Content', value: manualContent.trim() }],
                   },
-                  { onSuccess: handleClose },
+                  {
+                    onSuccess: () => {
+                      onToast?.('Data entry created successfully', 'success');
+                      handleClose();
+                    },
+                    onError: (err: any) => {
+                      onToast?.(err?.message || 'Failed to create entry', 'error');
+                    },
+                  },
                 );
               }}
               sx={{ width: '100%', border: 'none', cursor: manualTitle.trim() ? 'pointer' : 'not-allowed', py: 1.1, borderRadius: '12px', background: manualTitle.trim() ? 'linear-gradient(135deg, #c084fc, #818cf8)' : isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', color: manualTitle.trim() ? '#fff' : 'text.disabled', fontSize: '0.82rem', fontWeight: 700, transition: 'all 0.18s ease', boxShadow: manualTitle.trim() ? '0 4px 16px rgba(192,132,252,0.3)' : 'none', '&:hover': { opacity: manualTitle.trim() ? 0.9 : 1 }, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}
@@ -1321,6 +1357,11 @@ function AddDataModal({ open, onClose, isDark, theme }: {
                 {CATEGORY_CONFIG[selectedCategory].exampleColumns.join(' · ')}
               </Typography>
             </Box>
+            {connectSheet.isError && (
+              <Alert severity="error" sx={{ borderRadius: '10px', fontSize: '0.72rem', py: 0.5 }}>
+                {(connectSheet.error as any)?.message || 'Failed to connect Google Sheet'}
+              </Alert>
+            )}
             <Box
               component="button"
               disabled={!sheetUrl.trim() || !sheetSourceName.trim() || isSubmitting}
@@ -1328,7 +1369,15 @@ function AddDataModal({ open, onClose, isDark, theme }: {
                 if (!sheetUrl.trim() || !sheetSourceName.trim() || !selectedCategory) return;
                 connectSheet.mutate(
                   { name: sheetSourceName.trim(), sheet_url: sheetUrl.trim(), sheet_name: sheetName.trim() || undefined, category: selectedCategory },
-                  { onSuccess: handleClose },
+                  {
+                    onSuccess: () => {
+                      onToast?.('Google Sheet connected successfully', 'success');
+                      handleClose();
+                    },
+                    onError: (err: any) => {
+                      onToast?.(err?.message || 'Failed to connect Google Sheet', 'error');
+                    },
+                  },
                 );
               }}
               sx={{ width: '100%', border: 'none', cursor: sheetUrl.trim() ? 'pointer' : 'not-allowed', py: 1.1, borderRadius: '12px', background: sheetUrl.trim() ? 'linear-gradient(135deg, #60a5fa, #22d3ee)' : isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)', color: sheetUrl.trim() ? '#fff' : 'text.disabled', fontSize: '0.82rem', fontWeight: 700, transition: 'all 0.18s ease', boxShadow: sheetUrl.trim() ? '0 4px 16px rgba(96,165,250,0.3)' : 'none', '&:hover': { opacity: sheetUrl.trim() ? 0.9 : 1 }, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}
@@ -1654,7 +1703,13 @@ export default function MyDataPage() {
       )}
 
       {/* Add data modal */}
-      <AddDataModal open={modalOpen} onClose={() => setModalOpen(false)} isDark={isDark} theme={theme} />
+      <AddDataModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        onToast={(msg, severity) => setToast({ msg, severity })}
+        isDark={isDark}
+        theme={theme}
+      />
 
       {/* Toast notifications */}
       <Snackbar

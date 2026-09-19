@@ -47,13 +47,14 @@ async def init_redis(url: Optional[str] = None) -> bool:
         # Always use REDIS_URL from config — never use system env vars directly
         cfg = get_config()
         resolved_url = cfg.REDIS_URL   # single source of truth
+        from shared.utils.security import mask_url_credentials
         for attempt in range(3):
             try:
                 _redis_pool   = _build_pool_sync(resolved_url, 20)
                 _redis_client = redis.Redis(connection_pool=_redis_pool)
                 await asyncio.wait_for(_redis_client.ping(), timeout=10.0)
                 _initialized_url = resolved_url
-                logger.info("Redis connected | url=%s", resolved_url[:60])
+                logger.info("Redis connected | url=%s", mask_url_credentials(resolved_url))
                 return True
             except asyncio.TimeoutError:
                 logger.warning("Redis init timeout (attempt %d/3)", attempt + 1)
@@ -63,7 +64,7 @@ async def init_redis(url: Optional[str] = None) -> bool:
                 _redis_pool = _redis_client = None
             if attempt < 2:
                 await asyncio.sleep(1)
-        logger.error("Redis unavailable after 3 attempts — url=%s", resolved_url[:60])
+        logger.error("Redis unavailable after 3 attempts — url=%s", mask_url_credentials(resolved_url))
         return False
 
 

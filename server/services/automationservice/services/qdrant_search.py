@@ -1854,15 +1854,17 @@ def _apply_diversity_rerank(
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def run_hybrid_retrieval(
-    user_id:       str,
-    p1_output:     dict[str, Any],
+    user_id:           str,
+    p1_output:         dict[str, Any],
+    exclude_entry_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Execute Enterprise Hybrid Retrieval based on Processor #1 output.
 
     Args:
-        user_id   : Authenticated user UUID — injected into every Qdrant filter.
-        p1_output : Complete Processor #1 JSON output dict.
+        user_id           : Authenticated user UUID — injected into every Qdrant filter.
+        p1_output         : Complete Processor #1 JSON output dict.
+        exclude_entry_ids : List of entry IDs to exclude (already presented or rejected).
 
     Returns:
         {
@@ -1877,7 +1879,7 @@ async def run_hybrid_retrieval(
     retrieval_id = str(uuid.uuid4())[:12]
 
     try:
-        return await _run_hybrid_retrieval_inner(user_id, p1_output, retrieval_id, t0)
+        return await _run_hybrid_retrieval_inner(user_id, p1_output, retrieval_id, t0, exclude_entry_ids=exclude_entry_ids)
     except Exception as exc:
         elapsed = (time.monotonic() - t0) * 1000
         logger.error("[hybrid_retrieval] unhandled error | retrieval_id=%s: %s",
@@ -1895,10 +1897,11 @@ async def run_hybrid_retrieval(
 
 
 async def _run_hybrid_retrieval_inner(
-    user_id:       str,
-    p1_output:     dict[str, Any],
-    retrieval_id:  str,
-    t0:            float,
+    user_id:           str,
+    p1_output:         dict[str, Any],
+    retrieval_id:      str,
+    t0:                float,
+    exclude_entry_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Core implementation — separated for clean error boundary in public entry point."""
 
@@ -2197,6 +2200,19 @@ async def _run_hybrid_retrieval_inner(
             continue
         seen_entries.add(key)
         deduped.append(r)
+
+    # ── Exclude already presented or rejected entries ─────────────────────
+    if exclude_entry_ids:
+        exclude_set = set(str(e).strip().lower() for e in exclude_entry_ids if e)
+        initial_len = len(deduped)
+        deduped = [
+            r for r in deduped
+            if str(r.get("entry_id") or r.get("payload", {}).get("entry_id") or r.get("id") or "").strip().lower() not in exclude_set
+        ]
+        logger.info(
+            "[retrieval] applied exclusions | requested=%d filtered=%d remaining=%d",
+            len(exclude_set), initial_len - len(deduped), len(deduped),
+        )
 
     # Issue 7 defence: Ensure analytics docs don't rank above operational records
     # when analytics=False. Analytics docs are always pushed to the end.

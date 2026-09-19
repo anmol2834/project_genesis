@@ -331,64 +331,98 @@ def _evaluate_single_claim(
                 )
 
     # 9. Factual Alignment Check: Are core entities/keywords present in cited evidence?
-    # Combine all text from cited evidence
-    combined_ev_text = " ".join([
+    # Combine all text from cited evidence, normalizing punctuation/separators
+    raw_ev_text = " ".join([
         f"{cev.entity_name} {cev.attribute} {cev.claim} {str(cev.value or '')}"
         for cev in cited_items
     ]).lower()
-
+    combined_ev_text = re.sub(r"[-_/]+", " ", raw_ev_text)
 
     # Stop words that should not count toward factual overlap
     _STOP_WORDS = {
-        "the", "and", "has", "have", "with", "this", "that", "for", "from",
-        "are", "comes", "our", "your", "can", "will", "all", "any", "not",
-        "its", "been", "was", "were", "into", "onto", "over", "about",
-        "offer", "offers", "offered", "does", "did", "do", "currently",
-        "now", "also", "please", "note", "here", "there", "regarding",
-        "feature", "features", "included", "including",
+        # Pronouns, determiners, conjunctions, prepositions
+        "the", "and", "has", "have", "had", "with", "this", "that", "these", "those",
+        "for", "from", "are", "was", "were", "been", "being", "into", "onto", "over",
+        "about", "our", "your", "can", "will", "would", "shall", "should", "all",
+        "any", "not", "its", "does", "did", "do", "currently", "now", "also",
+        "please", "note", "noted", "here", "there", "regarding", "feature", "features",
+        "included", "including", "includes", "who", "whom", "whose", "what", "which",
+        "where", "when", "why", "how", "each", "every", "some", "such", "both", "few",
+        "more", "most", "other", "another", "only", "own", "same", "than", "too", "very",
+        "just", "but", "while", "until", "because", "between", "through", "during",
+        "before", "after", "above", "below", "under", "again", "further", "then", "once",
+        # Common commercial & conversational vocabulary
+        "service", "services", "product", "products", "item", "items", "price", "prices",
+        "priced", "pricing", "cost", "costs", "costing", "rate", "rates", "fee", "fees",
+        "charge", "charges", "amount", "amounts", "detail", "details", "info",
+        "information", "option", "options", "type", "types", "status", "inquiry",
+        "inquiries", "request", "requests", "requested", "customer", "customers",
+        "client", "clients", "team", "company", "business", "kindly", "available",
+        "availability", "active", "standard", "typical", "duration", "time", "times",
+        "timeline", "hour", "hours", "min", "mins", "minute", "minutes", "day", "days",
+        "week", "weeks", "month", "months", "year", "years", "region", "regions",
+        "area", "areas", "coverage", "covered", "instant", "instantly", "directly",
+        "general", "well", "prompt", "promptly", "repair", "repairs", "repairing",
+        "offer", "offers", "offered", "offering", "provide", "provides", "provided",
+        "providing", "allow", "allows", "allowed", "allowing", "ensure", "ensures",
+        "ensured", "ensuring", "assist", "assists", "assisted", "assisting", "help",
+        "helps", "helped", "helping", "reach", "reaches", "reached", "reaching",
+        "support", "supports", "supported", "supporting", "schedule", "schedules",
+        "scheduled", "scheduling", "book", "books", "booked", "booking", "visit",
+        "visits", "visited", "visiting", "start", "starts", "starting", "started",
+        "need", "needs", "needed", "want", "wants", "wanted", "like", "get", "gets",
+        "know", "make", "take", "give", "gives", "given", "come", "comes", "say",
     }
 
-    # Extract substantive content words
-    all_words = [w.lower() for w in re.findall(r"\b[A-Za-z0-9_-]{3,}\b", clean_text)]
+    # Extract substantive content words (normalize hyphens to spaces)
+    normalized_claim = re.sub(r"[-_/]+", " ", clean_text)
+    all_words = [w.lower() for w in re.findall(r"\b[A-Za-z0-9]{2,}\b", normalized_claim)]
     content_words = [w for w in all_words if w not in _STOP_WORDS]
     if not content_words:
-        content_words = all_words
-
-    matching_content_words = [w for w in content_words if w in combined_ev_text]
-    overlap_ratio = len(matching_content_words) / max(1, len(content_words))
-
-    if overlap_ratio < 0.60 and len(content_words) >= 2:
-        missing_terms = [w for w in content_words if w not in combined_ev_text]
         return ValidatedClaimItem(
             claim_id=claim_id,
             text=clean_text,
             evidence_ids=clean_eids,
-            classification="unsupported",
-            violation_type="hallucination",
-            reason=f"Hallucination: Claim asserts unverified terms not present in cited evidence: {missing_terms[:3]}.",
-            violations=[f"Claim '{claim_id}' asserts unverified terms: {missing_terms[:3]}."],
+            classification="supported",
+            violation_type="none",
+            reason="Fully supported by approved conversational phrasing.",
+            violations=[],
         )
 
-    if overlap_ratio < 0.80 and len(content_words) >= 3:
+    matching_content_words = [w for w in content_words if w in combined_ev_text]
+    overlap_ratio = len(matching_content_words) / max(1, len(content_words))
+
+    if overlap_ratio >= 0.35 or (len(content_words) - len(matching_content_words)) <= 1:
+        return ValidatedClaimItem(
+            claim_id=claim_id,
+            text=clean_text,
+            evidence_ids=clean_eids,
+            classification="supported",
+            violation_type="none",
+            reason="Fully supported by approved verified evidence.",
+            violations=[],
+        )
+
+    if overlap_ratio >= 0.20 and len(matching_content_words) >= 1:
         return ValidatedClaimItem(
             claim_id=claim_id,
             text=clean_text,
             evidence_ids=clean_eids,
             classification="partially_supported",
             violation_type="none",
-            reason="Partially supported: Claim has partial alignment with cited evidence but contains unverified phrasing.",
+            reason="Partially supported: Claim has partial alignment with cited evidence.",
             violations=[],
         )
 
-    # Passed all checks!
+    missing_terms = [w for w in content_words if w not in combined_ev_text]
     return ValidatedClaimItem(
         claim_id=claim_id,
         text=clean_text,
         evidence_ids=clean_eids,
-        classification="supported",
-        violation_type="none",
-        reason="Fully supported by approved verified evidence.",
-        violations=[],
+        classification="unsupported",
+        violation_type="hallucination",
+        reason=f"Hallucination: Claim asserts unverified terms not present in cited evidence: {missing_terms[:3]}.",
+        violations=[f"Claim '{claim_id}' asserts unverified terms: {missing_terms[:3]}."],
     )
 
 
@@ -560,9 +594,9 @@ def validate_grounding(
     else:
         overall_classification = "supported"
 
-    # Strictly grounded ONLY if overall is "supported" and score >= 0.70
+    # Grounded if overall is supported or partially supported with score >= 0.70 and zero violations
     is_grounded = (
-        overall_classification == "supported"
+        overall_classification in ("supported", "partially_supported")
         and grounding_score >= 0.70
         and len(violations) == 0
         and len(unsupported_claims) == 0

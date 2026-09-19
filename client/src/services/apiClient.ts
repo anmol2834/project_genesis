@@ -24,6 +24,11 @@ export const apiClient: AxiosInstance = axios.create({
 
 // ── Request interceptor: attach JWT ──────────────────────────────────────────
 apiClient.interceptors.request.use((config) => {
+  // If sending FormData in browser, delete Content-Type to let browser set multipart/form-data with boundary
+  if (typeof FormData !== 'undefined' && config.data instanceof FormData) {
+    delete config.headers['Content-Type'];
+  }
+
   if (typeof window !== 'undefined') {
     // Try to get token from auth_tokens (new format) or Proxipilot_token (legacy)
     let token = null;

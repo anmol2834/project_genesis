@@ -198,7 +198,7 @@ export const dataApi = {
     form.append('source_name', sourceName);
     form.append('category', category);
     return apiClient.post<IngestionJobResponse>(`${BASE}/upload`, form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      headers: { 'Content-Type': undefined },
     }).then(r => r.data);
   },
 

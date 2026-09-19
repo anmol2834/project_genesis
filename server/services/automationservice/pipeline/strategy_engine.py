@@ -58,11 +58,8 @@ def determine_response_strategy(
 
     customer_goal = ca.get("customer_goal") or "General Inquiry"
     clarification_flag = bool(rc.get("clarification_required", False))
-    escalation_requested = bool(
-        rd.get("escalation_requested", False)
-        or rd.get("requires_human_attention", False)
-        or open_esc.get("open", False)
-    )
+    explicit_escalation = bool(rd.get("escalation_requested", False))
+    history_escalation = bool(open_esc.get("open", False))
 
     approved_facts = context_package.approved_facts
     conflicts = context_package.conflicts
@@ -73,10 +70,28 @@ def determine_response_strategy(
     all_allowed_ids = [f.evidence_id for f in approved_facts if f.evidence_id not in prohibited_ids]
 
     # ── Check 1: Explicit Escalation or Critical Unresolved Conflict ───────────
-    # If customer asked for escalation, human agent, or severe complaint
-    if escalation_requested:
-        reason = rd.get("reason") or open_esc.get("reason") or "Customer requested escalation or human review."
+    # If customer explicitly requested human escalation / complaint
+    if explicit_escalation:
+        reason = rd.get("reason") or "Customer explicitly requested human review."
         logger.info("[strategy_engine] mode=escalate | reason=%s", reason)
+        return ResponseStrategy(
+            mode="escalate",
+            objective="Acknowledge the customer's request and confirm that their inquiry is routed to a human representative.",
+            required_sections=["greeting", "escalation_notice", "next_steps", "closing"],
+            allowed_actions=["confirm_handover"],
+            missing_information=["Human specialist review needed"],
+            required_clarifications=[],
+            allowed_facts=all_allowed_ids,
+            prohibited_facts=list(prohibited_ids),
+            allow_pricing=False,
+            allow_availability=False,
+            allow_alternatives=False,
+        )
+
+    # If prior escalation is pending and no operational/product facts match the current turn
+    if history_escalation and not product_facts:
+        reason = open_esc.get("reason") or "Pending escalation with no direct catalog match."
+        logger.info("[strategy_engine] mode=escalate | prior pending escalation | reason=%s", reason)
         return ResponseStrategy(
             mode="escalate",
             objective="Acknowledge the customer's request and confirm that their inquiry is routed to a human representative.",
@@ -289,12 +304,23 @@ def determine_response_strategy(
         )
 
     # ── Check 5: Direct Answer (Default Success Path) ─────────────────────────
-    logger.info("[strategy_engine] mode=answer | verified facts satisfy customer goal: %s", customer_goal[:50])
+    plan = p1.get("response_plan")
+    if plan and getattr(plan, "action_type", None) == "booking_confirmed":
+        req_sections = ["greeting", "confirmation", "closing"]
+        objective = "Concisely confirm the booking/scheduled service as requested. Do NOT re-pitch or ask if they want to proceed."
+    elif plan and getattr(plan, "action_type", None) == "closure":
+        req_sections = ["greeting", "acknowledgment", "closing"]
+        objective = "Politely acknowledge customer gratitude and close without asking questions."
+    else:
+        req_sections = ["greeting", "direct_answer", "closing"]
+        objective = f"Provide a direct, helpful, and professional response satisfying '{customer_goal}' using exclusively verified evidence."
+
+    logger.info("[strategy_engine] mode=answer | objective=%s", objective[:60])
     return ResponseStrategy(
         mode="answer",
-        objective=f"Provide a direct, thorough, and professional response satisfying '{customer_goal}' using exclusively verified evidence.",
-        required_sections=["greeting", "recommendation_or_answer", "key_specifications", "pricing_and_warranty", "closing"],
-        allowed_actions=["quote_price", "state_specs", "state_warranty", "state_policy"],
+        objective=objective,
+        required_sections=req_sections,
+        allowed_actions=["quote_price", "state_specs", "state_warranty", "state_policy", "confirm_booking"],
         missing_information=[],
         required_clarifications=[],
         allowed_facts=all_allowed_ids,
@@ -303,4 +329,5 @@ def determine_response_strategy(
         allow_availability=True,
         allow_alternatives=customer_requirements.communication.include_alternatives,
     )
+
 

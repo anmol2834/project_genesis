@@ -162,10 +162,20 @@ def build_grounded_context(
     conflicts: list[EvidenceConflict] = []
     prohibited_fact_ids: list[str] = []
 
+    # Attributes where multiple distinct values across offerings/channels are expected and complementary
+    MULTI_OPTION_ATTRIBUTES = {
+        "overview", "description", "name", "title", "contact_channel", "phone",
+        "email", "working_hours", "availability", "purpose_support_instructions",
+        "contact_support_item", "support_type", "department", "service_area",
+        "region", "delivery_type", "estimated_delivery", "delivery_timeline",
+        "delivered_item", "supported_brands", "common_problems", "typical_duration",
+        "service_type", "brand", "brands", "category", "appliance_category",
+        "service_name", "status", "priority_score", "service_description", "",
+    }
+
     attr_buckets: dict[tuple[str, str], list[VerifiedEvidence]] = {}
     for item in deduped_items:
-        # Ignore overview/summary strings for exact conflict checks
-        if item.attribute.lower() in ("overview", "description", "name", ""):
+        if item.attribute.lower() in MULTI_OPTION_ATTRIBUTES:
             continue
         bucket_key = (item.entity_name.lower(), item.attribute.lower())
         attr_buckets.setdefault(bucket_key, []).append(item)

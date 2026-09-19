@@ -148,32 +148,12 @@ async def run_processor_2(
     business_context: dict,
     p1_output: dict,
     retrieved_chunks: list[dict],
+    conversation_state: Any = None,
+    response_plan: Any = None,
+    signals: Any = None,
 ) -> dict[str, Any]:
     """
     Execute Grounded Response Generation Pipeline (Target 10-Stage Architecture).
-
-    Stages:
-        1. Verified Retrieval (Atomic VerifiedEvidence extraction)
-        2. Customer Requirements (Hard, Soft, Communication separation)
-        3. Grounded Context Builder (Relevance, Dedup, Conflict Detection)
-        4. Response Strategy Engine (Determines authorized mode)
-        5. Response Input Contract (Typed Pydantic contract)
-        6. OpenAI Call #2 (Pure grounded text generation)
-        7. Output Structure Validator (Typed schema enforcement)
-        8. Grounding Validator (Hallucination, price, & citation verification)
-        9. Response Policy Engine (Operational decisions & send_email gate)
-        10. Email Renderer & Response Assembly
-
-    Args:
-        messages: Previous thread messages.
-        latest_message: The triggering customer email message.
-        conversation_meta: Thread metadata (subject, thread_id, etc.).
-        business_context: Business profile from PostgreSQL users table.
-        p1_output: Complete output of Processor #1.
-        retrieved_chunks: Top reranked knowledge chunks from reranker.
-
-    Returns:
-        Structured response dict ready for dispatch to emailservice.
     """
     try:
         from pipeline.response_pipeline import run_grounded_response_pipeline
@@ -185,6 +165,9 @@ async def run_processor_2(
             business_context=business_context,
             p1_output=p1_output,
             retrieved_chunks=retrieved_chunks,
+            conversation_state=conversation_state,
+            response_plan=response_plan,
+            signals=signals,
         )
 
         return {

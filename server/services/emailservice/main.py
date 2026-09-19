@@ -382,6 +382,7 @@ async def _create_tables() -> None:
                 "ALTER TABLE es_messages DROP COLUMN IF EXISTS content_html",
                 "ALTER TABLE es_messages DROP COLUMN IF EXISTS metadata",
                 "ALTER TABLE es_conversations DROP COLUMN IF EXISTS summary",
+                "ALTER TABLE es_conversations ADD COLUMN IF NOT EXISTS conversation_state JSONB DEFAULT '{}'::jsonb",
                 "ALTER TABLE es_messages ADD COLUMN IF NOT EXISTS draft_message TEXT",
                 "ALTER TABLE es_messages ADD COLUMN IF NOT EXISTS message_state VARCHAR(20)",
                 # watch_status + last_watch_started_at — new columns for watch recovery system

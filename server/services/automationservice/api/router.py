@@ -35,6 +35,11 @@ from llm.processor_1 import run_processor_1
 from services.qdrant_search import run_hybrid_retrieval
 from services.reranker import rerank_candidates
 from llm.processor_2 import run_processor_2
+from services.conversation_state import parse_conversation_state, save_conversation_state
+from pipeline.slot_tracker import extract_signals_and_slots, update_conversation_state_with_signals
+from pipeline.retrieval_decision import RetrievalDecisionEngine
+from pipeline.response_planner import ResponsePlanner
+from pipeline.response_deduplicator import compute_response_hash
 
 logger = logging.getLogger("automationservice.router")
 
@@ -142,6 +147,24 @@ async def process_event(event: dict) -> dict:
     conv_meta      = context.get("conversation") or {}
     latest_message = context.get("latest_message") or {}
     messages       = context["messages"]
+
+    # ── Step 2.1: Load & Initialize Durable Conversation State (PostgreSQL) ───
+    conv_state = parse_conversation_state(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        thread_id=conv_meta.get("thread_id", thread_id),
+        raw_state=conv_meta.get("conversation_state"),
+    )
+
+    # ── Step 2.2: Extract Action Signals & Slots (Temporal, Contact, etc.) ─────
+    latest_content = latest_message.get("content") or latest_message.get("snippet") or ""
+    signals = extract_signals_and_slots(latest_content)
+    update_conversation_state_with_signals(conv_state, signals, latest_content)
+    logger.info(
+        "[CONV_STATE] conv=%s stage=%s status=%s slots=%s presented=%d",
+        conversation_id[:8], conv_state.stage.value, conv_state.status,
+        conv_state.confirmed_slots, len(conv_state.presented_entry_ids),
+    )
 
     # ── Step 2.5: Load Business Context (PostgreSQL) ───────────────────────────
     # Single indexed UUID query → < 20 ms.
@@ -301,15 +324,22 @@ async def process_event(event: dict) -> dict:
         }
         esc_state = _conversation_escalation_state[conversation_id]
     elif esc_state.get("open"):
-        # Prior escalation is still open — check if latest message resolves it
+        # Prior escalation is still open — check if latest message resolves it OR asks a fresh informational question
         RESOLUTION_SIGNALS = {
             "thank you", "thanks", "resolved", "never mind", "cancel",
             "forget it", "no need", "ok thanks", "got it",
         }
         latest_lower = (latest_message.get("content") or "").lower()
-        if any(sig in latest_lower for sig in RESOLUTION_SIGNALS):
+        has_resolution = any(sig in latest_lower for sig in RESOLUTION_SIGNALS)
+        is_fresh_inquiry = (
+            not current_escalation
+            and pi.get("category") in ("product_service", "delivery_shipping", "contact_support", "policies_legal", "offers_promotions")
+            and ca.get("customer_sentiment") not in ("frustrated", "negative")
+        )
+        if has_resolution or is_fresh_inquiry:
             _conversation_escalation_state[conversation_id]["open"] = False
-            logger.info("[ESCALATION] closed | conv=%s reason=resolution_signal", conversation_id[:8])
+            reason_str = "resolution_signal" if has_resolution else "fresh_inquiry_intent"
+            logger.info("[ESCALATION] closed | conv=%s reason=%s", conversation_id[:8], reason_str)
         else:
             logger.info(
                 "[ESCALATION] still open | conv=%s level=%s",
@@ -332,11 +362,36 @@ async def process_event(event: dict) -> dict:
             esc.get("level", "?"), (esc.get("reason") or "?")[:80],
         )
 
-    # ── Step 4: Hybrid Retrieval — Metadata-filtered Qdrant search ─────────────
-    retrieval_output = await run_hybrid_retrieval(
-        user_id   = user_id,
-        p1_output = p1_output,
+    # ── Step 3.5: Conditional Retrieval Decision Engine ───────────────────────
+    retrieval_decision = RetrievalDecisionEngine.evaluate(
+        latest_message=latest_content,
+        state=conv_state,
+        signals=signals,
+        p1_intent=pi,
     )
+
+    # ── Step 4: Hybrid Retrieval — Metadata-filtered Qdrant search (Conditional) ──
+    if retrieval_decision.should_retrieve:
+        retrieval_output = await run_hybrid_retrieval(
+            user_id           = user_id,
+            p1_output         = p1_output,
+            exclude_entry_ids = retrieval_decision.exclude_entry_ids,
+        )
+    else:
+        logger.info(
+            "[STEP 4] Skipping Qdrant hybrid retrieval | conv=%s reason=%s",
+            conversation_id[:8], retrieval_decision.reason,
+        )
+        retrieval_output = {
+            "retrieval_id":                    "skipped",
+            "categories_searched":             [],
+            "total_candidates_found":          0,
+            "total_candidates_after_filtering": 0,
+            "analytics_searched":              False,
+            "elapsed_ms":                      0.0,
+            "results":                         [],
+        }
+        p1_output["retrieval_skipped"] = True
 
     elapsed_ms = (time.monotonic() - t_start) * 1000
 
@@ -364,13 +419,31 @@ async def process_event(event: dict) -> dict:
     # ── Step 5: Cross-Encoder Reranking ────────────────────────────────────────
     standalone_query = (
         ca.get("standalone_query")
-        or (latest_message.get("content") or "")[:200]
+        or latest_content[:200]
         or pi.get("category", "inquiry")
     )
-    reranked_chunks = await rerank_candidates(
-        query=standalone_query,
-        candidates=retrieval_output.get("results", []),
-        top_k=7,
+    if retrieval_output.get("results"):
+        reranked_chunks = await rerank_candidates(
+            query=standalone_query,
+            candidates=retrieval_output.get("results", []),
+            top_k=7,
+        )
+    else:
+        reranked_chunks = []
+
+    # ── Step 5.5: Construct Response Plan (Delta-Only Answering) ───────────────
+    response_plan = ResponsePlanner.create_plan(
+        state=conv_state,
+        signals=signals,
+        decision=retrieval_decision,
+        latest_message=latest_content,
+        strategy_mode=p1_output.get("routing_decision", {}).get("strategy_mode", "answer"),
+    )
+    p1_output["response_plan"] = response_plan
+    logger.info(
+        "[RESPONSE_PLAN] conv=%s action_type=%s should_ask_q=%s should_close=%s",
+        conversation_id[:8], response_plan.action_type,
+        response_plan.should_ask_question, response_plan.should_close,
     )
 
     # ── Step 6: Grounded Response Generation Pipeline ─────────────────────────
@@ -381,7 +454,22 @@ async def process_event(event: dict) -> dict:
         business_context=biz_ctx,
         p1_output=p1_output,
         retrieved_chunks=reranked_chunks,
+        conversation_state=conv_state,
+        response_plan=response_plan,
+        signals=signals,
     )
+
+    # ── Step 6.5: Update & Commit Durable Conversation State to PostgreSQL ─────
+    sources_used = p2_output.get("sources_used") or []
+    conv_state.mark_presented(sources_used)
+    resp_body = p2_output.get("email_body", "")
+    if resp_body:
+        conv_state.last_assistant_response_hash = compute_response_hash(resp_body)
+        conv_state.response_count += 1
+    if response_plan.should_close:
+        conv_state.close(reason="plan_completed")
+
+    await save_conversation_state(conv_state)
 
     # Telemetry logging for pipeline stages
     strat_mode = p2_output.get("strategy_mode", "?")

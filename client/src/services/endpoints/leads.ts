@@ -52,5 +52,6 @@ export const leadsApi = {
   create: (payload: CreateLeadPayload)        => post<Lead>('/leads', payload),
   update: (id: string, p: Partial<Lead>)      => patch<Lead>(`/leads/${id}`, p),
   delete: (id: string)                        => del<void>(`/leads/${id}`),
-  import: (formData: FormData)                => post<{ imported: number; duplicates: number; skipped: number }>('/leads/import', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  import: (formData: FormData)                => post<{ imported: number; duplicates: number; skipped: number }>('/leads/import', formData, { headers: { 'Content-Type': undefined } }),
 };
+

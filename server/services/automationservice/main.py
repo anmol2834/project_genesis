@@ -189,11 +189,12 @@ async def lifespan(app: FastAPI):
     global _notify_task
 
     cfg = get_config()
+    from shared.utils.security import mask_url_credentials
 
     logger.info("=" * 60)
     logger.info("automationservice starting | port=%d env=%s", SERVICE_PORT, cfg.ENVIRONMENT)
-    logger.info("redis_url : %s...", cfg.REDIS_URL[:55])
-    logger.info("db_url    : %s...", cfg.DATABASE_URL[:60])
+    logger.info("redis_url : %s", mask_url_credentials(cfg.REDIS_URL))
+    logger.info("db_url    : %s", mask_url_credentials(cfg.DATABASE_URL))
     logger.info("=" * 60)
 
     # Redis connectivity check

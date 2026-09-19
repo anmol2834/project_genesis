@@ -172,6 +172,23 @@ def extract_verified_evidence(
             "entry_id", "id", "created_at", "updated_at", "is_deleted"
         }
 
+        # Entity name disambiguation for multi-entry categories
+        entity_name = title
+        if category == "contact_support":
+            channel = sd.get("contact_channel") or attrs.get("contact_channel")
+            item_name = sd.get("contact_support_item") or attrs.get("name")
+            if item_name and item_name.lower() != title.lower():
+                entity_name = f"{title} ({item_name})"
+            elif channel and channel.lower() != title.lower():
+                entity_name = f"{title} ({channel})"
+        elif category == "delivery_shipping":
+            region = sd.get("region") or sd.get("service_area") or attrs.get("region")
+            del_type = sd.get("delivery_type") or attrs.get("delivery_type")
+            if region and region.lower() != title.lower():
+                entity_name = f"{title} - {region}"
+            elif del_type and del_type.lower() != title.lower():
+                entity_name = f"{title} ({del_type})"
+
         # 2a. Atomic attributes (price, ram, cpu, warranty, etc.)
         for attr_key, attr_val in merged_attrs.items():
             if attr_key in INTERNAL_FIELDS or attr_val is None:
@@ -187,16 +204,14 @@ def extract_verified_evidence(
             seen_ids.add(ev_id)
 
             # Format human-readable claim
-            claim_text = f"{title} {attr_key}: {attr_str}"
-            if attr_key.lower() in ("price", "cost", "msrp"):
-                claim_text = f"{title} price is ${attr_str}" if not attr_str.startswith("$") else f"{title} price is {attr_str}"
+            claim_text = f"{entity_name} {attr_key}: {attr_str}"
 
             evidence_list.append(
                 VerifiedEvidence(
                     evidence_id=ev_id,
                     source_type=source_type,
                     source_id=entry_id,
-                    entity_name=title,
+                    entity_name=entity_name,
                     attribute=attr_key,
                     claim=claim_text,
                     value=attr_val,
@@ -222,9 +237,9 @@ def extract_verified_evidence(
                         evidence_id=overview_id,
                         source_type=source_type,
                         source_id=entry_id,
-                        entity_name=title,
+                        entity_name=entity_name,
                         attribute="overview",
-                        claim=f"{title}: {clean_summary}",
+                        claim=f"{entity_name}: {clean_summary}",
                         value=clean_summary,
                         status="verified",
                         allowed_for_customer_response=True,

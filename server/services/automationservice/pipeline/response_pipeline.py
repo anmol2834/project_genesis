@@ -195,6 +195,9 @@ async def run_grounded_response_pipeline(
     p1_output: dict[str, Any],
     retrieved_chunks: list[dict[str, Any]],
     email_dispatch_callback: Callable[[dict[str, Any]], Awaitable[bool]] | None = None,
+    conversation_state: Any = None,
+    response_plan: Any = None,
+    signals: Any = None,
 ) -> GroundedPipelineResponse:
     """
     Execute the complete 20-phase Grounded Response Generation Pipeline.
@@ -227,10 +230,13 @@ async def run_grounded_response_pipeline(
     )
     observer.record_stage("evidence_retrieval", (time.monotonic() - t_stage) * 1000, {"count": len(raw_evidence)})
 
-    # Failure State Check 1 & 2: No retrieval results or no evidence
-    if not retrieved_chunks:
+    # Failure State Check 1 & 2: No retrieval results or no evidence (bypassed if retrieval intentionally skipped)
+    retrieval_skipped = bool(p1_output.get("retrieval_skipped")) or (
+        response_plan and getattr(response_plan, "action_type", "") in ("booking_confirmed", "closure")
+    )
+    if not retrieved_chunks and not retrieval_skipped:
         failure_state = "NO_RETRIEVAL_RESULTS"
-    elif not raw_evidence:
+    elif not raw_evidence and not retrieval_skipped:
         failure_state = "NO_RELEVANT_EVIDENCE"
 
     # ── STAGE 2: CUSTOMER REQUIREMENTS ENGINE (PHASES 2-3) ─────────────────────
@@ -301,6 +307,22 @@ async def run_grounded_response_pipeline(
     reqs_block = _format_requirements_block(customer_reqs)
     evidence_block = context_package.format_prompt_block()
 
+    # Format response plan block
+    if response_plan:
+        plan_lines = [
+            f"Goal: {response_plan.answer_goal}",
+            f"Action Type: {response_plan.action_type}",
+            f"Delta-Only: {response_plan.is_delta_only}",
+            f"Should Ask Question: {response_plan.should_ask_question}",
+        ]
+        if response_plan.confirmed_slots:
+            plan_lines.append(f"Confirmed Slots: {response_plan.confirmed_slots}")
+        if not response_plan.should_ask_question:
+            plan_lines.append("CRITICAL: Do NOT ask any questions to the customer.")
+        response_plan_block = "\n".join(plan_lines)
+    else:
+        response_plan_block = "Answer the customer inquiry directly using verified evidence."
+
     user_prompt = GROUNDED_GENERATION_USER_TEMPLATE.format(
         business_context_block=biz_block,
         subject=subject,
@@ -309,6 +331,7 @@ async def run_grounded_response_pipeline(
         conversation_history=history_str,
         latest_message=fenced_customer_message,
         requirements_block=reqs_block,
+        response_plan_block=response_plan_block,
         strategy_mode=strategy.mode,
         strategy_objective=strategy.objective,
         strategy_required_sections=", ".join(strategy.required_sections),
@@ -330,6 +353,20 @@ async def run_grounded_response_pipeline(
         strategy=strategy,
         fallback_subject=subject,
     )
+
+    # ── STAGE 7b: RESPONSE DEDUPLICATION & ANTI-REPETITION GUARD ──────────────
+    if llm_output and structure_report.is_valid and response_plan and signals:
+        from pipeline.response_deduplicator import ResponseDeduplicator
+        biz_name = (business_context or {}).get("business_name") or "Our Team"
+        llm_output.body = ResponseDeduplicator.inspect_and_deduplicate(
+            proposed_body=llm_output.body,
+            messages=messages,
+            state=conversation_state,
+            plan=response_plan,
+            signals=signals,
+            business_name=biz_name,
+        )
+
     observer.record_stage("output_validation", (time.monotonic() - t_stage) * 1000, {"valid": structure_report.is_valid})
 
     if not structure_report.is_valid and failure_state is None:
@@ -345,6 +382,14 @@ async def run_grounded_response_pipeline(
         customer_requirements=customer_reqs,
         business_context=business_context,
     )
+
+    # If retrieval was intentionally skipped for action confirmation / gratitude closure,
+    # the response is grounded in conversation state rather than Qdrant documents.
+    if retrieval_skipped and response_plan and getattr(response_plan, "action_type", "") in ("booking_confirmed", "closure"):
+        grounding_report.is_grounded = True
+        grounding_report.grounding_score = 1.0
+        grounding_report.overall_classification = "supported"
+        grounding_report.violations = []
 
     # Check post-generation prompt injection compliance
     injection_violations = verify_no_injection_compliance(

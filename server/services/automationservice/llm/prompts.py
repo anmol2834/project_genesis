@@ -841,40 +841,34 @@ ESCALATION_TRIGGER_WORDS = frozenset({
     # Role-based escalation
     "manager",
     "supervisor",
-    "senior",
+    "senior manager",
     "head of",
-    "in charge",
     "director",
     "escalate",
     "escalation",
-    "representative",
-    "customer success",
-    # Human/person requests
-    "speak to",
-    "talk to",
-    "connect me",
-    "transfer me",
-    "put me through",
+    # Human/person demands
+    "speak to a human",
+    "talk to a human",
+    "speak to a person",
+    "talk to a person",
+    "connect me to a human",
+    "connect me to a person",
+    "transfer me to a human",
+    "transfer me to a person",
+    "put me through to a human",
     "another person",
     "someone else",
-    "your team",
-    "support team",
     "real person",
     "actual person",
     "live agent",
     "human agent",
     "need a human",
     "want a human",
-    "live support",
-    "get me a",
-    "let me speak",
-    "let me talk",
-    # Contact detail requests (routing signal)
-    "contact details",
-    "contact information",
-    "contact info",
-    "phone number",
-    "email address",
+    "live support agent",
+    "let me speak to a human",
+    "let me talk to a human",
+    "speak to a manager",
+    "talk to a manager",
     # Complaint routing signals
     "complaint team",
     "complaints department",
@@ -883,6 +877,8 @@ ESCALATION_TRIGGER_WORDS = frozenset({
     "file a complaint",
     "i want to complain",
     "i need to complain",
+    "legal action",
+    "consumer court",
 })
 
 # Universal impossibility thresholds — domain-agnostic.
@@ -1668,6 +1664,10 @@ STRUCTURED CUSTOMER REQUIREMENTS:
 ----------------------------------------
 {requirements_block}
 
+RESPONSE PLAN (MANDATED BY CONVERSATIONAL CONTROLLER — STRICT COMPLIANCE):
+----------------------------------------
+{response_plan_block}
+
 RESPONSE STRATEGY (MANDATED BY STRATEGY ENGINE — DO NOT OVERRIDE):
 ----------------------------------------
 Mandated Mode         : {strategy_mode}
@@ -1679,10 +1679,11 @@ Prohibited Fact IDs   : {strategy_prohibited_facts}
 {grounded_evidence_block}
 
 INSTRUCTIONS:
-1. Generate the response strictly conforming to the Mandated Mode: '{strategy_mode}'.
-2. Ground every factual claim in the approved evidence items above.
-3. Include all individual factual statements in the 'claims' list, each with 'claim_id', 'text', and the exact supporting 'evidence_ids' (e.g. ["ev_prod_laptop_price"]).
-4. Return ONLY valid JSON matching this exact schema:
+1. Generate the response strictly conforming to the Mandated Mode: '{strategy_mode}' and the Response Plan above.
+2. DELTA ANSWERING: Answer only the customer's immediate need. Do NOT repeat catalog descriptions, specifications, or prices already provided in previous turns.
+3. GROUNDING: Ground every factual claim in the approved evidence items above.
+4. QUESTIONS: Only ask a question if explicitly permitted in the Response Plan. Do not ask for information already known.
+5. Return ONLY valid JSON matching this exact schema:
 {{
   "response_mode": "{strategy_mode}",
   "subject": "{subject}",

@@ -69,6 +69,7 @@ async def fetch_thread_messages(
                         intent_type,
                         priority_score,
                         lead_status,
+                        conversation_state,
                         created_at,
                         updated_at
                     FROM es_conversations

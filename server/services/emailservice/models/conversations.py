@@ -54,6 +54,7 @@ class EmailConversation(Base):
     follow_up_required = Column(Boolean, default=False, nullable=False)
     last_follow_up_at  = Column(DateTime, nullable=True)
     tags               = Column(JSONB, nullable=True, default=list)
+    conversation_state = Column(JSONB, nullable=True, default=dict)
 
     # ── Timestamps ────────────────────────────────────────────────────────────
     created_at       = Column(DateTime, nullable=False, server_default=func.now())
