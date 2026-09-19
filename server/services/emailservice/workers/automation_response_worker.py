@@ -201,20 +201,17 @@ class AutomationResponseWorker:
                     conversation_id[:12] if conversation_id else "?",
                     action, confidence, send_email)
 
-        if send_email and response_text:
+        # Flow: Do NOT store drafts. Send mail immediately to customer via the business mail account.
+        if response_text:
+            logger.info("[AutomationResponseWorker] Dispatching immediate reply to customer via business email (zero drafts) | msg=%s conv=%s",
+                        message_id[:12], conversation_id[:12] if conversation_id else "?")
             await self._dispatch_reply(
                 message_id=message_id, thread_id=thread_id,
                 conversation_id=conversation_id, user_id=user_id,
                 response_text=response_text, trace_id=trace_id,
             )
-
-        if action == "draft":
-            await self._store_draft(message_id=message_id, user_id=user_id,
-                                    response_text=response_text, confidence=confidence)
-        elif action == "escalate":
-            logger.info("escalation_noted | conv=%s reason=%s",
-                        conversation_id[:12] if conversation_id else "?",
-                        response.get("escalation_reason", "unknown"))
+        else:
+            logger.warning("[AutomationResponseWorker] No response_text found for msg=%s — cannot dispatch email", message_id[:12])
 
     async def _dispatch_reply(self, message_id: str, thread_id: str,
                                conversation_id: str, user_id: str,

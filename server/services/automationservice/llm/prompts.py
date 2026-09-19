@@ -11,6 +11,7 @@ v6 changes — Analytics-Aware Retrieval Planning:
   - Analytics must be triggered by EXPLICIT signals only — NOT by
     "recommend", "best", "top" (those remain product_service retrieval).
 """
+import os
 
 ALLOWED_CATEGORIES = [
     "product_service",
@@ -1624,3 +1625,78 @@ TASK:
 2. Formulate the response JSON according to the schema.
 3. If answerable, compose the complete, ready-to-send 'email_body' based exclusively on the verified facts above.
 4. Output valid JSON now."""
+
+
+# ==============================================================================
+# GROUNDED RESPONSE GENERATION PIPELINE — OPENAI CALL #2 PROMPTS (PHASE 8 & 9)
+# ==============================================================================
+
+# Version-controlled prompt artifact path
+_OPENAI_2_ARTIFACT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "prompts",
+    "openai_call_2_system_prompt.txt",
+)
+
+if os.path.exists(_OPENAI_2_ARTIFACT_PATH):
+    with open(_OPENAI_2_ARTIFACT_PATH, "r", encoding="utf-8") as _f:
+        GROUNDED_GENERATION_SYSTEM_PROMPT = _f.read().strip()
+else:
+    # Inline fallback if artifact is moved
+    GROUNDED_GENERATION_SYSTEM_PROMPT = """You are the response-generation component of a grounded business communication system.
+You are NOT the source of truth.
+All business facts available to you are supplied by an upstream verified-evidence system.
+Your task is to compose the best customer-facing response that satisfies the provided response strategy, customer requirements, business communication rules, and evidence constraints."""
+
+GROUNDED_GENERATION_USER_TEMPLATE = """{business_context_block}
+
+CUSTOMER CONVERSATION CONTEXT:
+----------------------------------------
+Subject               : {subject}
+Customer Goal         : {customer_goal}
+Customer Sentiment    : {customer_sentiment}
+
+CONVERSATION HISTORY:
+----------------------------------------
+{conversation_history}
+
+LATEST CUSTOMER MESSAGE:
+----------------------------------------
+{latest_message}
+
+STRUCTURED CUSTOMER REQUIREMENTS:
+----------------------------------------
+{requirements_block}
+
+RESPONSE STRATEGY (MANDATED BY STRATEGY ENGINE — DO NOT OVERRIDE):
+----------------------------------------
+Mandated Mode         : {strategy_mode}
+Strategy Objective    : {strategy_objective}
+Required Sections     : {strategy_required_sections}
+Allowed Actions       : {strategy_allowed_actions}
+Prohibited Fact IDs   : {strategy_prohibited_facts}
+
+{grounded_evidence_block}
+
+INSTRUCTIONS:
+1. Generate the response strictly conforming to the Mandated Mode: '{strategy_mode}'.
+2. Ground every factual claim in the approved evidence items above.
+3. Include all individual factual statements in the 'claims' list, each with 'claim_id', 'text', and the exact supporting 'evidence_ids' (e.g. ["ev_prod_laptop_price"]).
+4. Return ONLY valid JSON matching this exact schema:
+{{
+  "response_mode": "{strategy_mode}",
+  "subject": "{subject}",
+  "body": "Customer-ready email prose",
+  "claims": [
+    {{
+      "claim_id": "c1",
+      "text": "Specific factual claim stated in the body",
+      "evidence_ids": ["ev_id_1"]
+    }}
+  ],
+  "missing_information": [],
+  "limitations": [],
+  "requires_human_review": false
+}}"""
+
+

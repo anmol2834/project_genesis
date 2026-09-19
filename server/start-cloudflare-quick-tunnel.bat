@@ -30,5 +30,6 @@ if "%CLOUDFLARED_CMD%"=="" (
     exit /b 1
 )
 
-"%CLOUDFLARED_CMD%" tunnel --url http://127.0.0.1:8004
+"%CLOUDFLARED_CMD%" tunnel --protocol http2 --url http://127.0.0.1:8004
 pause
+

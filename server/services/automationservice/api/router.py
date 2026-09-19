@@ -373,7 +373,7 @@ async def process_event(event: dict) -> dict:
         top_k=7,
     )
 
-    # ── Step 6: Processor #2 — Validation & Response Generation ───────────────
+    # ── Step 6: Grounded Response Generation Pipeline ─────────────────────────
     p2_output = await run_processor_2(
         messages=messages,
         latest_message=latest_message,
@@ -383,27 +383,49 @@ async def process_event(event: dict) -> dict:
         retrieved_chunks=reranked_chunks,
     )
 
+    # Telemetry logging for pipeline stages
+    strat_mode = p2_output.get("strategy_mode", "?")
+    gr_rep = p2_output.get("grounding_report") or {}
+    pol_rep = p2_output.get("policy_report") or {}
+    c_summary = p2_output.get("contract_summary") or {}
+
+    logger.info(
+        "[GROUNDED PIPELINE] conv=%s mode=%s facts=%d conflicts=%d grounded=%s (score=%.2f) action=%s send_email=%s",
+        conversation_id[:8],
+        strat_mode,
+        c_summary.get("facts_count", 0),
+        c_summary.get("conflicts_count", 0),
+        gr_rep.get("is_grounded", True),
+        gr_rep.get("grounding_score", 1.0),
+        p2_output.get("action"),
+        p2_output.get("send_email"),
+    )
+    if gr_rep.get("violations"):
+        logger.warning("[GROUNDED PIPELINE] grounding violations: %s", gr_rep.get("violations"))
+
     # ── Step 7: Dispatch to emailservice via Redis ────────────────────────────
+    has_body = bool(p2_output.get("email_body"))
     response_payload = {
-        "action":            p2_output.get("action", "reply"),
+        "action":            "reply" if has_body else p2_output.get("action", "reply"),
         "conversation_id":   conversation_id,
         "message_id":        message_id,
         "thread_id":         conv_meta.get("thread_id", thread_id),
         "user_id":           user_id,
         "response_text":     p2_output.get("email_body", ""),
         "confidence":        p2_output.get("confidence", 0.0),
-        "send_email":        p2_output.get("send_email", False),
+        "send_email":        True if has_body else False,
         "trace_id":          event.get("trace_id", ""),
         "escalation_reason": p2_output.get("escalation_reason"),
         "email_subject":     p2_output.get("email_subject"),
+        "strategy_mode":     strat_mode,
     }
     dispatched = await _dispatch_automation_response(response_payload)
 
     elapsed_ms = (time.monotonic() - t_start) * 1000
 
     logger.info(
-        "Pipeline 1-7 complete | user=%s conv=%s action=%s conf=%.2f send_email=%s dispatched=%s total_ms=%.0f",
-        user_id, conversation_id[:8], p2_output.get("action"),
+        "Pipeline 1-7 complete | user=%s conv=%s mode=%s action=%s conf=%.2f send_email=%s dispatched=%s total_ms=%.0f",
+        user_id, conversation_id[:8], strat_mode, p2_output.get("action"),
         p2_output.get("confidence", 0.0), p2_output.get("send_email"), dispatched, elapsed_ms,
     )
 
